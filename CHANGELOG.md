@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.3...v0.2.0) (2025-07-23)
+
+
+### 🧹 Miscellaneous Chores
+
+* force version ([76a8242](https://github.com/gseg-ethz/GSEGUtils/commit/76a82427dbd583a752c940d04753bce2b1535a75))
+
 ## [0.1.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.2...v0.1.3) (2025-07-23)
 
 
