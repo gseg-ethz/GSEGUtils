@@ -32,7 +32,7 @@ dynamic = ["version", "readme"]
 
 dependencies = [ # https://packaging.python.org/en/latest/specifications/dependency-specifiers/#dependency-specifiers
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
-    "numpy ~= 2.3",
+    "numpy ~= 2.2",
     "pydantic ~= 2.11",
     "numpydantic ~= 1.6",
 ]
