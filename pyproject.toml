@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "GSEGUtils"
+description = "Description of ModuleA"
+authors = [
+    {name = "Nicholas Meyer", email = "meyernic@ethz.ch"},
+    {name = "Jon Allemand", email = "jonal@ethz.ch"},
+]
+maintainers = [
+    {name = "Nicholas Meyer", email = "meyernic@ethz.ch"},
+]
+requires-python = ">=3.12"
+keywords = ["ONE", "TWO"]
+license = {text = "Proprietary"} # To be changed once released
+classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#classifiers
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
+    "Framework :: Pydantic",
+
+    "Private :: Do Not Upload" # REMOVE BEFORE FLIGHT -- PyPI will always reject packages with classifiers beginning with Private ::
+]
+
+dynamic = ["version", "readme"]
+
+dependencies = [ # https://packaging.python.org/en/latest/specifications/dependency-specifiers/#dependency-specifiers
+                # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
+    "numpy ~= 2.3",
+    "pydantic ~= 2.11",
+    "numpydantic ~= 1.6",
+]
+
+[tool.setuptools.dynamic]
+readme = {file = ["README.md"]}
+
+[tool.setuptools_scm]
+write_to = "src/GSEGUtils/_version.py"
+local_scheme = "no-local-version"
+version_scheme = "post-release"
+
+[project.urls]
+#Homepage = "https://example.com"
+#Documentation = "https://readthedocs.org"
+Repository = "https://github.com/gseg-ethz/GSEGUtils.git"
+Issues = "https://github.com/gseg-ethz/GSEGUtils/issues"
+Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+doc = ["sphinx"]
+dev = [
+    "black",  # Code formatter to make it consistant with PEP rules
+    "flake8", # Code linter: Analyzes source code for errors, vulnerabilities, and stylistic issues
+]
+
+#[project.scripts]
+#moduleA-cli = "GSEGUtils.cli:main_cli"
