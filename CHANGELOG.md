@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.2...v0.1.3) (2025-07-23)
+
+
+### ✨ Features
+
+* Added 'lazy_disk_cache' and 'singleton' meta ([bbb7af6](https://github.com/gseg-ethz/GSEGUtils/commit/bbb7af602e9930fc2481a1f0f2349dbbb03097ca))
+
 ## [0.1.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.1...v0.1.2) (2025-07-23)
 
 
