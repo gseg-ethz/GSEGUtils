@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.1...v0.1.2) (2025-07-23)
+
+
+### 🔨 Build System
+
+* Changed version naming to ignore coarse tags ([3ada5e5](https://github.com/gseg-ethz/GSEGUtils/commit/3ada5e58a69e1d8a17ed67bcedc5728651aa95dd))
+
 ## [0.1.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.0...v0.1.1) (2025-07-23)
 
 
