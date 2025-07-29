@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.2.0...v0.3.0) (2025-07-23)
+
+
+### ✨ Features
+
+* Added logging setup ([ecaebc7](https://github.com/gseg-ethz/GSEGUtils/commit/ecaebc746ac4a6887072d1919f0ffb8b73adb752))
+
+
+### 🔨 Build System
+
+* Loosened numpy requirements ([e8f208f](https://github.com/gseg-ethz/GSEGUtils/commit/e8f208f91c27668c2cf0edf868ef8852f6372e37))
+* Loosened numpy requirements further ([b21a14f](https://github.com/gseg-ethz/GSEGUtils/commit/b21a14fc876f9851df43a84d413e53cc317d1fab))
+
 ## [0.2.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.1.3...v0.2.0) (2025-07-23)
 
 
