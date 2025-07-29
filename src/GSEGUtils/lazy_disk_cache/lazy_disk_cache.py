@@ -14,7 +14,7 @@ from numpy.typing import NDArray, DTypeLike
 from pydantic import validate_call, ConfigDict
 from pydantic.dataclasses import dataclass
 
-from .config import get_defaults, CacheDefaults
+from GSEGUtils.config import get_defaults, CacheDefaults
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +52,12 @@ class LazyDiskCache(ABC):
         if config.cache_path is None:
             fd, cache_path = tempfile.mkstemp(suffix=self._MEMMAP_SUFFIX) # Todo: Think about a case where the provided path is a dir
             os.close(fd)
-            cache_path = Path(cache_path)
+            self._cache_path = Path(cache_path)
+        else:
+            self._cache_path = config.cache_path
         # elif cache_path.is_dir():
 
-        self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX)
+        # self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX) if cache_path else None
         self._automatic_offloading = config.automatic_offloading #and (cache_path is not None)
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
