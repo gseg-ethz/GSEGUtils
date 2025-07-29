@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.0...v0.3.1) (2025-07-29)
+
+
+### ✨ Features
+
+* Encapsuled setting for lazy disk caching into Config dataclass ([3aef2cb](https://github.com/gseg-ethz/GSEGUtils/commit/3aef2cbdda56e026ce125dbec69147f79a9d64f4))
+
+
+### 🧹 Miscellaneous Chores
+
+* Merge remote-tracking branch 'origin/main' ([a3c9b73](https://github.com/gseg-ethz/GSEGUtils/commit/a3c9b73dc07181c8923c79f355a5c8e9c096525f))
+
 ## [0.3.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.2.0...v0.3.0) (2025-07-23)
 
 
