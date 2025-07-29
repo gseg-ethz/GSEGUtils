@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.1...v0.3.2) (2025-07-29)
+
+
+### ✨ Features
+
+* Added DiskBackedNDArray ([ae2771a](https://github.com/gseg-ethz/GSEGUtils/commit/ae2771ae98feb66d17916c08e26dc2e7c83aaa26))
+
 ## [0.3.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.0...v0.3.1) (2025-07-29)
 
 
