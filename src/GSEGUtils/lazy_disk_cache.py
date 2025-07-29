@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from functools import wraps
 from pathlib import Path
 import threading
-from typing import Optional, Any, Literal, Unpack
+from typing import Optional, Any, Literal, Unpack, TypedDict, Required, NotRequired
 import logging
 import weakref
 import tempfile
@@ -11,33 +11,53 @@ import os
 import numpy as np
 from numpy.typing import NDArray, DTypeLike
 
+from pydantic import validate_call, ConfigDict
+from pydantic.dataclasses import dataclass
+
 from .config import get_defaults, CacheDefaults
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True), frozen=True)
+class LazyDiskCacheConfig:
+    enable_caching: bool = False
+    cache_path: Optional[Path] = None
+    purge_disk_on_gc: bool = True
+    automatic_offloading: bool = False
+
+class LazyDiskCacheKw(TypedDict, total=False):
+    enable_caching: bool
+    cache_path: Optional[Path]
+    purge_disk_on_gc: bool
+    automatic_offloading: bool
+
 class LazyDiskCache(ABC):
     _MEMMAP_SUFFIX = ".dat"
 
+    @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def __init__(
             self,
-            enable_caching: bool = True,
-            cache_path: Optional[Path] = None,
-            purge_disk_on_gc: bool = True,
-            **overrides: Unpack[CacheDefaults],
+            **settings: Unpack[LazyDiskCacheKw],
+            # **overrides: Unpack[CacheDefaults],
     ) -> None:
-        defaults = get_defaults()
-        automatic_offloading = overrides.get("preset_automatic_offloading", defaults["preset_automatic_offloading"])
+        config = LazyDiskCacheConfig(**settings)
+        self._init_from_config(config)
 
-        self._enable_caching = enable_caching
-        if cache_path is None:
+
+    def _init_from_config(self, config: LazyDiskCacheConfig) -> None:
+        # defaults = get_defaults()
+        # automatic_offloading = overrides.get("preset_automatic_offloading", defaults["preset_automatic_offloading"])
+        self._enable_caching = config.enable_caching
+        if config.cache_path is None:
             fd, cache_path = tempfile.mkstemp(suffix=self._MEMMAP_SUFFIX) # Todo: Think about a case where the provided path is a dir
             os.close(fd)
             cache_path = Path(cache_path)
         # elif cache_path.is_dir():
 
         self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX)
-        self._automatic_offloading = automatic_offloading #and (cache_path is not None)
-        self._purge_disk_on_gc = purge_disk_on_gc
+        self._automatic_offloading = config.automatic_offloading #and (cache_path is not None)
+        self._purge_disk_on_gc = config.purge_disk_on_gc
 
         self._lock = threading.RLock()
         # track in-memory state
@@ -48,7 +68,7 @@ class LazyDiskCache(ABC):
         else:
             self._convert_to_ndarray()
 
-        if automatic_offloading:
+        if config.automatic_offloading:
             self.offload()
         if self._cache_path and self._purge_disk_on_gc:
             self._finalizer = weakref.finalize(self, lambda p = self._cache_path: p.unlink(missing_ok=True))
