@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
+from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
 import threading
-from typing import Optional, Any, Literal, Unpack, TypedDict, Required, NotRequired
+from typing import Optional, Any, Literal, Unpack, TypedDict, Required, NotRequired, Self
 import logging
 import weakref
 import tempfile
@@ -25,6 +26,14 @@ class LazyDiskCacheConfig:
     cache_path: Optional[Path] = None
     purge_disk_on_gc: bool = True
     automatic_offloading: bool = False
+
+    @validate_call()
+    def extend_cache_path(self, new_folder: str) -> Self:
+        config_dict = asdict(self)
+        old_path = config_dict.pop("cache_path")
+        old_path = old_path / new_folder if old_path else None
+        config_dict["cache_path"] = old_path
+        return type(self)(**config_dict)
 
 class LazyDiskCacheKw(TypedDict, total=False):
     enable_caching: bool
@@ -54,7 +63,7 @@ class LazyDiskCache(ABC):
             os.close(fd)
             self._cache_path = Path(cache_path)
         else:
-            self._cache_path = config.cache_path
+            self._cache_path = config.cache_path.with_suffix(self._MEMMAP_SUFFIX)
         # elif cache_path.is_dir():
 
         # self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX) if cache_path else None
@@ -220,7 +229,11 @@ class LazyDiskCache(ABC):
     def offload(self) -> None:
         """Flush the current buffer to disk, drop the in-RAM array, and mark offloaded."""
         with self._lock:
-            if not self._enable_caching or self.offloaded:
+            if not self._enable_caching:
+                logger.info(f"Caching disabled ==> {self.__class__}.`offload()` ignored for {id(self)}.")
+                return
+            if self.offloaded:
+                logger.info(f"{self.__class__}: {id(self)} already offloaded to {self.cache_path}.")
                 return
 
             # make sure we have a memmap buffer
@@ -280,11 +293,26 @@ class LazyDiskCache(ABC):
             logger.debug(f"Loaded buffer from {self._cache_path}.\\r\\n"
                          f"Min value: {np.nanmin(self._mmap)}; Max value: {np.nanmax(self._mmap)}")
 
+    # def __reduce__(self):
+    #     self.disable_purge()
+    #
+    #     if self.cache_enabled:
+    #         self.offload()
+    #
+    #     init_kwargs = {
+    #             "enable_caching": self.enable_caching,
+    #             "cache_path": Optional[Path]
+    #             "purge_disk_on_gc": bool
+    #             "automatic_offloading": bool
+    #     }
+    
+    
     def __getstate__(self):
-        if hasattr(self, "_finalizer"):
-            self._finalizer.detach()
+        # if hasattr(self, "_finalizer"):
+        #     self._finalizer.detach()
+        self.disable_purge()
 
-        if self.cache_path:
+        if self.cache_enabled:
             self.offload()
         state = self.__dict__.copy()
         state.pop("_lock", None)
@@ -293,8 +321,8 @@ class LazyDiskCache(ABC):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._lock = threading.RLock()
-        if self._cache_path and self._purge_disk_on_gc:
-            self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
+        # if self._cache_path and self._purge_disk_on_gc:
+        #     self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
 
 
     @abstractmethod

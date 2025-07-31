@@ -38,8 +38,10 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
     def __getitem__(self, key):
         return self._data[key]
 
-    @LazyDiskCache.ensure_loaded
+    @property
     def data(self):
+        if self.offloaded:
+            self.load()
         return self._data
 
     def _describe_buffer(self) -> tuple[tuple[int, ...], DTypeLike, np.ndarray]:
