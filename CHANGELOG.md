@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.2...v0.3.3) (2025-07-31)
+
+
+### 🐛 Bug Fixes
+
+* **lazy_disk_cache:** Force deactivate `purge_disk_on_gc` ([6e27999](https://github.com/gseg-ethz/GSEGUtils/commit/6e27999fc1bd838b57e8b387e4f13b6f0aa49fda))
+
 ## [0.3.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.1...v0.3.2) (2025-07-29)
 
 
