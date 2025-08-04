@@ -82,7 +82,7 @@ class LazyDiskCache(ABC):
         if config.automatic_offloading:
             self.offload()
         if self._cache_path and self._purge_disk_on_gc:
-            self._finalizer = weakref.finalize(self, lambda p = self._cache_path: p.unlink(missing_ok=True))
+            self._finalizer = weakref.finalize(self, lambda p = self._cache_path: p.unlink(missing_ok=True)) # type: ignore
 
 
     def _convert_to_memmap(self) -> None:
@@ -244,14 +244,14 @@ class LazyDiskCache(ABC):
             shape, dtype, array = self._describe_buffer()
             if not isinstance(self._mmap, np.memmap):
                 # should not really happen, but just in case:
-                self._mmap[:] = np.array(array, dtype=dtype, copy=True)
+                self._mmap[:] = np.array(array, dtype=dtype, copy=True) # type: ignore
             else:
                 # if subclass buffer is plain ndarray, copy it in
                 if not isinstance(array, np.memmap):
                     self._mmap[:] = array
 
             # 2) flush to disk
-            self._mmap.flush()
+            self._mmap.flush()  # type: ignore
 
             # 3) drop the Python buffer and memmap handle
             self._drop_buffer()

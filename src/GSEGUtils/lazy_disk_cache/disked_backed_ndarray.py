@@ -48,7 +48,7 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
         return self._shape, self._dtype, self._data
 
     def _drop_buffer(self) -> None:
-        self._data = None
+        self._data = None   # type: ignore
 
     def _describe_shape_dtype(self) -> tuple[tuple[int, ...], DTypeLike]:
         return self._shape, self._dtype
