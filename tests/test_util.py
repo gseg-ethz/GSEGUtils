@@ -54,7 +54,7 @@ class TestConvertAngle:
         large_array = np.linspace(0, 100, 500)
         assert len(convert_angles(large_array, AngleUnit.RAD, AngleUnit.GON)) == 500
 
-    def test_out_parameter(self):
+    def test_out_parameter(self, caplog):
         values = np.array([np.pi, np.pi / 2])
         out = np.zeros_like(values)
         convert_angles(values, AngleUnit.RAD, AngleUnit.DEGREE, out=out)
@@ -72,11 +72,17 @@ class TestConvertAngle:
         out = 2.0
         value = 3.0
         id_value = id(value)
+        before_value = value
         id_out = id(out)
+        before_out = out
         assert out != value
         returned = convert_angles(value, AngleUnit.RAD, AngleUnit.RAD, out=out)
-        assert id_value != id_out
+        assert id_value == id(value)
+        assert before_value == value    # hasn't changed
+        assert id(out) == id_out
+        assert before_out == out        # hasn't changed
         assert returned is None
+        assert 'Input values are not an ndarray' in caplog.text
 
     def test_inplace(self):
         values = np.array([np.pi, np.pi / 2])

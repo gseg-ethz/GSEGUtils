@@ -134,13 +134,16 @@ def convert_angles(
 
     if out is not None:
         out = cast(npt.NDArray[np.floating], out)
+        if not isinstance(out, np.ndarray):
+            logger.warning(f"Input values are not an ndarray, returning None and not assigning converted values")
+            return None
 
     if source_unit == target_unit:
         if out is None:
             return values
         else:
             if isinstance(values, np.ndarray):
-                out[:] = values
+                out[...] = values
             return None
 
 
