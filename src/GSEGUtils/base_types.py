@@ -56,6 +56,9 @@ Array_4x4_T = NDArray[Shape["4, 4"], ArrayDtypes]       # Affine Transformation
 Array_Nx3_Float_T = NDArray[Shape["*, 3"], Float]
 Array_Nx3_Float32_T = NDArray[Shape["*, 3"], Float32]   # Optimised coordinates
 Array_Nx3_Uint8_T = NDArray[Shape["*, 3"], UInt8]       # RGB
+Array_Nx2_Float_T = NDArray[Shape["*, 2"], Float]       # Image Coordinate Pairs
+Array_Nx2_Float32_T = NDArray[Shape["*, 2"], Float32]
+Array_Nx2_Uint8_T = NDArray[Shape["*, 2"], UInt8]
 
 # ======== VECTOR TYPES ========
 VectorT = NDArray[Shape["*"], ArrayDtypes]              # Scalar Fields
