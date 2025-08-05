@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.4](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.3...v0.3.4) (2025-08-05)
+
+
+### 🤖 Continuous Integration
+
+* Change fetch depth in release-please ([adb0041](https://github.com/gseg-ethz/GSEGUtils/commit/adb0041a3a323253dad13bbe1b89b5886049d0a6))
+* Reverted release-type ([7cf2c8a](https://github.com/gseg-ethz/GSEGUtils/commit/7cf2c8a046b9a5e5f215d46deb15bf1a9cfe460d))
+
 ## [0.3.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.2...v0.3.3) (2025-07-31)
 
 
