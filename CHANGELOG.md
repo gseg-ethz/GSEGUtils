@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.0...v0.4.1) (2025-08-06)
+
+
+### 🧹 Miscellaneous Chores
+
+* Merge branch 'dev' into 'main' ([e3afd87](https://github.com/gseg-ethz/GSEGUtils/commit/e3afd878b0f1f2dad6794268a1a0d61ef116d751))
+* Merge remote-tracking branch 'origin/dev' into dev ([e3f8705](https://github.com/gseg-ethz/GSEGUtils/commit/e3f870563e9786c3cb93eb89b959cb3971b334ad))
+
 ## [0.4.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.4...v0.4.0) (2025-08-06)
 
 
