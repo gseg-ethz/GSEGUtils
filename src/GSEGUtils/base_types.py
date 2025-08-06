@@ -11,6 +11,7 @@ from numpydantic.dtype import (  # type: ignore[import-untyped]
     Int8, Int16, Int32, Int64, SignedInteger,
     UInt8, UInt16, UInt32, UnsignedInteger
 )
+from numpydantic.types import NDArrayType, DtypeType, ShapeType
 from pydantic import StringConstraints
 
 LowerStr = Annotated[str, StringConstraints(strip_whitespace=True, to_lower=True)]
@@ -25,6 +26,27 @@ NumberLikeT: TypeAlias = complex | np.number | np.bool
 
 # ======== ARRAY TYPES ========
 ArrayT =                        NDArray[Shape["*, ..."], ArrayDtypes]
+"""
+| *[int, ...] Generic NDArray type* 
+|
+| Additional specific dtyped definitions: 
+
+    * **Array_Float_T**
+    * **Array_Integer_T**
+    * **Array_SignedInteger_T**
+    * **Array_UnsignedInteger_T**
+    * **Array_Bool_T**
+    * **Array_Float32_T**
+    * **Array_Float64_T**
+    * **Array_Int8_T**
+    * **Array_Int16_T**
+    * **Array_Int32_T**
+    * **Array_Int64_T**
+    * **Array_Uint8_T**
+    * **Array_Uint16_T**
+    * **Array_Uint32_T**
+
+"""
 
 # Generalised dtypes
 Array_Float_T =                 NDArray[Shape["*, ..."], Float]
@@ -46,7 +68,27 @@ Array_Uint32_T =                NDArray[Shape["*, ..."], UInt32]
 
 # Size constrained
 Array_NxM_T =                   NDArray[Shape["*, *"], ArrayDtypes]       # Intensity/depth image
+"""
+| [NxM] Generic NDArray type
+|
+| Additional specific dtyped definitions:
 
+    * **Array_NxM_Float_T**
+    * **Array_NxM_Integer_T**
+    * **Array_NxM_SignedInteger_T**
+    * **Array_NxM_UnsignedInteger_T**
+    * **Array_NxM_Bool_T**
+    * **Array_NxM_Float32_T**
+    * **Array_NxM_Float64_T**
+    * **Array_NxM_Int8_T**
+    * **Array_NxM_Int16_T**
+    * **Array_NxM_Int32_T**
+    * **Array_NxM_Int64_T**
+    * **Array_NxM_Uint8_T**
+    * **Array_NxM_Uint16_T**
+    * **Array_NxM_Uint32_T**
+
+"""
 # 2D Generalised dtypes
 Array_NxM_Float_T =             NDArray[Shape["*, *"], Float]
 Array_NxM_Integer_T =           NDArray[Shape["*, *"], Integer]
@@ -67,11 +109,41 @@ Array_NxM_Uint32_T =            NDArray[Shape["*, *"], UInt32]
 
 # Typical 3 Channel Image
 Array_NxM_3_T =                 NDArray[Shape["*, *, 3"], ArrayDtypes]  # RGB image
+"""
+| [NxMx3] Generic NDArray type 
+| Ideal for supporting RGB images
+|
+| Additional specific dtyped definitions:
+
+    * **Array_NxMx3_Uint8_T**
+
+"""
 Array_NxM_3_Uint8_T =           NDArray[Shape["*, *, 3"], UInt8]  # RGB image
 
 # Nx2 Constrained - e.g. coordinate pairs
 Array_Nx2_T =                   NDArray[Shape["*, 2"], ArrayDtypes]
+"""
+| [Nx2] Generic NDArray type
+| Ideal for supporting coordinate pairs
+|
+| Additional specific dtyped definitions:
 
+    * **Array_Nx2_Float_T**
+    * **Array_Nx2_Integer_T**
+    * **Array_Nx2_SignedInteger_T**
+    * **Array_Nx2_UnsignedInteger_T**
+    * **Array_Nx2_Bool_T**
+    * **Array_Nx2_Float32_T**
+    * **Array_Nx2_Float64_T**
+    * **Array_Nx2_Int8_T**
+    * **Array_Nx2_Int16_T**
+    * **Array_Nx2_Int32_T**
+    * **Array_Nx2_Int64_T**
+    * **Array_Nx2_Uint8_T**
+    * **Array_Nx2_Uint16_T**
+    * **Array_Nx2_Uint32_T**
+
+"""
 # Nx2 Generalised dtypes
 Array_Nx2_Float_T =             NDArray[Shape["*, 2"], Float]
 Array_Nx2_Integer_T =           NDArray[Shape["*, 2"], Integer]
@@ -92,7 +164,28 @@ Array_Nx2_Uint32_T =            NDArray[Shape["*, 2"], UInt32]
 
 # Nx3 - e.g. Cartesian Coordinates, Normal Vectors, RGB fields
 Array_Nx3_T =                   NDArray[Shape["*, 3"], ArrayDtypes]
+"""
+| [Nx3] Generic NDArray type
+| Ideal for supporting Cartesian coordinates, normal vectors, RGB fields
+|
+| Additional specific dtyped definitions:
 
+    * **Array_Nx3_Float_T**
+    * **Array_Nx3_Integer_T**
+    * **Array_Nx3_SignedInteger_T**
+    * **Array_Nx3_UnsignedInteger_T**
+    * **Array_Nx3_Bool_T**
+    * **Array_Nx3_Float32_T**
+    * **Array_Nx3_Float64_T**
+    * **Array_Nx3_Int8_T**
+    * **Array_Nx3_Int16_T**
+    * **Array_Nx3_Int32_T**
+    * **Array_Nx3_Int64_T**
+    * **Array_Nx3_Uint8_T**
+    * **Array_Nx3_Uint16_T**
+    * **Array_Nx3_Uint32_T**
+    
+"""
 # Nx3 Generalised dtypes
 Array_Nx3_Float_T =             NDArray[Shape["*, 3"], Float]
 Array_Nx3_Integer_T =           NDArray[Shape["*, 3"], Integer]
@@ -114,19 +207,62 @@ Array_Nx3_Uint32_T =            NDArray[Shape["*, 3"], UInt32]
 # ======== TRANSFORMATION MATRICES / Rotation Matrices ========
 # Rotation Matrix / Camera Matrix
 Array_3x3_T =                   NDArray[Shape["3, 3"], ArrayDtypes]
+"""
+| [3x3] Generic NDArray type
+| Ideal for supporting rotation matrices and camera projection matrices
+|
+| Additional specific dtyped definitions:
+
+    * **Array_3x3_Float_T**
+    * **Array_3x3_Float32_T**
+    * **Array_3x3_Float64_T**
+
+"""
 Array_3x3_Float_T =             NDArray[Shape["3, 3"], Float]
 Array_3x3_Float32_T =           NDArray[Shape["3, 3"], Float32]
 Array_3x3_Float64_T =           NDArray[Shape["3, 3"], Float64]
 
 # Affine Transform Matrix
 Array_4x4_T =                   NDArray[Shape["4, 4"], ArrayDtypes]
+"""
+| [4x4] Generic NDArray type
+| Ideal for affine transformation matrices to apply to homogeneous 3D coordinates
+|
+| Additional specific dtyped definitions:
+
+    * **Array_4x4_Float_T**
+    * **Array_4x4_Float32_T**
+    * **Array_4x4_Float64_T**
+
+"""
 Array_4x4_Float_T =             NDArray[Shape["4, 4"], Float]
 Array_4x4_Float32_T =           NDArray[Shape["4, 4"], Float32]
 Array_4x4_Float64_T =           NDArray[Shape["4, 4"], Float64]
 
 # ======== VECTOR TYPES ========
 VectorT =                       NDArray[Shape["*"], ArrayDtypes]
+"""
+| [N,] Generic Vector type
+| Ideal for supporting Scalar Fields, Indexes, Boolean masks and Segmentation classification
+|
+| Additional specific dtyped definitions:
 
+    * **Vector_Float_T**
+    * **Vector_Integer_T**
+    * **Vector_SignedInteger_T**
+    * **Vector_UnsignedInteger_T**
+    * **Vector_Bool_T**
+    * **Vector_Float32_T**
+    * **Vector_Float64_T**
+    * **Vector_Int8_T**
+    * **Vector_Int16_T**
+    * **Vector_Int32_T**
+    * **Vector_Int64_T**
+    * **Vector_Uint8_T**
+    * **Vector_Uint16_T**
+    * **Vector_Uint32_T**
+
+"""
 # Generalised Dtypes
 Vector_Float_T =                NDArray[Shape["*"], Float]
 Vector_Integer_T =              NDArray[Shape["*"], Integer]
@@ -146,10 +282,32 @@ Vector_Uint16_T =               NDArray[Shape["*"], UInt16]
 Vector_Uint32_T =               NDArray[Shape["*"], UInt32]
 
 Vector_IndexT =                 NDArray[Shape["*"], IndexDtypes]
+""" Special Vector type which supports integer or bool dtypes"""
 
 # ======== 3D POINT, NORMAL VECTOR, RGB VALUE ========
 Vector_3_T =                    NDArray[Shape["3"], ArrayDtypes]
+"""
+| [3,] Generic 3 Element Vector type
+| Useful for single 3D coordinates, RGB values or other 3D Vectors
+|
+| Additional specific dtyped definitions:
 
+    * **Vector_Float_T**
+    * **Vector_Integer_T**
+    * **Vector_SignedInteger_T**
+    * **Vector_UnsignedInteger_T**
+    * **Vector_Bool_T**
+    * **Vector_Float32_T**
+    * **Vector_Float64_T**
+    * **Vector_Int8_T**
+    * **Vector_Int16_T**
+    * **Vector_Int32_T**
+    * **Vector_Int64_T**
+    * **Vector_Uint8_T**
+    * **Vector_Uint16_T**
+    * **Vector_Uint32_T**
+
+"""
 # Generalised Dtypes
 Vector_3_Float_T =              NDArray[Shape["3"], Float]
 Vector_3_Integer_T =            NDArray[Shape["3"], Integer]

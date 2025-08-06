@@ -1,36 +1,9 @@
 """
-`pchandler.util`
+`GSEGUtils.util`
 
 This module provides utility functions and constants for angle conversion and numerical operations,
 along with an enumeration for specifying angle units.
 
-Features:
----------
-- **AngleUnit Enum**: Defines supported angular units: radians (RAD), degrees (DEGREE), and gradians (GON).
-- **Angle Conversion**: Convert angles between radians, degrees, and gradians efficiently.
-- **Numerical Constants**: Includes `EPS`, the smallest representable positive number for 32-bit floating-point values.
-
-Dependencies:
--------------
-- ``numpy``: Used for numerical computations and array operations.
-
-Usage:
-------
-Typical usage patterns include:
-1. Converting an array of angles from degrees to radians:
-
-.. code-block:: python
-
-    from pchandler.util import convert_angles, AngleUnit
-    angles_deg = np.array([0, 90, 180, 360])
-    angles_rad = convert_angles(angles_deg, AngleUnit.DEGREE, AngleUnit.RAD)
-
-2. Accessing the smallest floating-point epsilon for numerical stability:
-
-.. code-block:: python
-
-    from pchandler.util import EPS
-    print( f"Floating-point epsilon: {EPS}" )
 """
 
 import logging
@@ -40,7 +13,7 @@ from typing import Any, Optional, cast
 import numpy as np
 import numpy.typing as npt
 
-from GSEGUtils.base_types import Array_Float_T
+from .base_types import Array_Float_T
 
 logger = logging.getLogger(__name__.split(".")[0])
 
@@ -58,14 +31,6 @@ class AngleUnit(StrEnum):
     """
     An enumeration for angular units.
 
-    Attributes
-    ----------
-    RAD : str
-        Radians, the standard angular unit in mathematical computations.
-    DEGREE : str
-        Degrees, commonly used in geographic and engineering applications.
-    GON : str
-        Gradians (also known as gons), where a full circle is divided into 400 units.
 
     Notes
     -----
