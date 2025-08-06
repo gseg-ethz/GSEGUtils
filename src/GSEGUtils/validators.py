@@ -1,78 +1,149 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Any, TypeVar, TYPE_CHECKING
+from typing import Optional
 
 import numpy as np
 from numpy import typing as npt
 
 from .constants import HALF_PI, PI, TWO_PI
-
+from .base_types import (
+    ArrayT,
+    Array_Integer_T, Array_Float_T,
+    Array_Uint8_T, Array_Uint16_T,
+    Array_Int8_T, Array_Int16_T, Array_Int32_T, Array_Int64_T,
+)
 
 logger = logging.getLogger(__name__.split(".")[0])
 
-T = TypeVar('T', bound=npt.DTypeLike)
+def validate_spherical_angles(array: Array_Float_T) -> Array_Float_T:
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input values should be an ndarray not : {type(array)}")
 
+    array[:, 0] = validate_radius(array[:, 0])
+    array[:, 1] = validate_horizontal_angles(array[:, 1])
+    array[:, 2] = validate_zenith_angles(array[:, 2])
+    return array
 
-def extract_array(value: npt.NDArray[Any] | tuple[npt.NDArray[Any] | object] | object | dict[str, npt.NDArray[Any]]
-                  ) -> npt.NDArray[Any]:
-    # Don't copy numpy data as this should be initialisation of the object
-    if isinstance(value, np.ndarray):
-        return value
+def validate_radius(array: Array_Float_T) -> Array_Float_T:
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input values should be an ndarray not : {type(array)}")
 
-    elif hasattr(value, "arr"):
-        value = value.arr.copy()
+    if np.any(array < 0):
+        raise ValueError("Radius must be positive")
+    return array
 
-    elif isinstance(value, tuple):
-        if len(value) != 1:
-            raise TypeError(f"Value to unpack from a tuple > 1 is ambiguous: {value}")
+def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input values should be an ndarray not : {type(array)}")
 
-        if isinstance(value[0], np.ndarray):
-            value = value[0]
-        elif hasattr(value[0], "arr"):
-            value = value[0].arr.copy()
-        else:
-            raise TypeError(f"Input value is an unsupported type: {type(value[0])} ")
-
-    elif isinstance(value, dict):
-        if "arr" in value:
-            value = value["arr"]
-        else:
-            raise TypeError(f"'arr' is not in the passed dictionary.")
-
-    else:
-        raise TypeError(f"Input value is an unsupported type: {type(value)} ")
-
-    return value
-
-
-# TODO ensure error thrown with single point but a get_point function exists
-def validate_transposed_vector(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
-    return np.atleast_1d(array.squeeze())
-
-
-def validate_n_by_3_transposed(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
-    return validate_transposed(array, cols=3)
-
-
-def validate_n_by_2_transposed(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
-    return validate_transposed(array, cols=2)
-
-
-def validate_transposed(array: npt.NDArray[Any], cols: int) -> npt.NDArray[Any]:
-    if array.ndim != 2:
-        raise ValueError(f"Input array must be 2-dimensional of Nx{cols} or {cols}xN shape. Received: {array.shape}")
-
-    if array.shape[1] == cols:
+    if 0 <= array.min() and array.max() <= TWO_PI:
         return array
-
-    if array.shape[0] == cols and array.shape[1] != cols:
-        return array.T
     else:
-        raise ValueError(f"Array does not appear to be an Nx{cols} array nor it's transpose.")
+        if -PI <= array.min() and array.max() <= PI:
+            arr_min, arr_max = -PI, PI
+        else:
+            arr_min, arr_max = array.min(), array.max()
 
+        raise ValueError(f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]")
 
-def check_in_range(value: npt.ArrayLike|npt.NDArray[Any], target_min: float, target_max: float) -> None:
+def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input values should be an ndarray not : {type(array)}")
+
+    if -PI <= array.min() and array.max() <= PI:
+        return array
+    else:
+        if 0 <= array.min() and array.max() <= PI * 2:
+            arr_min, arr_max = -PI, PI
+        else:
+            arr_min, arr_max = array.min(), array.max()
+
+        raise ValueError(f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]")
+
+def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input values should be an ndarray not : {type(array)}")
+
+    if 0 <= array.min() and array.max() <= PI:
+        return array
+    else:
+        if -HALF_PI <= array.min() and array.max() <= HALF_PI:
+            raise ValueError("Input Angles in [-pi/2, +pi/2] but should be [0, +pi]")
+        raise ValueError(f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]")
+
+def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input values should be an ndarray not : {type(array)}")
+
+    if -HALF_PI <= array.min() and array.max() <= HALF_PI:
+        return array
+    else:
+        if 0 <= array.min() and array.max() <= PI:
+            array_min, array_max = 0, PI
+        else:
+            array_min, array_max = array.min(), array.max()
+        raise ValueError(f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]")
+
+def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
+    array[array < 0] += TWO_PI
+    array[array > TWO_PI] -= TWO_PI
+    return array
+
+def coerce_wrapped_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
+    array[array <= -PI] += TWO_PI
+    array[array > PI] -= TWO_PI
+    return array
+
+def validate_transposed_2d_array(array: ArrayT, cols: int) -> ArrayT:
+    """
+    Validates the transpose of 2D arrays with known fixed cols
+    :param array:
+    :param cols:
+    :return:
+    """
+    if array.ndim == 2:
+        if array.shape[1] == cols:
+            return array
+
+        if array.shape[0] == cols and array.shape[1] != cols:
+            return array.T
+
+    elif array.ndim == 1:
+        if array.shape[0] != cols:
+            return array.reshape(-1, cols)
+
+    raise ValueError(f"Input array must be 2-dimensional of Nx{cols} or {cols}xN shape. Received: {array.shape}")
+
+def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integer_T:
+    start = selection.start
+    stop = selection.stop
+    step = selection.step
+
+    # Default
+    if step is None:
+        step = 1
+
+    if start is None:
+        # If `step` is positive, start at 0. if `step` is negative, start from the end of the array
+        start = 0 if step > 0 else length - 1
+    elif start < 0:
+        # Convert negative addresses to positive address
+        start += length
+    else:
+        pass
+
+    if stop is None:
+        # Set stop point to include endpoint values if None is set
+        stop = length if step > 0 else -1
+    elif stop < 0:
+        # Convert negative index to positive index
+        stop += length
+
+    # Convert slice objects to a numpy integer array
+    return np.arange(start=start, stop=stop, step=step)
+
+def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> None:
     value = np.asarray(value)
     val_min: float | int = value.min()
     val_max: float | int = value.max()
@@ -86,13 +157,36 @@ def check_in_range(value: npt.ArrayLike|npt.NDArray[Any], target_min: float, tar
     elif val_max > target_max:
         raise ValueError(f"Max value {val_max} exceeds upper limit {target_max}.")
 
-
-def normalize_min_max(array: npt.NDArray,
+def normalize_min_max(array: ArrayT,
                       lower: float|int|np.number,
                       upper: float|int|np.number,
-                      target_dtype: T,
+                      target_dtype: npt.DTypeLike,
                       v_min: Optional[float|int] = None,
-                      v_max: Optional[float|int] = None) -> npt.NDArray[T]:
+                      v_max: Optional[float|int] = None) -> ArrayT:
+    """
+    Function that can perform normalisation of an input data type.
+
+    Allows input of v_min and v_max to override the min and max of the input array for either clipping or
+    linear mapping between datatypes.
+
+    Parameters
+    ----------
+    array : ArrayT
+    lower: float|int|np.number
+    upper: float|int|np.number
+    target_dtype: npt.DTypeLike
+        Datatype of numpy array to return.
+    v_min: Optional[float|int] = None
+        lower bound value of input array to scale to (defaults to array.min())
+    v_max: Optional[float|int] = None
+        upper bound value of input array to scale to (defaults to array.max())
+
+    Returns
+    -------
+
+    """
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"Input array must be a numpy array not {type(array)}")
 
     if (not np.issubdtype(array.dtype, np.floating) and
             not np.issubdtype(array.dtype, np.integer) and
@@ -107,12 +201,30 @@ def normalize_min_max(array: npt.NDArray,
     if v_max is None:
         v_max = array.max()
 
+    if v_max <= v_min:
+        raise ValueError(f"v_max ({v_max}) must be greater than v_min ({v_min})")
+
     array = (array - v_min) / (v_max - v_min)
     array = np.add(array * (upper - lower), lower)
     return np.clip(array, lower, upper).astype(target_dtype)
 
+def linear_map_dtype(array: ArrayT, target_dtype: npt.DTypeLike) -> ArrayT:
+    """
+    Performs a linear mapping between datatypes assuming the min and max value supported by each dtype.
+    Parameters
+    ----------
+    array: ArrayT
+    target_dtype: npt.DTypeLike
 
-def linear_map_dtype(array: npt.NDArray[Any], target_dtype: npt.DTypeLike) -> npt.NDArray[Any]:
+    Returns
+    -------
+
+    """
+
+    array = np.asarray(array)
+
+    if target_dtype in (np.float64, np.int64, np.uint64):
+        raise ValueError("Target type cannot be 64bit")
 
     def get_dtype_min_max(dt: np.dtype) -> tuple[float, float]:
         if np.issubdtype(dt, np.integer):
@@ -128,7 +240,7 @@ def linear_map_dtype(array: npt.NDArray[Any], target_dtype: npt.DTypeLike) -> np
 
     # Get the corresponding min and max from the type info
     origin_min, origin_max = get_dtype_min_max(array.dtype)
-    target_min, target_max = get_dtype_min_max(target_dtype)
+    target_min, target_max = get_dtype_min_max(np.dtype(target_dtype))
 
     return normalize_min_max(array=array,
                              lower=target_min,
@@ -137,10 +249,12 @@ def linear_map_dtype(array: npt.NDArray[Any], target_dtype: npt.DTypeLike) -> np
                              v_min=origin_min,
                              v_max=origin_max)
 
-
-def normalize_self(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
+def normalize_self(array: ArrayT) -> ArrayT:
     """
-    Normalise values to the min and max values of the associated data type or [0, 1] for floating point
+    Returns the input array normalised to the datatype min and max values for integer types and [0, 1] for floating
+
+    e.g points [2, 10] for np.uint8 would be linear mapped to [0, 255]
+
     """
     if np.dtype(array.dtype).kind not in ["u", "i"]:
         logger.debug(f"Scalar field is floating. Converting to [0.0, 1.0].")
@@ -150,35 +264,34 @@ def normalize_self(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
 
     return normalize_min_max(array, lower, upper, array.dtype)
 
-
-def _normalize_base(array: npt.NDArray[Any], dtype: npt.DTypeLike) -> npt.NDArray[Any]:
-    if hasattr(array, 'arr'):
-        array = array.arr
+def _normalize_base(array: ArrayT, dtype: npt.DTypeLike) -> ArrayT:
+    """Base normalisation function that will normalise any datatype to a floating point, [0,1] range"""
+    array = np.asarray(array)
 
     if array.dtype != dtype:
         if np.issubdtype(dtype, np.floating):
             return normalize_min_max(array, 0, 1, dtype)
+
         if 0 <= array.min() <= array.max() <= 1:
             return normalize_min_max(array, np.iinfo(dtype).min, np.iinfo(dtype).max, dtype, 0, 1)
+
         return normalize_min_max(array, np.iinfo(dtype).min, np.iinfo(dtype).max, dtype)
     return array
 
+def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
+    return _normalize_base(array, np.uint8)
 
-normalize_uint8 = lambda array: _normalize_base(array, np.uint8)
-normalize_uint16 = lambda array: _normalize_base(array, np.uint16)
-normalize_int8 = lambda array: _normalize_base(array, np.int8)
-normalize_int16 = lambda array: _normalize_base(array, np.int16)
-normalize_int32 = lambda array: _normalize_base(array, np.int32)
-normalize_int64 = lambda array: _normalize_base(array, np.int64)
-normalize_float32 = lambda array: _normalize_base(array, np.float32)
-normalize_float64 = lambda array: _normalize_base(array, np.float64)
+def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
+    return _normalize_base(array, np.uint16)
 
+def normalize_int8(array: ArrayT) -> Array_Int8_T:
+    return _normalize_base(array, np.int8)
 
-def ensure_unit_vector(array: npt.NDArray[Any]) -> npt.NDArray[Any]:
-    if not (np.issubdtype(array.dtype, np.floating) or np.issubdtype(array.dtype, np.signedinteger)):
-        raise TypeError("Dtype of normals array must be of type floating or signed integer}")
+def normalize_int16(array: ArrayT) -> Array_Int16_T:
+    return _normalize_base(array, np.int16)
 
-    array /= np.linalg.norm(array, axis=1).reshape(-1, 1)
-    array = array.astype(np.float32)
+def normalize_int32(array: ArrayT) -> Array_Int32_T:
+    return _normalize_base(array, np.int32)
 
-    return array
+def normalize_int64(array: ArrayT) -> Array_Int64_T:
+    return _normalize_base(array, np.int64)
