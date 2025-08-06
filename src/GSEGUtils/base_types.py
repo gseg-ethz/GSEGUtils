@@ -24,62 +24,153 @@ ShapeLikeT: TypeAlias = SupportsIndex | Sequence[SupportsIndex]
 NumberLikeT: TypeAlias = complex | np.number | np.bool
 
 # ======== ARRAY TYPES ========
-ArrayT = NDArray[Shape["*, ..."], ArrayDtypes]
+ArrayT =                        NDArray[Shape["*, ..."], ArrayDtypes]
 
-# General dtypes
-Array_Float_T = NDArray[Shape["*, ..."], Float]
-Array_Integer_T = NDArray[Shape["*, ..."], Integer]
-Array_SignedInteger_T = NDArray[Shape["*, ..."], SignedInteger]
-Array_UnsignedInteger_T = NDArray[Shape["*, ..."], UnsignedInteger]
+# Generalised dtypes
+Array_Float_T =                 NDArray[Shape["*, ..."], Float]
+Array_Integer_T =               NDArray[Shape["*, ..."], Integer]
+Array_SignedInteger_T =         NDArray[Shape["*, ..."], SignedInteger]
+Array_UnsignedInteger_T =       NDArray[Shape["*, ..."], UnsignedInteger]
+Array_Bool_T =                  NDArray[Shape["*, ..."], Bool]
 
 # Specific dtypes
-Array_Float32_T = NDArray[Shape["*, ..."], Float32]
-Array_Float64_T = NDArray[Shape["*, ..."], Float64]
-Array_Int8_T = NDArray[Shape["*, ..."], Int8]
-Array_Int16_T = NDArray[Shape["*, ..."], Int16]
-Array_Int32_T = NDArray[Shape["*, ..."], Int32]
-Array_Int64_T = NDArray[Shape["*, ..."], Int64]
-Array_Uint8_T = NDArray[Shape["*, ..."], UInt8]
-Array_Uint16_T = NDArray[Shape["*, ..."], UInt16]
-Array_Uint32_T = NDArray[Shape["*, ..."], UInt32]
-Array_Bool_T = NDArray[Shape["*, ..."], Bool]
+Array_Float32_T =               NDArray[Shape["*, ..."], Float32]
+Array_Float64_T =               NDArray[Shape["*, ..."], Float64]
+Array_Int8_T =                  NDArray[Shape["*, ..."], Int8]
+Array_Int16_T =                 NDArray[Shape["*, ..."], Int16]
+Array_Int32_T =                 NDArray[Shape["*, ..."], Int32]
+Array_Int64_T =                 NDArray[Shape["*, ..."], Int64]
+Array_Uint8_T =                 NDArray[Shape["*, ..."], UInt8]
+Array_Uint16_T =                NDArray[Shape["*, ..."], UInt16]
+Array_Uint32_T =                NDArray[Shape["*, ..."], UInt32]
 
 # Size constrained
-Array_NxM_T = NDArray[Shape["*, *"], ArrayDtypes]       # Intensity/depth image
-Array_NxM_3_T = NDArray[Shape["*, *, 3"], ArrayDtypes]  # RGB image
-Array_Nx2_T = NDArray[Shape["*, 2"], ArrayDtypes]       # Image coordinates
-Array_Nx3_T = NDArray[Shape["*, 3"], ArrayDtypes]       # 3D Coordinates / normals
-Array_3x3_T = NDArray[Shape["4, 4"], ArrayDtypes]       # Rotation Matrix
-Array_4x4_T = NDArray[Shape["4, 4"], ArrayDtypes]       # Affine Transformation
+Array_NxM_T =                   NDArray[Shape["*, *"], ArrayDtypes]       # Intensity/depth image
 
-# Size and type constrained
-Array_Nx3_Float_T = NDArray[Shape["*, 3"], Float]
-Array_Nx3_Float32_T = NDArray[Shape["*, 3"], Float32]   # Optimised coordinates
-Array_Nx3_Uint8_T = NDArray[Shape["*, 3"], UInt8]       # RGB
-Array_Nx2_Float_T = NDArray[Shape["*, 2"], Float]       # Image Coordinate Pairs
-Array_Nx2_Float32_T = NDArray[Shape["*, 2"], Float32]
-Array_Nx2_Uint8_T = NDArray[Shape["*, 2"], UInt8]
+# 2D Generalised dtypes
+Array_NxM_Float_T =             NDArray[Shape["*, *"], Float]
+Array_NxM_Integer_T =           NDArray[Shape["*, *"], Integer]
+Array_NxM_SignedInteger_T =     NDArray[Shape["*, *"], SignedInteger]
+Array_NxM_UnsignedInteger_T =   NDArray[Shape["*, *"], UnsignedInteger]
+Array_NxM_Bool_T =              NDArray[Shape["*, *"], Bool]
+
+# 2D Specific dtypes
+Array_NxM_Float32_T =           NDArray[Shape["*, *"], Float32]
+Array_NxM_Float64_T =           NDArray[Shape["*, *"], Float64]
+Array_NxM_Int8_T =              NDArray[Shape["*, *"], Int8]
+Array_NxM_Int16_T =             NDArray[Shape["*, *"], Int16]
+Array_NxM_Int32_T =             NDArray[Shape["*, *"], Int32]
+Array_NxM_Int64_T =             NDArray[Shape["*, *"], Int64]
+Array_NxM_Uint8_T =             NDArray[Shape["*, *"], UInt8]
+Array_NxM_Uint16_T =            NDArray[Shape["*, *"], UInt16]
+Array_NxM_Uint32_T =            NDArray[Shape["*, *"], UInt32]
+
+# Typical 3 Channel Image
+Array_NxM_3_T =                 NDArray[Shape["*, *, 3"], ArrayDtypes]  # RGB image
+Array_NxM_3_Uint8_T =           NDArray[Shape["*, *, 3"], UInt8]  # RGB image
+
+# Nx2 Constrained - e.g. coordinate pairs
+Array_Nx2_T =                   NDArray[Shape["*, 2"], ArrayDtypes]
+
+# Nx2 Generalised dtypes
+Array_Nx2_Float_T =             NDArray[Shape["*, 2"], Float]
+Array_Nx2_Integer_T =           NDArray[Shape["*, 2"], Integer]
+Array_Nx2_SignedInteger_T =     NDArray[Shape["*, 2"], SignedInteger]
+Array_Nx2_UnsignedInteger_T =   NDArray[Shape["*, 2"], UnsignedInteger]
+Array_Nx2_Bool_T =              NDArray[Shape["*, 2"], Bool]
+
+# 2D Specific dtypes
+Array_Nx2_Float32_T =           NDArray[Shape["*, 2"], Float32]
+Array_Nx2_Float64_T =           NDArray[Shape["*, 2"], Float64]
+Array_Nx2_Int8_T =              NDArray[Shape["*, 2"], Int8]
+Array_Nx2_Int16_T =             NDArray[Shape["*, 2"], Int16]
+Array_Nx2_Int32_T =             NDArray[Shape["*, 2"], Int32]
+Array_Nx2_Int64_T =             NDArray[Shape["*, 2"], Int64]
+Array_Nx2_Uint8_T =             NDArray[Shape["*, 2"], UInt8]
+Array_Nx2_Uint16_T =            NDArray[Shape["*, 2"], UInt16]
+Array_Nx2_Uint32_T =            NDArray[Shape["*, 2"], UInt32]
+
+# Nx3 - e.g. Cartesian Coordinates, Normal Vectors, RGB fields
+Array_Nx3_T =                   NDArray[Shape["*, 3"], ArrayDtypes]
+
+# Nx3 Generalised dtypes
+Array_Nx3_Float_T =             NDArray[Shape["*, 3"], Float]
+Array_Nx3_Integer_T =           NDArray[Shape["*, 3"], Integer]
+Array_Nx3_SignedInteger_T =     NDArray[Shape["*, 3"], SignedInteger]
+Array_Nx3_UnsignedInteger_T =   NDArray[Shape["*, 3"], UnsignedInteger]
+Array_Nx3_Bool_T =              NDArray[Shape["*, 3"], Bool]
+
+# Nx3 Specific dtypes
+Array_Nx3_Float32_T =           NDArray[Shape["*, 3"], Float32]
+Array_Nx3_Float64_T =           NDArray[Shape["*, 3"], Float64]
+Array_Nx3_Int8_T =              NDArray[Shape["*, 3"], Int8]
+Array_Nx3_Int16_T =             NDArray[Shape["*, 3"], Int16]
+Array_Nx3_Int32_T =             NDArray[Shape["*, 3"], Int32]
+Array_Nx3_Int64_T =             NDArray[Shape["*, 3"], Int64]
+Array_Nx3_Uint8_T =             NDArray[Shape["*, 3"], UInt8]
+Array_Nx3_Uint16_T =            NDArray[Shape["*, 3"], UInt16]
+Array_Nx3_Uint32_T =            NDArray[Shape["*, 3"], UInt32]
+
+# ======== TRANSFORMATION MATRICES / Rotation Matrices ========
+# Rotation Matrix / Camera Matrix
+Array_3x3_T =                   NDArray[Shape["3, 3"], ArrayDtypes]
+Array_3x3_Float_T =             NDArray[Shape["3, 3"], Float]
+Array_3x3_Float32_T =           NDArray[Shape["3, 3"], Float32]
+Array_3x3_Float64_T =           NDArray[Shape["3, 3"], Float64]
+
+# Affine Transform Matrix
+Array_4x4_T =                   NDArray[Shape["4, 4"], ArrayDtypes]
+Array_4x4_Float_T =             NDArray[Shape["4, 4"], Float]
+Array_4x4_Float32_T =           NDArray[Shape["4, 4"], Float32]
+Array_4x4_Float64_T =           NDArray[Shape["4, 4"], Float64]
 
 # ======== VECTOR TYPES ========
-VectorT = NDArray[Shape["*"], ArrayDtypes]              # Scalar Fields
+VectorT =                       NDArray[Shape["*"], ArrayDtypes]
 
-# Datatype constrained Vector
-Vector_Bool_T = NDArray[Shape["*"], Bool]               # Mask or boolean vector
-Vector_Float_T = NDArray[Shape["*"], Float]
-Vector_Float64_T = NDArray[Shape["*"], Float64]
-Vector_Float32_T = NDArray[Shape["*"], Float32]         # Normal vector field
-Vector_Int32_T = NDArray[Shape["*"], Int32]
-Vector_Int16_T = NDArray[Shape["*"], Int16]
-Vector_Int8_T = NDArray[Shape["*"], Int8]
-Vector_Uint16_T = NDArray[Shape["*"], UInt16]           # Potential for intensity / reflectance
-Vector_Uint8_T = NDArray[Shape["*"], UInt8]             # Single RGB field
-Vector_IndexT = NDArray[Shape["*"], IndexDtypes]
+# Generalised Dtypes
+Vector_Float_T =                NDArray[Shape["*"], Float]
+Vector_Integer_T =              NDArray[Shape["*"], Integer]
+Vector_SignedInteger_T =        NDArray[Shape["*"], SignedInteger]
+Vector_UnsignedInteger_T =      NDArray[Shape["*"], UnsignedInteger]
+Vector_Bool_T =                 NDArray[Shape["*"], Bool]
 
-# Shape constrained vectors
-Vector_4_T = NDArray[Shape["4"], ArrayDtypes]           # FoV as vector
-Vector_3_T = NDArray[Shape["3"], ArrayDtypes]           # 3D coordinate
-Vector_3_Float64_T = NDArray[Shape["3"], Float64]
-Vector_2_T = NDArray[Shape["2"], ArrayDtypes]           # Image coordinate
+# Specific Dtypes
+Vector_Float32_T =              NDArray[Shape["*"], Float32]
+Vector_Float64_T =              NDArray[Shape["*"], Float64]
+Vector_Int8_T =                 NDArray[Shape["*"], Int8]
+Vector_Int16_T =                NDArray[Shape["*"], Int16]
+Vector_Int32_T =                NDArray[Shape["*"], Int32]
+Vector_Int64_T =                NDArray[Shape["*"], Int64]
+Vector_Uint8_T =                NDArray[Shape["*"], UInt8]
+Vector_Uint16_T =               NDArray[Shape["*"], UInt16]
+Vector_Uint32_T =               NDArray[Shape["*"], UInt32]
+
+Vector_IndexT =                 NDArray[Shape["*"], IndexDtypes]
+
+# ======== 3D POINT, NORMAL VECTOR, RGB VALUE ========
+Vector_3_T =                    NDArray[Shape["3"], ArrayDtypes]
+
+# Generalised Dtypes
+Vector_3_Float_T =              NDArray[Shape["3"], Float]
+Vector_3_Integer_T =            NDArray[Shape["3"], Integer]
+Vector_3_SignedInteger_T =      NDArray[Shape["3"], SignedInteger]
+Vector_3_UnsignedInteger_T =    NDArray[Shape["3"], UnsignedInteger]
+Vector_3_Bool_T =               NDArray[Shape["3"], Bool]
+
+# Specific Dtypes
+Vector_3_Float32_T =            NDArray[Shape["3"], Float32]
+Vector_3_Float64_T =            NDArray[Shape["3"], Float64]
+Vector_3_Int8_T =               NDArray[Shape["3"], Int8]
+Vector_3_Int16_T =              NDArray[Shape["3"], Int16]
+Vector_3_Int32_T =              NDArray[Shape["3"], Int32]
+Vector_3_Int64_T =              NDArray[Shape["3"], Int64]
+Vector_3_Uint8_T =              NDArray[Shape["3"], UInt8]
+Vector_3_Uint16_T =             NDArray[Shape["3"], UInt16]
+Vector_3_Uint32_T =             NDArray[Shape["3"], UInt32]
+
+# ======== POINT LIKE ========
+Vector_4_T =                    NDArray[Shape["4"], ArrayDtypes]
+Vector_2_T =                    NDArray[Shape["2"], ArrayDtypes]
 
 IndexLike = Union[int, slice, npt.NDArray[np.bool_], npt.NDArray[np.integer], Sequence]
 
