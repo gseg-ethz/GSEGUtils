@@ -1,3 +1,31 @@
+"""
+    Help on Base Arrays.
+
+    NAME
+        base_arrays
+
+    DESCRIPTION
+        Subclassable base array module for better handling of array data
+        ================================================================
+
+        The base_arrays module is designed to create sub-classable array like objects that:
+
+        * **Looks like a Numpy array. Sounds like a Numpy array. ACTS like a Numpy array!**
+        * **Automated data validation (including array shape and dtype) with Pydantic**
+        * **Support for extra attribute definition and access like a dataclass**
+        * **Easy to subclass whilst getting the same functionality**
+
+        This module contains the following base array types which can be subclassed as needed:
+
+        * *BaseArray*: Base class for all other array types
+        * *NumericMixins*: Extends numpy like magic method behaviour for equality and numeric operations
+        * *FixedLengthArray*: Treats the array as a list of row vectors
+        * *BaseVector*: 1D Vector
+        * *HomogeneousArray*: Arrays that can be converted to homogeneous coordinates
+        * *ArrayNx2*: Nx2 sized arrays (E.g. 2D coordinates)
+        * *ArrayNx3*: Nx3 sized arrays (E.g. 3D coordinates)
+"""
+
 from __future__ import annotations
 
 import logging
@@ -27,6 +55,7 @@ from .base_types import (
     ArrayT,
     Array_Nx2_T,
     Array_Nx3_T,
+    Array_Nx3_Float_T,
     IndexLike,
     Vector_IndexT,
     VectorT,
@@ -51,22 +80,13 @@ SelfT = TypeVar('SelfT', bound='BaseArray')
 logger = logging.getLogger(__name__)
 
 
+__all__ = ['BaseArray', 'NumericMixins', 'FixedLengthArray', 'BaseVector', 'HomogeneousArray', 'ArrayNx2', 'ArrayNx3']
+
 class BaseArray(ABC, BaseModel):
-    """
-    BaseArray is designed to be a subclassable, automatic validator for array-based classes.
-    It is built around a combination of the Pydantic and Numpydantic libraries.
+    """ A sub-classable, automatically validated array class.
 
-    In line with the PCHandler project, the main idea is that it can be extended to support the following:
-        -> Coordinate Classes
-        -> Scalar Fields
-        -> Transformation Matrices (4x4 Affine and 3x3 matrices -> intrinsic / extrinsic)
-        -> Image Arrays
-        -> ...
-
-    For now, it supports the following:
-        - Boolean, Floating, SignedInteger, and UnsignedInteger types
-        - Scalar values (although converted to 1D arrays)
-        - 1D or greater arrays (all 0D / scalars will be converted to 1D)
+    BaseArray performs no shape validation but will check that the array is of
+    np.bool_, np.floating or np.integer types.
     """
 
     model_config = ConfigDict(
@@ -81,7 +101,7 @@ class BaseArray(ABC, BaseModel):
         populate_by_name=False,         # Field is not expected to be populated by attribute name if an alias exists
     )
 
-    arr: ArrayT
+    arr: ArrayT #: Object attribute that contains all raw numpy data object
 
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
         super().__init__(arr=arr, **kwargs)
@@ -89,20 +109,16 @@ class BaseArray(ABC, BaseModel):
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='before')
     @classmethod
-    def coerce_array(cls, value: Any) -> ArrayT:
+    def _coerce_array(cls, value: npt.ArrayLike) -> ArrayT:
         """
-        Coerces the input into a compatible array format.
 
         Parameters
         ----------
-        value : Any
-            Arraylike input value
+        value: npt.ArrayLike
 
         Returns
         -------
         ArrayT
-            Numpy array of at least 1D
-
         """
         if isinstance(value, BaseArray):
             value = value.arr
@@ -127,95 +143,51 @@ class BaseArray(ABC, BaseModel):
     # noinspection PyPep8Naming
     @property
     def T(self) -> ArrayT:
-        """
-            Transposed view of the array.
+        """ Transposed view of the array.
 
-            Returns
-            -------
-            ArrayT
-                Transposed view of the array.
+        Returns
+        -------
+        ArrayT
         """
         return self.arr.T
 
     @property
     def shape(self) -> tuple[int, ...]:
-        """
-            Provides the shape of the array as a tuple.
+        """ Shape of the array
 
-            Returns
-            -------
-            tuple of int
-                A tuple representing the dimensions of the array. Each element corresponds
-                to the size of the array along a specific axis.
+        Returns
+        -------
+        tuple[int, ...]
         """
         return self.arr.shape
 
     @property
     def dtype(self) -> npt.DTypeLike:
-        """
-            Gets the data type of the underlying NumPy array.
+        """ Dtype of the array
 
-            Returns
-            -------
-            npt.DTypeLike
-                The data type of the NumPy array.
+        Returns
+        -------
+        npt.DtypeLike
         """
         return cast(np.dtype, self.arr.dtype)
 
     @property
     def ndim(self) -> int:
-        """
-            Number of axes/dimensions of the array.
-
-            Returns
-            -------
-            int
-        """
+        """ Number of dimensions in the array """
         return cast(int, self.arr.ndim)
 
     @property
     def base(self) -> ArrayT|None:
-        """
-            Returns the base array which the current array shares memory with if it is a view.
-            If the current array is not a view, it returns None
-
-            Returns
-            -------
-            ArrayT or None
-        """
+        """ Returns the base array if the current `arr` attribute is a view. """
         return self.arr.base
 
     @property
     def size(self) -> int:
-        """
-        Total number of elements in the array
-
-        Returns
-        -------
-        int
-        """
+        """ Size of the array (number of elements) """
         return self.arr.size
 
     def view(self, dtype: npt.DTypeLike = None, _type: type|None = None) -> ArrayT:
-        """
-        Creates a new view of the array with a specific data type and/or container type.
-
-
-        Parameters
-        ----------
-        dtype : npt.DTypeLike, optional
-            The desired data type for the view.
-            If not provided, the data type of the current array will be used.
-
-        _type : type or None, optional
-            The desired container type for the view.
-            If not provided, the type of the current array will be used.
-
-        Returns
-        -------
-        ArrayT
-
-        """
+        """ Get a ndarray view of the underlying array. """
         dtype = self.dtype if dtype is None else dtype
 
         _type = type(self.arr) if _type is None else _type
@@ -660,19 +632,19 @@ class FixedLengthArray(NumericMixins):
 class BaseVector(FixedLengthArray):
     arr: VectorT
 
-    def __init__(self, arr: VectorT, **kwargs: dict[str, Any]):
+    def __init__(self, arr: VectorT, **kwargs: dict[str, Any]) -> None:
         super().__init__(arr=arr, **kwargs)
 
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='before')
     @classmethod
-    def coerce_array(cls, value: ArrayT | Self) -> VectorT:
-        value = super(BaseVector, cls).coerce_array(value)
+    def _coerce_array(cls, value: ArrayT | Self) -> VectorT:
+        value = super(BaseVector, cls)._coerce_array(value)
         return np.atleast_1d(value.squeeze())
 
 
 class HomogeneousArray(FixedLengthArray):
-    def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+    def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]) -> None:
         super().__init__(arr, **kwargs)
 
     # noinspection PyPep8Naming
@@ -684,27 +656,26 @@ class HomogeneousArray(FixedLengthArray):
 class ArrayNx2(HomogeneousArray):
     arr: Array_Nx2_T
 
-    def __init__(self, arr: Array_Nx2_T, **kwargs: dict[str, Any]):
+    def __init__(self, arr: Array_Nx2_T, **kwargs: dict[str, Any]) -> None:
         super().__init__(arr=arr, **kwargs)
 
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='plain')
     @classmethod
-    def coerce_array(cls, value: ArrayT) -> Array_Nx2_T:
-        value = super(ArrayNx2, cls).coerce_array(value)
+    def _coerce_array(cls, value: ArrayT) -> Array_Nx2_T:
+        value = super(ArrayNx2, cls)._coerce_array(value)
         return validate_transposed_2d_array(value, 2)
 
 
 class ArrayNx3(HomogeneousArray):
-    arr: Array_Nx3_T
+    arr: Array_Nx3_Float_T
 
-    def __init__(self, arr: Array_Nx3_T, **kwargs: dict[str, Any]):
+    def __init__(self, arr: Array_Nx3_Float_T, **kwargs: dict[str, Any]) -> None:
         super().__init__(arr=arr, **kwargs)
 
-    # noinspection PyNestedDecorators
     @field_validator('arr', mode='plain')
     @classmethod
-    def coerce_array(cls, value: ArrayT) -> Array_Nx3_T:
-        value = super(ArrayNx3, cls).coerce_array(value)
+    def _coerce_array(cls, value: ArrayT) -> Array_Nx3_Float_T:
+        value = super(ArrayNx3, cls)._coerce_array(value)
         return validate_transposed_2d_array(value, 3)
 
