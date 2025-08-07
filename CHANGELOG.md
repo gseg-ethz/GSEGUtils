@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.4.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.0...v0.4.1) (2025-08-06)
+
+
+### 🧹 Miscellaneous Chores
+
+* Merge branch 'dev' into 'main' ([e3afd87](https://github.com/gseg-ethz/GSEGUtils/commit/e3afd878b0f1f2dad6794268a1a0d61ef116d751))
+* Merge remote-tracking branch 'origin/dev' into dev ([e3f8705](https://github.com/gseg-ethz/GSEGUtils/commit/e3f870563e9786c3cb93eb89b959cb3971b334ad))
+
+## [0.4.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.4...v0.4.0) (2025-08-06)
+
+
+### ✨ Features
+
+* add extra base Array_Nx2_T for Floating and Uint8 ([dabf33d](https://github.com/gseg-ethz/GSEGUtils/commit/dabf33d41503af407f89c3163f8acd7993fd7e32))
+* Extend array types to cover most constrained shape and dtype combinations ([af85fc8](https://github.com/gseg-ethz/GSEGUtils/commit/af85fc80759e736798bb70aefd39977c960ce8f6))
+
+
+### 🐛 Bug Fixes
+
+* copying to 0D arrays failed in angle unit conversion ([f91ab62](https://github.com/gseg-ethz/GSEGUtils/commit/f91ab62c3633a12e09fbf8d12c56eb1784897c3b))
+* update BaseArray code and ensure test coverage ([b7fda2b](https://github.com/gseg-ethz/GSEGUtils/commit/b7fda2b106420a7b1a6bfe7aa1382c1bfaac6f43))
+
+
+### 🧹 Miscellaneous Chores
+
+* add .idea directory to gitignore ([1e5339c](https://github.com/gseg-ethz/GSEGUtils/commit/1e5339c19d247a17468d1cc3496bac6e1bc82947))
+* Merge of dev onto main for release 0.4.0 ([53b9d66](https://github.com/gseg-ethz/GSEGUtils/commit/53b9d66c63479a0cca1e7e2a892ce225edf023d8))
+
+
+### ✅ Tests
+
+* shift from PCHandler general pydantic tests to show expected behaviour ([c435897](https://github.com/gseg-ethz/GSEGUtils/commit/c435897803cf7d7a5e85249e79ca3a9191025ec5))
+
+## [0.3.4](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.3...v0.3.4) (2025-08-05)
+
+
+### 🤖 Continuous Integration
+
+* Change fetch depth in release-please ([adb0041](https://github.com/gseg-ethz/GSEGUtils/commit/adb0041a3a323253dad13bbe1b89b5886049d0a6))
+* Reverted release-type ([7cf2c8a](https://github.com/gseg-ethz/GSEGUtils/commit/7cf2c8a046b9a5e5f215d46deb15bf1a9cfe460d))
+
 ## [0.3.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.3.2...v0.3.3) (2025-07-31)
 
 
