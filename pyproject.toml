@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GSEGUtils"
-description = "Description of ModuleA"
+description = "General utility functions and classes for GSEG research/projects"
 authors = [
     {name = "Nicholas Meyer", email = "meyernic@ethz.ch"},
     {name = "Jon Allemand", email = "jonal@ethz.ch"},
@@ -14,7 +14,7 @@ maintainers = [
 ]
 requires-python = ">=3.12"
 keywords = ["ONE", "TWO"]
-license = {text = "Proprietary"} # To be changed once released
+license = {file = "LICENSE"}
 classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#classifiers
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -36,27 +36,17 @@ dependencies = [ # https://packaging.python.org/en/latest/specifications/depende
     "pydantic ~= 2.11",
     "numpydantic ~= 1.6",
     "colorlog ~= 6.9",
-    "joblib",
-    "tqdm",
 ]
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"]}
-
-[tool.setuptools]
-packages = { find = { where = ["src"] } }
-package-dir = { "" = "src" }
-include-package-data = true
-
-[tool.setuptools.package-data]
-yourpkg = ["py.typed", "**/*.pyi"]
 
 [tool.setuptools_scm]
 write_to = "src/GSEGUtils/_version.py"
 local_scheme = "no-local-version"
 version_scheme = "post-release"
 tag_regex = '^v?(?P<version>\d+\.\d+\.\d+)$'
-git_describe_command = "git describe --dirty --tags --long --match 'v[0-9]*.[0-9]*.[0-9]*'"
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*.[0-9]*.[0-9]*"]
 
 [project.urls]
 #Homepage = "https://example.com"
@@ -67,12 +57,17 @@ Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 doc = [
-    "sphinx"
+    "sphinx @ git+https://github.com/sphinx-doc/sphinx.git@9a08711e0e18c63c609070aa0a79019b4db45a78",
+    "sphinx_rtd_theme"
 ]
 dev = [
-    "black",  # Code formatter to make it consistant with PEP rules
-    "flake8", # Code linter: Analyzes source code for errors, vulnerabilities, and stylistic issues
+    "black~=25.1",            # formatter
+    "isort~=6.0",             # import sorter
+    "flake8~=7.3",            # style linter
+    "flake8-bugbear",         # best-practice checks
+    "flake8-docstrings",      # docstring checks
+    "mypy~=1.17",             # static typing
+    "pre-commit~=4.3",        # git hooks runner
+    "pytest~=8.4",            # test framework
+    "coverage~=7.0",          # coverage reporting
 ]
-
-[project.scripts]
-generate-init-stubs = "GSEGUtils.generate_init_stubs:main"

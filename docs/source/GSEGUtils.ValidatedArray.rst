@@ -1,100 +1,120 @@
+************************
 GSEGUtils.ValidatedArray
-========================
+************************
 
-DESCRIPTION
------------
+Description
+===========
 
-This ValidatedArray module provides a subclassable array class for data handling and management in research projects.
+A subclassable array object for easier data handling and management in research projects.
 
-It's aim is to:
+The main problem it aims to solve was the coupling of numeric array data with other attributes that are automatically
+validated. The main benefits being:
 
-* . *Looks* like a Numpy array,
-* \.. *sound* like a numpy array
-* ... but most importantly, *ACTS* like a Numpy array!
-* Provide per attribute automatic validation for early error detection
-* Extend validation to array shapes and dtypes
-* Easily extensible base class with extra attributes to act like Python dataclasses
+* Type errors are caught early (fail-fast) and time spent debugging is reduced
+* Code foot print is smaller and in term the logic is clearer
+* Still has easy interaction like a Numpy array or dataclasses
+* Can also be subclassed to perform array shape and dtype validation
 
-Essentially it was to amalgamated the `Pydantic BaseModel <https://docs.pydantic.dev/latest/concepts/models/>`_ and
-`Numpy ndarray <https://numpy.org/devdocs/reference/generated/numpy.ndarray.html>`_ into a single, extensible class.
+In essence, it can be subclassed easily like one makes a dataclass, acts like a Numpy NDArray object and performs
+automatic attribute validation using Pydantic. It has been designed largely around the `PCHandler` library for handling
+point cloud data.
 
-**But Why?!?!**
-    Python dynamic typing makes it super easy to use... sometimes too easy.
-    This easily leads to bugs caused by incorrect data types being passed or automatic conversion of types.
+Included in the package are a number of predefined classes to create your custom classes with:
 
-    Thus breaking the fail-fast principle. ::
-
-        a = "3"
-        b = a * 4       # Doesn't fail, returns "3333"
-        assert b == 12  # Fails
-
-    For those leveraging Python's typing module, built-in type checkers like `mypy <https://github.com/python/mypy>`_,
-    can help a lot. But this only shows a warning in the IDE and doesn't throw an error when run. If a type hint is
-    missing, then this won't be easily detected. ::
-
-        a: int = "3"    # Shows as a warning / error in IDEs
-        b = a * 4
-        assert b == "3333"  # True as python doesn't perform runtime type checking
-
-    This then leads to programmers putting type validation all throughout their code. For example::
-
-        def add(a, b):
-            return a + b
-
-        # Type hinted -> Concise and clear to read
-        def add(a: int, b: int) -> int:
-            return a + b
-
-        # Type safe...
-        def add(a: int, b:int) -> int:
-            if isinstance(a, int) and isinstance(b, int):
-                return a + b
-            else:
-                raise TypeError(f"Input variables 'a' and/or 'b' are not of type int.")
-
-    Thus adding significant bloat to the simplest of functions which can detract away from the fundamental logic or
-    coded algorithms, particularly when sharing code with others. In this case ``a + b``
-
-    Dataclasses or custom python classes are good for storing and access and have often been used for storing point cloud
-    data with it's corresponding scalar fields::
-
-        from dataclasses import dataclass
-
-        @dataclass
-        class PointCloud:
-            xyz: np.ndarray
-            intensity: np.ndarray
-
-        # Creation of an object is easy.
-        pcd = PointCloud(xyz=np.random.rand(100, 3), intensity=np.random.rand(100))
-
-    Creation of objects is easy. But the code slowl
-
-Python is a very easy to use language, with lots of flexibility and great libra
-ries, making it a go to for the
-scientific community. For academics and researchers, as algorithms get larger, data gets bigger, and researcher code
-gets more complex, this often leads to long debug times due to errors caused by Python's dynamic typing.
+:BaseArray: Base class supporting all array shapes with integer or floating datatypes
+:NumericMixins: Adds support for python numeric and logical operators (`a+b`, `a != b`)
+:FixedLengthArray: Supports data that can be sampled, reduced or extracted by row indexation
+:BaseVector: Validates array shape is a 1D array / vector
+:HomogeneousArray: Easy method to add a column of 1's (e.g. Homogeneous coordinates)
+:ArrayNx2: Validates array to be of shape [N, 2]
+:ArrayNx3: Validates array to be of shape [N, 3]
 
 
-When considering libraries for working with array data,
+Motivation
+==========
 
-* **Looks like a Numpy array. Sounds like a Numpy array. ACTS like a Numpy array!**
-* **Automated data validation (including array shape and dtype) with Pydantic**
-* **Support for extra attribute definition and access like a dataclass**
-* **Easy to subclass whilst getting the same functionality**
+*Looks* like a Numpy array, *sounds* like a numpy array, it **acts** like a Numpy array! ::
 
-This module contains the following base array types which can be subclassed as needed:
+    >>> a = BaseArray([[0, 1, 2], [3, 3, 3]])
+    >>> np.add(a, 1)
+    array([[1, 2, 3],
+       [4, 4, 4]])
 
-* *BaseArray*: Base class for all other array types
-* *NumericMixins*: Extends numpy like magic method behaviour for equality and numeric operations
-* *FixedLengthArray*: Treats the array as a list of row vectors
-* *BaseVector*: 1D Vector
-* *HomogeneousArray*: Arrays that can be converted to homogeneous coordinates
-* *ArrayNx2*: Nx2 sized arrays (E.g. 2D coordinates)
-* *ArrayNx3*: Nx3 sized arrays (E.g. 3D coordinates)
+and with the NumericMixIns class for built in operators::
 
-PACKAGES
---------
+    >>> a = NumericMixins([[0, 1, 2], [3, 3, 3]])
+    >>> a + 1
+    array([[1, 2, 3],
+       [4, 4, 4]])
+
+    >>> a = NumericMixins([[0, 1, 2], [3, 3, 3]])
+    >>> a += 1
+    >>> a
+    NumericMixins(arr=array([[1, 2, 3],
+            [4, 4, 4]]))
+
+It natively supports additional attribute information being assigned to the class. Much like python's dataclasses
+module. ::
+
+    @dataclass
+    class DataclassBased:
+        array: np.ndarray
+        id: int
+        name: str
+
+    class CustomArray(NumericMixins):   #No need to define array
+        id: int
+        name: str
+
+
+    data = np.random.rand(100,100)
+
+    a = DataclassBased(data, 13, 'old_dataclasses_object')
+    b = CustomArray(data, id=13, name='New object')
+
+But importantly, it performs type validation unlike dataclasses::
+
+    # No error is thrown here
+    DataclassBased('not an array', 'not an int', 24)
+
+    # Throw errors
+    CustomArray('not an array', id=13, name='New object')
+    CustomArray(data, id='string passed', name='Invalid ID')
+    CustomArray(data, id=13, name=[1, 2, 3])
+
+This is also leveraging `Numpydantic` for shape and dtype validation ::
+
+    class Array4x4Uint8(BaseArray):
+        arr: NDArray[Shape['4, 4'], dtype=np.uint8]     # arr is the base attribute for the class
+
+    data = np.ones((4,4), dtype=np.uint8)
+    invalid_shape = np.ones((5,5), dtype=np.uint8)
+    invalid_dtype = np.ones((4,4), dtype=np.float32)
+
+    Array4x4Uint8(data) # This is ok
+    Array4x4Uint8(invalid_shape) # Validation error on array shape
+    Array4x4Uint8(invalid_dtype) # Validation error on dtype
+
+
+In essence, it is an amalgamated class combining
+`Pydantic BaseModels <https://docs.pydantic.dev/latest/concepts/models/>`_ ,
+`Numpy Ndarrays <https://numpy.org/devdocs/reference/generated/numpy.ndarray.html>`_ and
+`Numpydantic <https://numpydantic.readthedocs.io/en/latest/index.html>`_ type definitions.
+
+This module is broken down into two main files. `base_arrays` contains all the major class definitions above.
+`base_types` contains some pre-existing NDArray shape and dtype definitions from Pydantic for re-use in defining custom
+classes and type hinting your own code. ::
+
+For example, this class will validate the array data to be in the shape of [N, 2] and check the dtype is np.Int32 ::
+
+    from GSEGUtils.base_array import NumericMixin
+    from GSEGUtils.base_types import Array_Nx2_Int32_T
+
+    class ValidatedArray(NumericMixin):
+        arr: Array_Nx2_Int32_T
+
+Modules
+=======
 .. toctree::
    :maxdepth: 1
 

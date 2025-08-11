@@ -1,8 +1,15 @@
 GSEGUtils.base\_arrays module
 =============================
 
-
 .. automodule:: GSEGUtils.base_arrays
-   :exclude-members: MinMaxKwargsT
+   :members:
+   :show-inheritance:
+   :member-order: bysource
+
+   .. autosummary:
+      :toctree: .
+      :recursive:
+
+
 
 

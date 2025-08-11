@@ -1,8 +1,6 @@
-GSEGUtils.util module
-=====================
+GSEGUtils.util
+==============
 
 .. automodule:: GSEGUtils.util
-   :members:
-   :ignore-module-all:
-   :undoc-members:
-   :show-inheritance:
+   :exclude-members: logger
+   :private-members:

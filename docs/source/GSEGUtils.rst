@@ -4,7 +4,7 @@ GSEGUtils
 
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    GSEGUtils.ValidatedArray
    GSEGUtils.util
