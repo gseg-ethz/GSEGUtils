@@ -33,6 +33,9 @@ Included in the package are a number of predefined classes to create your custom
 Motivation
 ==========
 
+Numpy-like Behavior
+-------------------
+
 *Looks* like a Numpy array, *sounds* like a numpy array, it **acts** like a Numpy array! ::
 
     >>> a = BaseArray([[0, 1, 2], [3, 3, 3]])
@@ -53,6 +56,10 @@ and with the NumericMixIns class for built in operators::
     NumericMixins(arr=array([[1, 2, 3],
             [4, 4, 4]]))
 
+
+Extra Attribute Definition
+--------------------------
+
 It natively supports additional attribute information being assigned to the class. Much like python's dataclasses
 module. ::
 
@@ -72,7 +79,12 @@ module. ::
     a = DataclassBased(data, 13, 'old_dataclasses_object')
     b = CustomArray(data, id=13, name='New object')
 
-But importantly, it performs type validation unlike dataclasses::
+
+Automated Validation
+--------------------
+
+But importantly, it performs type validation unlike dataclasses using
+`Pydantic <https://docs.pydantic.dev/latest/concepts/models/>`_ ::
 
     # No error is thrown here
     DataclassBased('not an array', 'not an int', 24)
@@ -82,7 +94,8 @@ But importantly, it performs type validation unlike dataclasses::
     CustomArray(data, id='string passed', name='Invalid ID')
     CustomArray(data, id=13, name=[1, 2, 3])
 
-This is also leveraging `Numpydantic` for shape and dtype validation ::
+This is also leveraging `Numpydantic <https://numpydantic.readthedocs.io/en/latest/index.html>`_
+for shape and dtype validation ::
 
     class Array4x4Uint8(BaseArray):
         arr: NDArray[Shape['4, 4'], dtype=np.uint8]     # arr is the base attribute for the class
@@ -96,14 +109,14 @@ This is also leveraging `Numpydantic` for shape and dtype validation ::
     Array4x4Uint8(invalid_dtype) # Validation error on dtype
 
 
-In essence, it is an amalgamated class combining
-`Pydantic BaseModels <https://docs.pydantic.dev/latest/concepts/models/>`_ ,
-`Numpy Ndarrays <https://numpy.org/devdocs/reference/generated/numpy.ndarray.html>`_ and
-`Numpydantic <https://numpydantic.readthedocs.io/en/latest/index.html>`_ type definitions.
 
-This module is broken down into two main files. `base_arrays` contains all the major class definitions above.
-`base_types` contains some pre-existing NDArray shape and dtype definitions from Pydantic for re-use in defining custom
-classes and type hinting your own code. ::
+Modules
+=======
+
+This module is broken down into two main files.:
+
+* `base_arrays` contains all the major class definitions above
+* `base_types` contains some pre-existing Numpydantic shape and dtype definitions for reuse in typehints or validation
 
 For example, this class will validate the array data to be in the shape of [N, 2] and check the dtype is np.Int32 ::
 
@@ -113,8 +126,7 @@ For example, this class will validate the array data to be in the shape of [N, 2
     class ValidatedArray(NumericMixin):
         arr: Array_Nx2_Int32_T
 
-Modules
-=======
+
 .. toctree::
    :maxdepth: 1
 

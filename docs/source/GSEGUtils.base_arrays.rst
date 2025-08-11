@@ -1,15 +1,9 @@
-GSEGUtils.base\_arrays module
-=============================
+GSEGUtils.base\_arrays
+======================
 
 .. automodule:: GSEGUtils.base_arrays
    :members:
+   :undoc-members:
    :show-inheritance:
-   :member-order: bysource
-
-   .. autosummary:
-      :toctree: .
-      :recursive:
-
-
 
 
