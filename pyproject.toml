@@ -56,7 +56,7 @@ Issues = "https://github.com/gseg-ethz/GSEGUtils/issues"
 Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-doc = ["sphinx"]
+doc = ["sphinx", "sphinx-rtd-theme"]
 dev = [
     "black",  # Code formatter to make it consistant with PEP rules
     "flake8", # Code linter: Analyzes source code for errors, vulnerabilities, and stylistic issues

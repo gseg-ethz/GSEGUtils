@@ -280,7 +280,7 @@ def test_validate_Nx3_transposed(array):
     original = array.copy()
     if array.shape != (10, 3):
         original = original.T
-    array = validate_transposed_2d_array(array, cols=3)
+    array = validate_transposed_2d_array(array, n=3)
     assert array.shape == (10, 3)
     assert np.allclose(array, original)
 
@@ -290,7 +290,7 @@ def test_validate_Nx2_transposed(array):
     original = array.copy()
     if array.shape != (10, 2):
         original = original.T
-    array = validate_transposed_2d_array(array, cols=2)
+    array = validate_transposed_2d_array(array, n=2)
     assert array.shape == (10, 2)
     assert np.allclose(array, original)
 
@@ -299,7 +299,7 @@ def test_invalid_transposed_2d():
     a = np.random.rand(100, 100, 100)
     b = np.random.rand(100, 100)
     with pytest.raises(ValueError):
-        validate_transposed_2d_array(a, cols=3)
+        validate_transposed_2d_array(a, n=3)
 
 
 

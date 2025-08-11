@@ -1,5 +1,5 @@
-GSEGUtils.validators module
-===========================
+GSEGUtils.validators
+====================
 
 .. automodule:: GSEGUtils.validators
 
