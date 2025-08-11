@@ -1,7 +1,8 @@
-GSEGUtils.base\_types module
-============================
+GSEGUtils.base\_types
+=====================
 
 .. automodule:: GSEGUtils.base_types
    :members:
-   :member-order: bysource
+   :undoc-members:
+   :inherited-members:
    :show-inheritance:

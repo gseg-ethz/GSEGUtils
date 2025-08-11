@@ -12,18 +12,14 @@
 from __future__ import annotations
 
 import logging
-import builtins
+
 import copy
 from abc import ABC
 from typing import (
     Any,
     Generator,
-    MutableMapping,
     Optional,
     Self,
-    TypedDict,
-    NotRequired,
-    Unpack,
     TypeVar,
     cast
 )
@@ -43,7 +39,6 @@ from .base_types import (
     Vector_IndexT,
     VectorT,
     Vector_Bool_T,
-    NumberLikeT
 )
 
 
@@ -53,13 +48,6 @@ from numpy._typing._array_like import _ArrayLikeBool_co
 __all__ = ['BaseArray', 'NumericMixins', 'FixedLengthArray', 'BaseVector', 'HomogeneousArray', 'ArrayNx2', 'ArrayNx3']
 
 logger = logging.getLogger(__name__)
-
-# TODO change name to private
-class _MinMaxKwargsT(TypedDict, total=False):
-    out: NotRequired[None]
-    keepdims: NotRequired[builtins.bool]
-    initial: NotRequired[NumberLikeT]
-    where: NotRequired[_ArrayLikeBool_co]
 
 
 SelfT = TypeVar('SelfT', bound='BaseArray')
@@ -83,14 +71,6 @@ class BaseArray(ABC, BaseModel):
     arr: ArrayT #: Contains the raw numpy ndarray data
 
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
-        """
-
-        Parameters
-        ----------
-        arr: ArrayT
-            Input array data
-        kwargs: dict[str, Any
-        """
         super().__init__(arr=arr, **kwargs)
 
     # noinspection PyNestedDecorators
@@ -128,12 +108,12 @@ class BaseArray(ABC, BaseModel):
 
     # noinspection PyPep8Naming
     @property
-    def T(self) -> ArrayT:
+    def T(self) -> Self:
         """Returns a transposed view of the array
 
         Returns
         -------
-        ArrayT
+        Self
         """
         return self.arr.T
 
@@ -169,7 +149,7 @@ class BaseArray(ABC, BaseModel):
         return self.arr.ndim
 
     @property
-    def base(self) -> ArrayT|None:
+    def base(self) -> ArrayT | None:
         """Returns the base array if the array is a view, otherwise None
 
         Returns
@@ -206,8 +186,9 @@ class BaseArray(ABC, BaseModel):
 
         return self.arr.view(dtype=dtype, type=_type)
 
-    def min(self, **kwargs: Unpack[_MinMaxKwargsT]) -> Any:
+    def min(self, **kwargs: dict[str, Any]) -> Any:
         """Returns `self.arr.min(**kwargs)`
+        See `numpy.min <https://numpy.org/doc/2.2/reference/generated/numpy.min.html>`_ for more info.
 
         Parameters
         ----------
@@ -219,8 +200,9 @@ class BaseArray(ABC, BaseModel):
         """
         return self.arr.min(**kwargs)
 
-    def max(self, **kwargs: Unpack[_MinMaxKwargsT]) -> Any:
+    def max(self, **kwargs: dict[str, Any]) -> Any:
         """Returns `self.arr.max(**kwargs)`
+        See `numpy.max <https://numpy.org/doc/2.2/reference/generated/numpy.max.html>`_ for more info.
 
         Parameters
         ----------
@@ -292,10 +274,10 @@ class BaseArray(ABC, BaseModel):
         return self.arr != other
 
     def copy(self: Self,    # type: ignore[override]
-             array: npt.NDArray[Any] | Self | None = None,
+             array: ArrayT | Self | None = None,
              *,
              deep: bool = True,
-             update: Optional[MutableMapping[str, Any]] = None,
+             update: Optional[dict[str, Any]] = None,
              **kwargs: dict[str, Any]) -> Self:
         """ Creates a copy of this object.
 
@@ -303,11 +285,11 @@ class BaseArray(ABC, BaseModel):
 
         Parameters
         ----------
-        array : npt.NDArray[Any] | BaseArray | None, optional
+        array : ArrayT | Self | None, optional
             If set, directly passed as the `arr` attribute in the new instance
         deep : bool, optional
             Deep/shallow copy flag
-        update : MutableMapping[str, Any] or None, optional
+        update : dict[str, Any] or None, optional
             Dictionary of attributes to override in the new instance
         kwargs : dict[str, Any]
 
