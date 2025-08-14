@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GSEGUtils"
-description = "Description of ModuleA"
+description = "General utility functions and classes for GSEG research/projects"
 authors = [
     {name = "Nicholas Meyer", email = "meyernic@ethz.ch"},
     {name = "Jon Allemand", email = "jonal@ethz.ch"},
