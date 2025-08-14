@@ -39,12 +39,11 @@ This module is broken down into two main files.:
 
 For example, this class will validate the array data to be in the shape of [N, 2] and check the dtype is np.Int32 ::
 
-    from GSEGUtils.base_array import NumericMixin
+    from GSEGUtils.base_arrays import NumericMixins
     from GSEGUtils.base_types import Array_Nx2_Int32_T
 
-    class ValidatedArray(NumericMixin):
+    class ValidatedArray(NumericMixins):
         arr: Array_Nx2_Int32_T
-
 
 .. toctree::
    :maxdepth: 2
