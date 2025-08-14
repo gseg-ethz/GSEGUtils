@@ -8,12 +8,12 @@ development and research.
 
 Currently this module includes:
 
-| Package             | Description                                                      |
-|---------------------|------------------------------------------------------------------|
-| **ValidatedArray**  | Base classes with automated validation on type, shape and attributes |
-| **Lazy Disk Cache** | Automated data offloading for memory management                  |
-| **Util**            | Includes utility functions such as angle unit conversions        |
-| **Validators**      | Helper functions for performing validation and normalisation     | 
+| Package             | Description                                                                         |
+|---------------------|-------------------------------------------------------------------------------------|
+| **BaseArrays**      | Sub-classable array objects with automated validation on type, shape and attributes |
+| **Lazy Disk Cache** | Automated data offloading for memory management                                     |
+| **Util**            | Includes utility functions such as angle unit conversions                           |
+| **Validators**      | Helper functions for performing validation and normalisation                        | 
 
 ## Installation
 
@@ -35,15 +35,21 @@ pip intstall .
 Accessing the different classes can then be easily done by importing from `GSEGUtils`:
 
 ```python
-from GSEGUtils.base_array import BaseArry, Array_Nx3, Vector
-import numpy
+>>> from GSEGUtils.base_arrays import BaseArray, ArrayNx3, BaseVector
+>>> import numpy as np
+>>> data = np.random.rand(10,20,3)
+>>> array = BaseArray(data)
+>>> array.shape
+(10, 20, 3)
+>>> np.all(array == data)
+np.True_
 
-data = np.random.rand(10,20,3)
-array = BaseArry(data.copy())
-array += 10
-assert np.all(array == data + 10)
+>>> a = ArrayNx3(np.random.rand(10, 3))
+>>> b = a + 10
+>>> np.all(b == a + 10)
+np.True_
 
-coords3D = Array_Nx3(np.random.rand(20,3))
-coords3d.arr = np.random.rand(100,3)    # Valid
-coords3d.arr = data                     # RAISES ERROR -> invalid shape not of (N, 3)
+coords3D = Array_Nx3(np.random.rand(20))
+coords3d.arr = np.random.rand(100) # Valid
+coords3d.arr = np.random.rand(100, 3) # RAISES ERROR -> invalid shape not of (N, 3), expected (N,)
 ```

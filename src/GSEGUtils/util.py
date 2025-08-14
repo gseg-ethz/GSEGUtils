@@ -5,7 +5,7 @@ along with an enumeration for specifying angle units.
 
 import logging
 from enum import StrEnum
-from typing import Any, Optional, cast
+from typing import Optional, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -16,28 +16,25 @@ logger = logging.getLogger(__name__.split(".")[0])
 
 
 class AngleUnit(StrEnum):
+    """Enumerator for angular units.
+
+        * AngleUnit.RAD = 'rad'
+        * AngleUnit.DEGREE = 'deg'
+        * AngleUnit.GON = 'gon'
+
     """
-    An enumeration for angular units.
-
-    * AngleUnit.RAD = 'rad'
-    * AngleUnit.DEGREE = 'deg'
-    * AngleUnit.GON = 'gon'
-
-    """
-
     RAD = "rad"
     DEGREE = "deg"
     GON = "gon"
 
 
-def convert_angles(
-        values: Array_Float_T,
-        source_unit: AngleUnit,
-        target_unit: AngleUnit,
-        out: Optional[Array_Float_T] = None
-) -> Array_Float_T|None:
+def convert_angles(values: Array_Float_T,
+                   source_unit: AngleUnit,
+                   target_unit: AngleUnit,
+                   out: Optional[Array_Float_T] = None
+                   ) -> Array_Float_T|None:
     """
-    Converts an array of angles from one unit to another.
+    Converts an array of angles from one unit to another
 
     Parameters
     ----------
@@ -66,7 +63,9 @@ def convert_angles(
     Examples
     --------
     Convert an array of angles from degrees to radians
+
     ::
+
         >>> import numpy as np
         >>> from pchandler.util import convert_angles, AngleUnit
         >>> angles_deg = np.array([0, 90, 180, 360])
@@ -75,9 +74,11 @@ def convert_angles(
 
     Convert angles from radians to gradians
     ::
+
         >>> angles_rad = np.array([0, np.pi/2, np.pi, 2*np.pi])
         >>> convert_angles(angles_rad, AngleUnit.RAD, AngleUnit.GON)
         array([ 0., 100., 200., 400.])
+
     """
 
     if source_unit not in AngleUnit:
