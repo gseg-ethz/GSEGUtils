@@ -54,8 +54,7 @@ SelfT = TypeVar('SelfT', bound='BaseArray')
 
 
 class BaseArray(ABC, BaseModel):
-    """Subclassable array supporting all shapes and numeric/boolean dtypes."""
-
+    #: Model config :class:`ConfigDict <pydantic.ConfigDict>`
     model_config = ConfigDict(
         arbitrary_types_allowed=True,   # Required for numpy types and other newly defined types
         validate_assignment=True,       # Should validate anytime an attribute is set
@@ -71,7 +70,15 @@ class BaseArray(ABC, BaseModel):
     arr: ArrayT #: Contains the raw numpy ndarray data
 
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+        """Subclassable array supporting all shapes and numeric/boolean dtypes.
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
+
 
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='before')
@@ -97,12 +104,12 @@ class BaseArray(ABC, BaseModel):
     def __array_interface__(self) -> dict[str, Any]:
         """ Access to the base __array_interface__ property.
 
-            `__array_interface__` allows interaction with the object from other
-            libraries and functions that support the array interface protocol.
+        `__array_interface__` allows interaction with the object from other
+        libraries and functions that support the array interface protocol.
 
-            Returns
-            -------
-            dict[str, Any]
+        Returns
+        -------
+        dict[str, Any]
         """
         return self.arr.__array_interface__
 
@@ -315,9 +322,14 @@ class BaseArray(ABC, BaseModel):
 
 
 class NumericMixins(BaseArray):
-    """Supports Python's built-in numerical and logical operators
-    """
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+        """Subclassable array type with Python built-in numerical and logical operators
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
 
     def __add__(self, other: Any) -> Self:
@@ -416,11 +428,16 @@ class NumericMixins(BaseArray):
 
 
 class FixedLengthArray(NumericMixins):
-    """Class supporting sample, reduce, extract and mask funcs for row-based data
-
-    E.g., vectors or coordinate sets
-    """
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+        """Class supporting sample, reduce, extract and mask funcs for row-based data
+
+        E.g., vectors or coordinate sets
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
 
     # TODO should this generator be different?
@@ -518,10 +535,16 @@ class FixedLengthArray(NumericMixins):
 
 
 class BaseVector(FixedLengthArray):
-    """Shape validated 1D array"""
     arr: VectorT
 
     def __init__(self, arr: VectorT, **kwargs: dict[str, Any]) -> None:
+        """Shape validated 1D array
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
 
     # noinspection PyNestedDecorators
@@ -533,8 +556,14 @@ class BaseVector(FixedLengthArray):
 
 
 class HomogeneousArray(FixedLengthArray):
-    """Helper class for homogeneous coordinate creation"""
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]) -> None:
+        """Helper class for homogeneous coordinate creation
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr, **kwargs)
 
     # noinspection PyPep8Naming
@@ -545,7 +574,13 @@ class HomogeneousArray(FixedLengthArray):
 
 
 class ArrayNx2(HomogeneousArray):
-    """Shape validated Nx2 array"""
+    """Shape validated Nx2 array
+
+    Parameters
+    ----------
+    arr: ArrayT
+        Input array data
+    """
     arr: Array_Nx2_T
 
     def __init__(self, arr: Array_Nx2_T, **kwargs: dict[str, Any]) -> None:
@@ -560,7 +595,13 @@ class ArrayNx2(HomogeneousArray):
 
 
 class ArrayNx3(HomogeneousArray):
-    """Shape validated Nx3 array"""
+    """Shape validated Nx3 array
+
+    Parameters
+    ----------
+    arr: ArrayT
+        Input array data
+    """
     arr: Array_Nx3_Float_T
 
     def __init__(self, arr: Array_Nx3_Float_T, **kwargs: dict[str, Any]) -> None:

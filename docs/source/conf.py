@@ -36,14 +36,14 @@ python_use_unqualified_type_name = True                # False
 
 # ======= Autodoc Config =========
 autoclass_content = 'both'                              # 'both'
-autodoc_class_signature = 'seperated'                       # 'mixed' / 'seperated
+autodoc_class_signature = 'separated'                       # 'mixed' / 'separated
 autodoc_member_order = 'bysource'                       # 'alphabetical'
 autodoc_default_options = {             # {}
     'exclude-members': 'model_config'
 }
 autodoc_docstring_signature = True                      # True
 autodoc_mock_imports = []                               # []
-autodoc_typehints = 'both'                       # 'signature'
+autodoc_typehints = 'description'                       # 'signature', 'init, 'both', 'none'
 autodoc_typehints_description_target = 'all'     # 'all', 'documented', 'documented_params'
 autodoc_type_aliases = {}                               # {}
 autodoc_typehints_format = 'short'                      # 'short'
@@ -54,6 +54,7 @@ autodoc_inherit_docstrings = True                       # True
 
 autosummary_generate = True
 
+linkcheck_allowed_redirects = {}
 
 # Defaults
 templates_path = ["_templates"]

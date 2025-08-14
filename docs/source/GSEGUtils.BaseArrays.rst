@@ -1,6 +1,6 @@
-************************
-GSEGUtils.ValidatedArray
-************************
+********************
+GSEGUtils.BaseArrays
+********************
 
 Description
 ===========
@@ -28,6 +28,29 @@ Included in the package are a number of predefined classes to create your custom
 :HomogeneousArray: Easy method to add a column of 1's (e.g. Homogeneous coordinates)
 :ArrayNx2: Validates array to be of shape [N, 2]
 :ArrayNx3: Validates array to be of shape [N, 3]
+
+Modules
+=======
+
+This module is broken down into two main files.:
+
+* :py:mod:`GSEGUtils.base_arrays` contains all the major class definitions above
+* :py:mod:`GSEGUtils.base_types` contains some pre-existing Numpydantic shape and dtype definitions for reuse in typehints or validation
+
+For example, this class will validate the array data to be in the shape of [N, 2] and check the dtype is np.Int32 ::
+
+    from GSEGUtils.base_array import NumericMixin
+    from GSEGUtils.base_types import Array_Nx2_Int32_T
+
+    class ValidatedArray(NumericMixin):
+        arr: Array_Nx2_Int32_T
+
+
+.. toctree::
+   :maxdepth: 2
+
+   GSEGUtils.base_arrays
+   GSEGUtils.base_types
 
 
 Motivation
@@ -110,25 +133,3 @@ for shape and dtype validation ::
 
 
 
-Modules
-=======
-
-This module is broken down into two main files.:
-
-* `base_arrays` contains all the major class definitions above
-* `base_types` contains some pre-existing Numpydantic shape and dtype definitions for reuse in typehints or validation
-
-For example, this class will validate the array data to be in the shape of [N, 2] and check the dtype is np.Int32 ::
-
-    from GSEGUtils.base_array import NumericMixin
-    from GSEGUtils.base_types import Array_Nx2_Int32_T
-
-    class ValidatedArray(NumericMixin):
-        arr: Array_Nx2_Int32_T
-
-
-.. toctree::
-   :maxdepth: 1
-
-   GSEGUtils.base_arrays
-   GSEGUtils.base_types

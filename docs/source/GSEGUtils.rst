@@ -1,12 +1,12 @@
-GSEGUtils
+GSEGUtils API
 =============
 .. automodule:: GSEGUtils
 
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 3
 
-   GSEGUtils.ValidatedArray
+   GSEGUtils.BaseArrays
    GSEGUtils.util
    GSEGUtils.validators
 
@@ -28,10 +28,10 @@ DESCRIPTION
 
     This module contains the following base array types which can be subclassed as needed:
 
-    * *BaseArray*: Base class for all other array types
-    * *NumericMixins*: Extends numpy like magic method behaviour for equality and numeric operations
-    * *FixedLengthArray*: Treats the array as a list of row vectors
-    * *BaseVector*: 1D Vector
-    * *HomogeneousArray*: Arrays that can be converted to homogeneous coordinates
-    * *ArrayNx2*: Nx2 sized arrays (E.g. 2D coordinates)
-    * *ArrayNx3*: Nx3 sized arrays (E.g. 3D coordinates)
+    :BaseArray: Base class for all other array types
+    :NumericMixins: Extends numpy like magic method behaviour for equality and numeric operations
+    :FixedLengthArray: Treats the array as a list of row vectors
+    :BaseVector: 1D Vector
+    :HomogeneousArray: Arrays that can be converted to homogeneous coordinates
+    :ArrayNx2: Nx2 sized arrays (E.g. 2D coordinates)
+    :ArrayNx3: Nx3 sized arrays (E.g. 3D coordinates)
