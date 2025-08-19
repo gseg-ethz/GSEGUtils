@@ -139,7 +139,6 @@ class LazyDiskCache(ABC):
     def ensure_loaded(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            logger.debug(f"Ensure_loaded was called for {func.__name__}")
             was_offloaded = self.offloaded
             if was_offloaded:
                 self.load()
@@ -263,7 +262,9 @@ class LazyDiskCache(ABC):
                 self.on_offload()
             except Exception:
                 logger.exception("Error in on_offload hook")
-            logger.debug("Flushed buffer to disk")
+            logger.debug(
+                f"Flushed buffer to from {self._cache_path}."
+            )
 
 
     def load(self, mode: Literal["r", "r+", "w+", "c"] = "r+") -> None:
@@ -290,8 +291,10 @@ class LazyDiskCache(ABC):
                 self.on_load()
             except Exception:
                 logger.exception("Error in on_load hook")
-            logger.debug(f"Loaded buffer from {self._cache_path}.\\r\\n"
-                         f"Min value: {np.nanmin(self._mmap)}; Max value: {np.nanmax(self._mmap)}")
+            logger.debug(
+                f"Loaded buffer from {self._cache_path}.\r\n"
+                # f"Min value: {np.nanmin(self._mmap)}; Max value: {np.nanmax(self._mmap)}"
+            )
 
     # def __reduce__(self):
     #     self.disable_purge()
