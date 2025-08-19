@@ -36,10 +36,20 @@ dependencies = [ # https://packaging.python.org/en/latest/specifications/depende
     "pydantic ~= 2.11",
     "numpydantic ~= 1.6",
     "colorlog ~= 6.9",
+    "joblib",
+    "tqdm",
 ]
 
 [tool.setuptools.dynamic]
 readme = {file = ["README.md"]}
+
+[tool.setuptools]
+packages = { find = { where = ["src"] } }
+package-dir = { "" = "src" }
+include-package-data = true
+
+[tool.setuptools.package-data]
+yourpkg = ["py.typed", "**/*.pyi"]
 
 [tool.setuptools_scm]
 write_to = "src/GSEGUtils/_version.py"
@@ -56,11 +66,13 @@ Issues = "https://github.com/gseg-ethz/GSEGUtils/issues"
 Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-doc = ["sphinx"]
+doc = [
+    "sphinx"
+]
 dev = [
     "black",  # Code formatter to make it consistant with PEP rules
     "flake8", # Code linter: Analyzes source code for errors, vulnerabilities, and stylistic issues
 ]
 
-#[project.scripts]
-#moduleA-cli = "GSEGUtils.cli:main_cli"
+[project.scripts]
+generate-init-stubs = "GSEGUtils.generate_init_stubs:main"
