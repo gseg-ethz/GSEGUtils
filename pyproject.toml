@@ -14,7 +14,7 @@ maintainers = [
 ]
 requires-python = ">=3.12"
 keywords = ["ONE", "TWO"]
-license = {text = "Proprietary"} # To be changed once released
+license = {file = "LICENSE"}
 classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#classifiers
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -46,7 +46,7 @@ write_to = "src/GSEGUtils/_version.py"
 local_scheme = "no-local-version"
 version_scheme = "post-release"
 tag_regex = '^v?(?P<version>\d+\.\d+\.\d+)$'
-git_describe_command = "git describe --dirty --tags --long --match 'v[0-9]*.[0-9]*.[0-9]*'"
+git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*.[0-9]*.[0-9]*"]
 
 [project.urls]
 #Homepage = "https://example.com"
@@ -56,11 +56,18 @@ Issues = "https://github.com/gseg-ethz/GSEGUtils/issues"
 Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-doc = ["sphinx", "sphinx-rtd-theme"]
-dev = [
-    "black",  # Code formatter to make it consistant with PEP rules
-    "flake8", # Code linter: Analyzes source code for errors, vulnerabilities, and stylistic issues
+doc = [
+    "sphinx @ git+https://github.com/sphinx-doc/sphinx.git@9a08711e0e18c63c609070aa0a79019b4db45a78",
+    "sphinx_rtd_theme"
 ]
-
-#[project.scripts]
-#moduleA-cli = "GSEGUtils.cli:main_cli"
+dev = [
+    "black~=25.1",            # formatter
+    "isort~=6.0",             # import sorter
+    "flake8~=7.3",            # style linter
+    "flake8-bugbear",         # best-practice checks
+    "flake8-docstrings",      # docstring checks
+    "mypy~=1.17",             # static typing
+    "pre-commit~=4.3",        # git hooks runner
+    "pytest~=8.4",            # test framework
+    "coverage~=7.0",          # coverage reporting
+]
