@@ -4,8 +4,5 @@
   "reportMissingImports": "error",
   "reportMissingModuleSource": "warning",
 
-  "venvPath": "/scratch/miniconda3/envs",
-  "venv": "gsegutils-dev312",
-
   "include": ["src/GSEGUtils", "scripts", "tests"]
 }
