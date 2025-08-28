@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # class SupportsOffload(Protocol):
 #     def offload(self) -> None: ...
 
-# type Factory[T: LazyDiskCache] = Callable[[_NDArray, Unpack[LazyDiskCacheKw]], T]
+# type Factory[T: LazyDiskCache.rst] = Callable[[_NDArray, Unpack[LazyDiskCacheKw]], T]
 @runtime_checkable
 class Factory[T: LazyDiskCache](Protocol):
     def __call__(self, data: NDArray, **kwargs: Unpack[LazyDiskCacheKw]) -> T: ...

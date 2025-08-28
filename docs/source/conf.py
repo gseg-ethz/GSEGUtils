@@ -22,6 +22,7 @@ extensions = [
     "sphinx.ext.napoleon",  # For Google-style and NumPy-style docstrings
     "sphinx.ext.autosummary",  # For summary tables
     "sphinx.ext.intersphinx",
+    "sphinx.ext.extlinks"
 ]
 
 # Intersphinx Config
@@ -45,7 +46,9 @@ autodoc_docstring_signature = True                      # True
 autodoc_mock_imports = []                               # []
 autodoc_typehints = 'description'                       # 'signature', 'init, 'both', 'none'
 autodoc_typehints_description_target = 'all'     # 'all', 'documented', 'documented_params'
-autodoc_type_aliases = {}                               # {}
+autodoc_type_aliases = {
+    'LowerStr': 'str'
+}                               # {}
 autodoc_typehints_format = 'short'                      # 'short'
 autodoc_preserve_defaults = True                        # False
 autodoc_use_type_comments = True                        # True
@@ -55,6 +58,10 @@ autodoc_inherit_docstrings = True                       # True
 autosummary_generate = True
 
 linkcheck_allowed_redirects = {}
+
+extlinks = {
+    'npd_docs': ('', None),
+}
 
 # Defaults
 templates_path = ["_templates"]

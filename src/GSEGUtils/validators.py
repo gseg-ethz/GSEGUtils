@@ -407,6 +407,7 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
     --------
     *np.int8 to np.uint16*
     ::
+
         >>> input = np.array([-50, 0, 127], dtype=np.int8)
         >>> linear_map_dtype(input, np.uint16)
         array([20046, 32896, 65535], dtype=uint16)

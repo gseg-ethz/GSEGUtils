@@ -1,16 +1,7 @@
 GSEGUtils.base\_arrays
 ======================
 
-.. currentmodule:: GSEGUtils.base_arrays
-
-.. autosummary::
-   BaseArray
-   NumericMixins
-   FixedLengthArray
-   BaseVector
-   HomogeneousArray
-   ArrayNx2
-   ArrayNx3
+See :doc:`./BaseArrays` for background motivation.
 
 .. automodule:: GSEGUtils.base_arrays
    :members:

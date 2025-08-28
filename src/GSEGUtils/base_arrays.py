@@ -3,8 +3,8 @@
 
     Provides a class with builtin functionality of:
 
-    * Interaction like a Numpy array
-    * Pydantic level automatic validation on class and attributes
+    * Interaction like a `Numpy <https://numpy.org/doc/stable/reference/arrays.ndarray.html>`__ array
+    * `Pydantic <https://docs.pydantic.dev/latest/>`__ level automatic validation on class and attributes
     * Simplistic class and attribute definition like dataclasses
 
 """
@@ -140,7 +140,7 @@ class BaseArray(ABC, BaseModel):
 
         Returns
         -------
-        np.dtype
+        :any:`dtype <numpy.dtype>`
 
         """
         return self.arr.dtype
@@ -569,7 +569,17 @@ class HomogeneousArray(FixedLengthArray):
     # noinspection PyPep8Naming
     @property
     def H(self) -> ArrayT:
-        """Returns the homogeneous coordinates of the array by adding a column of ones to the right"""
+        """
+        Returns the homogeneous coordinates of the array by adding a column of ones to the right
+
+        Parameters
+        ----------
+
+        Returns
+        -------
+        ArrayT
+
+        """
         return np.column_stack((self.arr, np.ones(len(self), dtype=self.dtype)))
 
 

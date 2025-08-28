@@ -1,6 +1,7 @@
-********************
-GSEGUtils.BaseArrays
-********************
+.. _BaseArraysDescription:
+**********
+BaseArrays
+**********
 
 Description
 ===========
@@ -21,35 +22,30 @@ point cloud data.
 
 Included in the package are a number of predefined classes to create your custom classes with:
 
-:BaseArray: Base class supporting all array shapes with integer or floating datatypes
-:NumericMixins: Adds support for python numeric and logical operators (`a+b`, `a != b`)
-:FixedLengthArray: Supports data that can be sampled, reduced or extracted by row indexation
-:BaseVector: Validates array shape is a 1D array / vector
-:HomogeneousArray: Easy method to add a column of 1's (e.g. Homogeneous coordinates)
-:ArrayNx2: Validates array to be of shape [N, 2]
-:ArrayNx3: Validates array to be of shape [N, 3]
+.. currentmodule:: GSEGUtils.base_arrays
 
-Modules
-=======
+.. autosummary::
+   BaseArray
+   NumericMixins
+   FixedLengthArray
+   BaseVector
+   HomogeneousArray
+   ArrayNx2
+   ArrayNx3
 
-This module is broken down into two main files.:
+This is broken down into two main files.:
 
 * :py:mod:`GSEGUtils.base_arrays` contains all the major class definitions above
 * :py:mod:`GSEGUtils.base_types` contains some pre-existing Numpydantic shape and dtype definitions for reuse in typehints or validation
 
-For example, this class will validate the array data to be in the shape of [N, 2] and check the dtype is np.Int32 ::
+For example, this class will automaticall validate the array data to be in the shape of [N, 2] and check the dtype is
+np.Int32 when a new object is initialized::
 
     from GSEGUtils.base_arrays import NumericMixins
     from GSEGUtils.base_types import Array_Nx2_Int32_T
 
     class ValidatedArray(NumericMixins):
         arr: Array_Nx2_Int32_T
-
-.. toctree::
-   :maxdepth: 2
-
-   GSEGUtils.base_arrays
-   GSEGUtils.base_types
 
 
 Motivation
@@ -131,4 +127,11 @@ for shape and dtype validation ::
     Array4x4Uint8(invalid_dtype) # Validation error on dtype
 
 
+Modules
+=======
 
+.. toctree::
+   :maxdepth: 1
+
+   GSEGUtils.base_arrays
+   GSEGUtils.base_types

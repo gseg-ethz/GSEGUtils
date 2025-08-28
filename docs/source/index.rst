@@ -6,7 +6,8 @@ GSEGUtils documentation
    :caption: Contents:
 
    about
-   examples
-   GSEGUtils
+   BaseArrays
+   LazyDiskCache
+   API
 
 
