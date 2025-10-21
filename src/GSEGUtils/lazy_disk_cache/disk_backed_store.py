@@ -172,9 +172,11 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         return iter(self._store.items())
 
     def offload(self, keys: Optional[str | list[str]] = None, pickle_container: bool = False) -> None:
-        """ 
-        Offloads the specified images from memory to disk. If no keys are provided, all images are offloaded.
-        If `pickle_container` is True, the entire DiskBackedNDArray object is pickled to disk instead of just offloading its data.
+        """
+        Offloads selected entries to disk. When no keys are provided, every cached
+        entry is considered. Items with `cache_enabled=False` are skipped. When
+        `pickle_container` is True we pickle the entire container, clear the in-memory
+        reference, and rely on lazy reload the next time the key is accessed.
         """
         if keys is None:
             keys = self.keys()
@@ -185,10 +187,19 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             obj = self._store[key]
             if obj is None:
                 continue
+            if not obj.cache_enabled:
+                logger.debug("Skipping offload for %s because caching is disabled.", key)
+                continue
             if pickle_container:
                 with open(self._get_pickle_path(key), "wb") as f:
                     pickle.dump(obj, f)
-                logger.debug(f"Pickled DiskBackedNDArray for {key=} to {self._get_pickle_path(key)}")
+                self._store[key] = None
+                logger.debug(
+                    "Pickled DiskBackedNDArray for %s to %s and cleared in-memory reference.",
+                    key,
+                    self._get_pickle_path(key),
+                )
+                del obj
             else:
                 obj.offload()
 
