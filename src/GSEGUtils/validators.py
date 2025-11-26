@@ -509,6 +509,9 @@ def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
         if 0 <= array.min() <= array.max() <= 1:
             return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype, 0, 1)
 
+        elif -1 <= array.min() <= array.max() <= 1:
+            return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype, -1, 1)
+
         return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype)
     return array
 
