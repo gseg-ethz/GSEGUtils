@@ -1,6 +1,16 @@
 About
 =====
 
+    |license-bsd-3| |documentation-status|
+
+    .. |license-bsd-3| image:: https://img.shields.io/badge/License-BSD_3-yellow.svg
+        :alt: License: BSD-3
+        :target: ./LICENSE.txt
+
+    .. |documentation-status| image:: https://app.readthedocs.org/projects/docs/badge/?version=latest
+        :alt: Documentation Status
+        :target: https://docs.readthedocs.io/en/latest/?badge=latest
+
 GSEGUtils provides some tools and functionality that could be used across other development or research projects.
 These are particularly focussed in the direction of research within the group.
 
@@ -63,8 +73,6 @@ Accessing the different classes can then be easily done by importing from `GSEGU
     coords3D = Array_Nx3(np.random.rand(20))
     coords3d.arr = np.random.rand(100) # Valid
     coords3d.arr = np.random.rand(100, 3) # RAISES ERROR -> invalid shape not of (N, 3), expected (N,)
-
-
 
 
 

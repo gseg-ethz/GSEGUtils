@@ -1,5 +1,3 @@
-from typing import Optional, NamedTuple
-
 from numpy import finfo, float32, pi
 from pydantic import ConfigDict, validate_call
 

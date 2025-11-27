@@ -1,24 +1,24 @@
 .. _BaseArraysDescription:
-**********
+
 BaseArrays
 **********
 
 Description
 ===========
 
-A subclassable array object for easier data handling and management in research projects.
+A subclassable array object for easier data handling and management
 
 The main problem it aims to solve was the coupling of numeric array data with other attributes that are automatically
 validated. The main benefits being:
 
 * Type errors are caught early (fail-fast) and time spent debugging is reduced
-* Code foot print is smaller and in term the logic is clearer
+* Code foot print is smaller and in turn more readable and algorithm logic is clearer
 * Still has easy interaction like a Numpy array or dataclasses
-* Can also be subclassed to perform array shape and dtype validation
+* Can also be subclassed to perform array shape and data type validation
 
-In essence, it can be subclassed easily like one makes a dataclass, acts like a Numpy NDArray object and performs
-automatic attribute validation using Pydantic. It has been designed largely around the `PCHandler` library for handling
-point cloud data.
+It can be subclassed easily, acts like a Numpy NDArray object and performs automatic attribute validation using
+Pydantic. It has been designed largely around the `PCHandler` library for the extension to point cloud data but can be
+used for other common array objects.
 
 Included in the package are a number of predefined classes to create your custom classes with:
 
@@ -61,6 +61,7 @@ Numpy-like Behavior
     array([[1, 2, 3],
        [4, 4, 4]])
 
+
 and with the NumericMixIns class for built in operators::
 
     >>> a = NumericMixins([[0, 1, 2], [3, 3, 3]])
@@ -75,8 +76,8 @@ and with the NumericMixIns class for built in operators::
             [4, 4, 4]]))
 
 
-Extra Attribute Definition
---------------------------
+Extra Attribute Definition and Validation
+-----------------------------------------
 
 It natively supports additional attribute information being assigned to the class. Much like python's dataclasses
 module. ::
@@ -98,9 +99,6 @@ module. ::
     b = CustomArray(data, id=13, name='New object')
 
 
-Automated Validation
---------------------
-
 But importantly, it performs type validation unlike dataclasses using
 `Pydantic <https://docs.pydantic.dev/latest/concepts/models/>`_ ::
 
@@ -112,8 +110,8 @@ But importantly, it performs type validation unlike dataclasses using
     CustomArray(data, id='string passed', name='Invalid ID')
     CustomArray(data, id=13, name=[1, 2, 3])
 
-This is also leveraging `Numpydantic <https://numpydantic.readthedocs.io/en/latest/index.html>`_
-for shape and dtype validation ::
+
+This leverages `Numpydantic <https://numpydantic.readthedocs.io/en/latest/index.html>`_ for shape and dtype validation ::
 
     class Array4x4Uint8(BaseArray):
         arr: NDArray[Shape['4, 4'], dtype=np.uint8]     # arr is the base attribute for the class
@@ -127,6 +125,11 @@ for shape and dtype validation ::
     Array4x4Uint8(invalid_dtype) # Validation error on dtype
 
 
+.. note::
+  You may see class names as `ArrayNx3` and `Array_Nx3_T`. *ArrayNx3* is designed to be a usable class whereas
+  *Array_Nx3_T* with the *_T* at the end indicates it's a type for validation purposes.
+
+
 Modules
 =======
 
@@ -135,3 +138,5 @@ Modules
 
    GSEGUtils.base_arrays
    GSEGUtils.base_types
+
+

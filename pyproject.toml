@@ -2,6 +2,8 @@
 requires = ["setuptools", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
+#TODO update documentation link and version
+
 [project]
 name = "GSEGUtils"
 description = "General utility functions and classes for GSEG research/projects"
@@ -34,8 +36,7 @@ dependencies = [ # https://packaging.python.org/en/latest/specifications/depende
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
     "numpy ~= 2.0",
     "pydantic ~= 2.11",
-    "numpydantic ~= 1.6",
-    "colorlog ~= 6.9",
+    "numpydantic ~= 1.6"
 ]
 
 [tool.setuptools.dynamic]

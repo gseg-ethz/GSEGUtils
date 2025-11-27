@@ -17,6 +17,8 @@ Use with Pydantic Models::
 
 Use in instance validation::
 
+    import numpy as np
+
     Array_Nx3_Float32_T = NDArray[Shape['*, 3'], np.float32]
 
     isinstance(np.ones((10, 3), dtype=np.float32), Array_Nx3_Float32_T)

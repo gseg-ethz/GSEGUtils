@@ -57,8 +57,6 @@ autodoc_inherit_docstrings = True                       # True
 
 autosummary_generate = True
 
-linkcheck_allowed_redirects = {}
-
 extlinks = {
     'npd_docs': ('', None),
 }
@@ -68,7 +66,12 @@ templates_path = ["_templates"]
 exclude_patterns = []
 html_theme = "sphinx_rtd_theme"
 html_static_path = ["_static"]
+html_extra_path = [r"../../LICENSE"]
 
+
+redirects = {
+    "index.html": "about.html"
+}
 
 def setup(app):
     app.add_css_file('gseg_utils_theme.css')

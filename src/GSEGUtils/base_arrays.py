@@ -1,6 +1,4 @@
 """
-    Base classes for the ValidatedArrays.
-
     Provides a class with builtin functionality of:
 
     * Interaction like a `Numpy <https://numpy.org/doc/stable/reference/arrays.ndarray.html>`__ array
@@ -440,13 +438,13 @@ class FixedLengthArray(NumericMixins):
         """
         super().__init__(arr=arr, **kwargs)
 
-    # TODO should this generator be different?
+    # TODO should this generator be different as the typical Generator type definition is different?
     def __iter__(self) -> Generator[tuple[str, Any], None, None]:
         for i in self.arr:
             yield i
 
     def create_mask(self, selection: IndexLike) -> Vector_Bool_T:
-        """Converts aa basic or advanced numpy index to a boolean vector mask that corresponds to the row indices
+        """Converts a basic or advanced numpy index to a boolean vector mask that corresponds to the row indices
 
         Parameters
         ----------
