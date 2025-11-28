@@ -1,15 +1,15 @@
 About
 =====
 
-    |license-bsd-3| |documentation-status|
+|license-bsd-3| |documentation-status|
 
-    .. |license-bsd-3| image:: https://img.shields.io/badge/License-BSD_3-yellow.svg
-        :alt: License: BSD-3
-        :target: ./LICENSE.txt
+.. |license-bsd-3| image:: https://img.shields.io/badge/License-BSD_3-yellow.svg
+    :alt: License: BSD-3
+    :target: ./LICENSE.txt
 
-    .. |documentation-status| image:: https://app.readthedocs.org/projects/docs/badge/?version=latest
-        :alt: Documentation Status
-        :target: https://docs.readthedocs.io/en/latest/?badge=latest
+.. |documentation-status| image:: https://readthedocs.org/projects/gsegutils/badge/?version=latest
+    :alt: Documentation Status
+    :target: https://readthedocs.org/projects/gsegutils/badge/
 
 GSEGUtils provides some tools and functionality that could be used across other development or research projects.
 These are particularly focussed in the direction of research within the group.
