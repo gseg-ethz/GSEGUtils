@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.2...v0.4.3) (2026-01-09)
+
+
+### 📚 Documentation
+
+* Robust LICENSE copy ([cf499bc](https://github.com/gseg-ethz/GSEGUtils/commit/cf499bcf9dbf691ba2565b5565a2cc1663eec3f4))
+
+
+### 🧹 Miscellaneous Chores
+
+* Update `LICENSE` to reflect ETHZ guidelines ([29a46ae](https://github.com/gseg-ethz/GSEGUtils/commit/29a46ae3e521498ec59aa4597ba14e73da842dc0))
+
 ## [0.4.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.1...v0.4.2) (2026-01-09)
 
 
