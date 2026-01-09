@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.4.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.1...v0.4.2) (2026-01-09)
+
+
+### ✨ Features
+
+* extend normalise function to handle floating point in [-1, 1] ([9a3529b](https://github.com/gseg-ethz/GSEGUtils/commit/9a3529b02046599247224d2b8fc99980a7353512))
+* **lazy_disk_cache:** `DiskCacheStore.offload` behavior change ([45a388d](https://github.com/gseg-ethz/GSEGUtils/commit/45a388d761694041516ecde3902325e7f2c018df))
+* **lazy_disk_cache:** add generic `DiskBackedStore` ([53afeaa](https://github.com/gseg-ethz/GSEGUtils/commit/53afeaac2ff95401731446b4216eee4fffbc82a9))
+* Logging-level selection added to 'setup_logging()' ([ffe91ea](https://github.com/gseg-ethz/GSEGUtils/commit/ffe91eab144e74119b8ecd8ea43816d48e6c57dd))
+
+
+### 🐛 Bug Fixes
+
+* include all submodules in `__init__` ([014c859](https://github.com/gseg-ethz/GSEGUtils/commit/014c8592456c5bf775153d89f2c5b84b8d3ba5b2))
+* reorder log messages in `lazy_disk_cache` ([82f0873](https://github.com/gseg-ethz/GSEGUtils/commit/82f0873d7ea5adc28e3096717528749f7f96edbb))
+
+
+### 📚 Documentation
+
+* Merge branch 'doc' into dev ([8616f49](https://github.com/gseg-ethz/GSEGUtils/commit/8616f4956b84ee5fe956200c0b5920ac57d9f148))
+
+
+### 🧹 Miscellaneous Chores
+
+* adapt `.gitignore` and add `pyrightconfig.json` ([0f1207a](https://github.com/gseg-ethz/GSEGUtils/commit/0f1207a0503dfe666ca5fa759a97cf3df05b078a))
+* merge remote-tracking branch 'origin/dev' into dev ([28e49d1](https://github.com/gseg-ethz/GSEGUtils/commit/28e49d1db9fd7fc344c28d17624e0301428fc246))
+* merge remote-tracking branch 'origin/doc' into doc ([818ba6a](https://github.com/gseg-ethz/GSEGUtils/commit/818ba6a9533103e1d526baae8cf1a77dc95b7172))
+
+
+### ♻️ Code Refactoring
+
+* include stub files ([7ce5c3a](https://github.com/gseg-ethz/GSEGUtils/commit/7ce5c3a05c352b5b496c52c12295ce42b7b4ab92))
+
+
+### 🔨 Build System
+
+* adapt `pyproject.toml` and add `LICENSE` ([b4f5e05](https://github.com/gseg-ethz/GSEGUtils/commit/b4f5e0531eccac0f5884d9ec927a7d345fd7362e))
+* adapt `pyproject.toml` and add `LICENSE` ([370381c](https://github.com/gseg-ethz/GSEGUtils/commit/370381c2707d9a4646e5abcc464fa3bb496ff1f8))
+* add `pyrightconfig.json` ([6dacd5e](https://github.com/gseg-ethz/GSEGUtils/commit/6dacd5ed5298435c4078718dcde3ab1ec4ed7202))
+
 ## [0.4.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.0...v0.4.1) (2025-08-06)
 
 
