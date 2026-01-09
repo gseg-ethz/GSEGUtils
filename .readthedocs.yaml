@@ -11,7 +11,7 @@ build:
     python: "3.12"
   jobs:
     post_build:
-      - mv $READTHEDOCS_OUTPUT/html/LICENSE $READTHEDOCS_OUTPUT/html/LICENSE.txt
+      - if [ -f "$READTHEDOCS_OUTPUT/html/LICENSE" ]; then mv "$READTHEDOCS_OUTPUT/html/LICENSE" "$READTHEDOCS_OUTPUT/html/LICENSE.txt"; fi
 
 sphinx:
   configuration: docs/source/conf.py

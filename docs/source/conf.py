@@ -1,11 +1,13 @@
 import os
 import sys
 
+
 from sphinx.util import logging
 
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.abspath("../../src"))
+
 
 
 project = "GSEGUtils"
@@ -75,6 +77,7 @@ redirects = {
 
 def setup(app):
     app.add_css_file('gseg_utils_theme.css')
+
 
 rst_epilog = """
 .. |NDArray| replace:: :external+numpydantic:py:class:`NDArray <numpydantic.NDArray>`
