@@ -1,4 +1,5 @@
-from typing import Unpack
+from pathlib import Path
+from typing import Unpack, Self
 
 import numpy as np
 from numpy.typing import DTypeLike, NDArray
@@ -12,14 +13,28 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
 
     def __init__(
             self,
-            array_data: NDArray,
+            data: NDArray,
             **settings: Unpack[LazyDiskCacheKw]
 
     ) -> None:
-        self._data = array_data
-        self._shape = array_data.shape
-        self._dtype = array_data.dtype
+        self._data = data
+        self._shape = data.shape
+        self._dtype = data.dtype
         super().__init__(**settings)
+
+    # @classmethod
+    # def from_file(
+    #         cls,
+    #         file_path: str | Path,
+    #         **settings: Unpack[LazyDiskCacheKw]
+    # ) -> Self:
+    #     if not isinstance(file_path, Path):
+    #         file_path = str(file_path)
+        
+    #     if not Path(file_path).exists():
+    #         raise FileNotFoundError(f"File '{file_path}' does not exist.")
+    #     array_data = np.load(file_path)
+    #     return cls(array_data, **settings)
 
     @LazyDiskCache.ensure_loaded
     def __array__(self, dtype=None, *, copy=None):

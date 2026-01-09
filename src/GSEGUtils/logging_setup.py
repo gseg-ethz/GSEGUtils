@@ -1,9 +1,31 @@
+import logging
 import logging.config
 from pathlib import Path
+import tempfile
+from typing import Optional, Literal
 
-def setup_logging(log_file_path: Path|str ="debug.log"):
-    if isinstance(log_file_path, Path) and not log_file_path.parent.exists():
-        log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+LOGGING_LEVELS = Literal['CRITICAL', 'FATAL', 'ERROR', 'WARN', 'WARNING', 'INFO', 'DEBUG', 'NOTSET']
+
+def setup_logging(
+        logfile_path: Optional[Path | str] = None,
+        console_level: LOGGING_LEVELS = "WARNING",
+        file_level: LOGGING_LEVELS = "DEBUG",
+) -> Path:
+    if logfile_path is None:
+        logfile_path = Path(tempfile.mkdtemp()) / "debug.log"
+    elif isinstance(logfile_path, str):
+        logfile_path = Path(logfile_path)
+
+    if not logfile_path.parent.exists():
+        logfile_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logging_mapping = logging.getLevelNamesMapping()
+    numeric_console: int = logging_mapping.get(console_level.upper(), 0)
+    numeric_file: int = logging_mapping.get(file_level.upper(), 0)
+    numeric_root = min(numeric_console, numeric_file)
+    numeric_root = 30 if numeric_root == 0 else numeric_root
+
     log_config = {
         "version": 1,
         "disable_existing_loggers": False,
@@ -26,20 +48,21 @@ def setup_logging(log_file_path: Path|str ="debug.log"):
             "stdout": {
                 "class": "logging.StreamHandler",
                 "formatter": "detailed",
+                "level": console_level,
                 "stream": "ext://sys.stdout"
             },
             "file": {
                 "class": "logging.FileHandler",
                 "formatter": "file",
-                "filename": log_file_path,
-                "level": "DEBUG",
+                "filename": logfile_path,
+                "level": file_level,
                 "mode": "a",  # append mode
                 "encoding": "utf-8"
             }
         },
         "loggers": {
             "root": {
-                "level": "DEBUG",
+                "level": numeric_root,
                 "handlers": [
                     "stdout",
                     "file"
@@ -59,3 +82,4 @@ def setup_logging(log_file_path: Path|str ="debug.log"):
     }
 
     logging.config.dictConfig(log_config)
+    return logfile_path

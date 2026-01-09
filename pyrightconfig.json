@@ -1,0 +1,8 @@
+{
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "error",
+  "reportMissingModuleSource": "warning",
+
+  "include": ["src/GSEGUtils", "scripts", "tests"]
+}

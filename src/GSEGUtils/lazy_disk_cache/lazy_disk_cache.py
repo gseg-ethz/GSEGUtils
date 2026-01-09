@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import wraps
 from pathlib import Path
 import threading
-from typing import Optional, Any, Literal, Unpack, TypedDict, Required, NotRequired, Self
+from typing import Optional, Any, Literal, Unpack, TypedDict, Required, NotRequired, Self, cast
 import logging
 import weakref
 import tempfile
@@ -19,6 +19,11 @@ from GSEGUtils.config import get_defaults, CacheDefaults
 
 logger = logging.getLogger(__name__)
 
+class LazyDiskCacheKw(TypedDict, total=False):
+    enable_caching: bool
+    cache_path: Optional[Path]
+    purge_disk_on_gc: bool
+    automatic_offloading: bool
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True), frozen=True)
 class LazyDiskCacheConfig:
@@ -26,20 +31,30 @@ class LazyDiskCacheConfig:
     cache_path: Optional[Path] = None
     purge_disk_on_gc: bool = True
     automatic_offloading: bool = False
-
+    
+    def as_kwargs(self) -> LazyDiskCacheKw:
+        lazy_disk_cache_kw = LazyDiskCacheKw(
+            enable_caching=self.enable_caching,
+            cache_path=self.cache_path,
+            purge_disk_on_gc=self.purge_disk_on_gc,
+            automatic_offloading=self.automatic_offloading,
+        )
+        return lazy_disk_cache_kw
+    
+    @classmethod
+    def from_kwargs(cls, settings: LazyDiskCacheKw) -> Self:
+        return cls(**settings)
+    
+    def updated(self, **overrides: LazyDiskCacheKw) -> Self:
+        return replace(self, **overrides)
+    
     @validate_call()
     def extend_cache_path(self, new_folder: str) -> Self:
-        config_dict = asdict(self)
-        old_path = config_dict.pop("cache_path")
-        old_path = old_path / new_folder if old_path else None
-        config_dict["cache_path"] = old_path
-        return type(self)(**config_dict)
+        new_path = self.cache_path / new_folder if self.cache_path else None
+        if new_path is None:
+            logger.info("Cache path is None; cannot extend.")
+        return replace(self, cache_path=new_path)
 
-class LazyDiskCacheKw(TypedDict, total=False):
-    enable_caching: bool
-    cache_path: Optional[Path]
-    purge_disk_on_gc: bool
-    automatic_offloading: bool
 
 class LazyDiskCache(ABC):
     _MEMMAP_SUFFIX = ".dat"
@@ -139,7 +154,6 @@ class LazyDiskCache(ABC):
     def ensure_loaded(func):
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            logger.debug(f"Ensure_loaded was called for {func.__name__}")
             was_offloaded = self.offloaded
             if was_offloaded:
                 self.load()
@@ -263,7 +277,9 @@ class LazyDiskCache(ABC):
                 self.on_offload()
             except Exception:
                 logger.exception("Error in on_offload hook")
-            logger.debug("Flushed buffer to disk")
+            logger.debug(
+                f"Flushed buffer to from {self._cache_path}."
+            )
 
 
     def load(self, mode: Literal["r", "r+", "w+", "c"] = "r+") -> None:
@@ -290,8 +306,10 @@ class LazyDiskCache(ABC):
                 self.on_load()
             except Exception:
                 logger.exception("Error in on_load hook")
-            logger.debug(f"Loaded buffer from {self._cache_path}.\\r\\n"
-                         f"Min value: {np.nanmin(self._mmap)}; Max value: {np.nanmax(self._mmap)}")
+            logger.debug(
+                f"Loaded buffer from {self._cache_path}.\r\n"
+                # f"Min value: {np.nanmin(self._mmap)}; Max value: {np.nanmax(self._mmap)}"
+            )
 
     # def __reduce__(self):
     #     self.disable_purge()

@@ -1,18 +1,23 @@
+"""
+    Provides a class with builtin functionality of:
+
+    * Interaction like a `Numpy <https://numpy.org/doc/stable/reference/arrays.ndarray.html>`__ array
+    * `Pydantic <https://docs.pydantic.dev/latest/>`__ level automatic validation on class and attributes
+    * Simplistic class and attribute definition like dataclasses
+
+"""
+
 from __future__ import annotations
 
 import logging
-import builtins
+
 import copy
 from abc import ABC
 from typing import (
     Any,
     Generator,
-    MutableMapping,
     Optional,
     Self,
-    TypedDict,
-    NotRequired,
-    Unpack,
     TypeVar,
     cast
 )
@@ -26,84 +31,68 @@ from .validators import validate_transposed_2d_array, convert_slice_to_integer_r
 from .base_types import (
     ArrayT,
     Array_Nx2_T,
-    Array_Nx3_T,
+    Array_Bool_T,
+    Array_Nx3_Float_T,
     IndexLike,
     Vector_IndexT,
     VectorT,
-    BoolArrayT,
-    NumberLikeT
+    Vector_Bool_T,
 )
 
 
 # noinspection PyProtectedMember
 from numpy._typing._array_like import _ArrayLikeBool_co
 
-
-class MinMaxKwargsT(TypedDict, total=False):
-    out: NotRequired[None]
-    keepdims: NotRequired[builtins.bool]
-    initial: NotRequired[NumberLikeT]
-    where: NotRequired[_ArrayLikeBool_co]
-
-
-SelfT = TypeVar('SelfT', bound='BaseArray')
+__all__ = ['BaseArray', 'NumericMixins', 'FixedLengthArray', 'BaseVector', 'HomogeneousArray', 'ArrayNx2', 'ArrayNx3']
 
 logger = logging.getLogger(__name__)
 
 
+SelfT = TypeVar('SelfT', bound='BaseArray')
+
+
 class BaseArray(ABC, BaseModel):
-    """
-    BaseArray is designed to be a subclassable, automatic validator for array-based classes.
-    It is built around a combination of the Pydantic and Numpydantic libraries.
-
-    In line with the PCHandler project, the main idea is that it can be extended to support the following:
-        -> Coordinate Classes
-        -> Scalar Fields
-        -> Transformation Matrices (4x4 Affine and 3x3 matrices -> intrinsic / extrinsic)
-        -> Image Arrays
-        -> ...
-
-    For now, it supports the following:
-        - Boolean, Floating, SignedInteger, and UnsignedInteger types
-        - Scalar values (although converted to 1D arrays)
-        - 1D or greater arrays (all 0D / scalars will be converted to 1D)
-    """
-
+    #: Model config :class:`ConfigDict <pydantic.ConfigDict>`
     model_config = ConfigDict(
-        arbitrary_types_allowed=True,   # Required for the numpy types
+        arbitrary_types_allowed=True,   # Required for numpy types and other newly defined types
         validate_assignment=True,       # Should validate anytime an attribute is set
         revalidate_instances="never",   # Don't keep validating instances (avoids infinite validation loops)
         validate_default=True,          # Ensure default values get validated as well
         strict=True,                    # Ensure that no coercion of types occurs - strict typechecking
         frozen=False,                   # Object can be manipulated
-        extra="ignore",                 # Extra fields passed are not stored in the object (e.g. kwargs)
-        serialize_by_alias=False,       # Serialisation takes the original field names (e.g. 'arr')
+        extra="ignore",                 # Extra fields passed are not stored in the object (e.g., kwargs)
+        serialize_by_alias=False,       # Serialization takes the original field names (e.g., 'arr')
         populate_by_name=False,         # Field is not expected to be populated by attribute name if an alias exists
     )
 
-    arr: ArrayT
+    arr: ArrayT #: Contains the raw numpy ndarray data
 
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+        """Subclassable array supporting all shapes and numeric/boolean dtypes.
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
+
 
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='before')
     @classmethod
-    def coerce_array(cls, value: Any) -> ArrayT:
-        """
-        Coerces the input into a compatible array format.
+    def _coerce_array(cls, value: npt.ArrayLike) -> ArrayT:
+        """ Coerce an object to a numpy array to assign to the new object.
 
         Parameters
         ----------
-        value : Any
-            Arraylike input value
+        value: npt.ArrayLike
 
         Returns
         -------
         ArrayT
-            Numpy array of at least 1D
-
         """
+        # TODO Is this needed? Will PCHandler tests still pass?
         if isinstance(value, BaseArray):
             value = value.arr
 
@@ -111,84 +100,72 @@ class BaseArray(ABC, BaseModel):
 
     @property
     def __array_interface__(self) -> dict[str, Any]:
-        """
-            Access to the base __array_interface__ property.
+        """ Access to the base __array_interface__ property.
 
-            `__array_interface__` allows interaction with the object from other
-            libraries and functions that support the array interface protocol.
+        `__array_interface__` allows interaction with the object from other
+        libraries and functions that support the array interface protocol.
 
-            Returns
-            -------
-            dict[str, Any]
-                Represents the array's metadata and structure
+        Returns
+        -------
+        dict[str, Any]
         """
         return self.arr.__array_interface__
 
     # noinspection PyPep8Naming
     @property
-    def T(self) -> ArrayT:
-        """
-            Transposed view of the array.
+    def T(self) -> Self:
+        """Returns a transposed view of the array
 
-            Returns
-            -------
-            ArrayT
-                Transposed view of the array.
+        Returns
+        -------
+        Self
         """
         return self.arr.T
 
     @property
     def shape(self) -> tuple[int, ...]:
-        """
-            Provides the shape of the array as a tuple.
+        """ Returns the shape of the array
 
-            Returns
-            -------
-            tuple of int
-                A tuple representing the dimensions of the array. Each element corresponds
-                to the size of the array along a specific axis.
+        Returns
+        -------
+        tuple[int, ...]
         """
         return self.arr.shape
 
     @property
-    def dtype(self) -> npt.DTypeLike:
-        """
-            Gets the data type of the underlying NumPy array.
+    def dtype(self) -> np.dtype:
+        """ Returns the dtype of the array
 
-            Returns
-            -------
-            npt.DTypeLike
-                The data type of the NumPy array.
+        Returns
+        -------
+        :any:`dtype <numpy.dtype>`
+
         """
-        return cast(np.dtype, self.arr.dtype)
+        return self.arr.dtype
 
     @property
     def ndim(self) -> int:
-        """
-            Number of axes/dimensions of the array.
+        """Dimensions in the array
 
-            Returns
-            -------
-            int
+        Returns
+        -------
+        int
         """
-        return cast(int, self.arr.ndim)
+        return self.arr.ndim
 
     @property
-    def base(self) -> ArrayT|None:
-        """
-            Returns the base array which the current array shares memory with if it is a view.
-            If the current array is not a view, it returns None
+    def base(self) -> ArrayT | None:
+        """Returns the base array if the array is a view, otherwise None
 
-            Returns
-            -------
-            ArrayT or None
+        Returns
+        -------
+        ArrayT | None
         """
         return self.arr.base
 
     @property
     def size(self) -> int:
-        """
-        Total number of elements in the array
+        """Returns the number of elements in the array
 
         Returns
         -------
@@ -196,107 +173,71 @@ class BaseArray(ABC, BaseModel):
         """
         return self.arr.size
 
-    def view(self, dtype: npt.DTypeLike = None, _type: type|None = None) -> ArrayT:
-        """
-        Creates a new view of the array with a specific data type and/or container type.
-
+    def view(self, dtype: np.dtype|None = None, _type: type|None = None) -> ArrayT:
+        """Return a view of the underlying array
 
         Parameters
         ----------
-        dtype : npt.DTypeLike, optional
-            The desired data type for the view.
-            If not provided, the data type of the current array will be used.
-
-        _type : type or None, optional
-            The desired container type for the view.
-            If not provided, the type of the current array will be used.
+        dtype
+        _type
 
         Returns
         -------
         ArrayT
-
         """
-        dtype = self.dtype if dtype is None else dtype
+        dtype = dtype or self.arr.dtype
 
-        _type = type(self.arr) if _type is None else _type
+        _type = _type or type(self.arr)
 
         return self.arr.view(dtype=dtype, type=_type)
 
-    def min(self, **kwargs: Unpack[MinMaxKwargsT]) -> Any:
-        """
-        Computes the minimum value along the specified axis of an array, considering only
-        the elements where the condition in `where` is True. The returned value or array
-        can optionally retain reduced dimensions depending on the `keepdims` parameter.
+    def min(self, **kwargs: dict[str, Any]) -> Any:
+        """Returns `self.arr.min(**kwargs)`
+        See `numpy.min <https://numpy.org/doc/2.2/reference/generated/numpy.min.html>`_ for more info.
 
         Parameters
         ----------
-        **kwargs : dict of str to Any
-            Optional arguments passed to the array's max function, such as `axis` for specifying
-            the axis along which the maximum is computed and other relevant parameters.
-
+        kwargs: dict[str, Any]
 
         Returns
         -------
         Any
-            The minimum value of the array along the specified axis or axes, optionally
-            reduced as per the `keepdims` parameter, and restricted by the `where` condition.
         """
         return self.arr.min(**kwargs)
 
-    def max(self, **kwargs: Unpack[MinMaxKwargsT]) -> Any:
-        """
-        Find the maximum value in the array.
-
-        This method computes the maximum value in the array or along a specified axis, depending
-        on the arguments passed. Additional arguments can be supplied to control the behaviour,
-        such as axis, keepdims, or initial value.
+    def max(self, **kwargs: dict[str, Any]) -> Any:
+        """Returns `self.arr.max(**kwargs)`
+        See `numpy.max <https://numpy.org/doc/2.2/reference/generated/numpy.max.html>`_ for more info.
 
         Parameters
         ----------
-        **kwargs : dict of str to Any
-            Optional arguments passed to the array's max function, such as `axis` for specifying
-            the axis along which the maximum is computed and other relevant parameters.
+        kwargs: dict[str, Any]
 
         Returns
         -------
         Any
-            The maximum value from the array, or a reduced result if an axis is provided.
         """
         return self.arr.max(**kwargs)
 
     def __len__(self) -> int:
-        """
-        Returns the number of rows in the object.
-
-        This method returns the first dimension size of the object,
-        indicating the number of rows or elements along that dimension.
+        """Returns number of rows in array (self.shape[0])
 
         Returns
         -------
         int
-            The number of rows in the object.
         """
         return self.shape[0]
 
     def __getitem__(self, key: IndexLike) -> ArrayT | Self:
-        """
-        Retrieves an element or a slice from the array based on the provided key.
-
-        This method attempts to return a copy of the array element or slice when possible.
-        If the operation fails due to a validation error, it directly retrieves the
-        element or slice from the array.
+        """Get items from the array using numpy style indexing
 
         Parameters
         ----------
-        key : IndexLike
-            The index or slice used to retrieve an item or subset from the array.
+        key: IndexLike
 
         Returns
         -------
-        ArrayT or Self
-            Returns a copy of the array element or slice if no exceptions occur.
-            If a validation error occurs, it directly returns the corresponding
-            item or slice from the array.
+        ArrayT | Self
         """
         try:
             return self.copy(array=self.arr[key], deep=False)
@@ -304,178 +245,62 @@ class BaseArray(ABC, BaseModel):
             return self.arr[key]
 
     def __setitem__(self, key: IndexLike, value: ArrayT | BaseArray) -> None:
-        """
-        Sets the value at the given index in the array.
-
-        This method allows item assignment in the array. If the provided
-        value is an instance of BaseArray, its internal array is used
-        as the value to assign. Otherwise, the value itself is assigned.
+        """ Sets the value at the given index/indices in the array.
 
         Parameters
         ----------
         key : IndexLike
-            The index at which the value is to be set. It supports any valid
-            indexing type.
         value : ArrayT or BaseArray
-            The value to be assigned. If the value is of type BaseArray,
-            its internal array is extracted and assigned.
         """
-        self.arr[key] = value.arr if isinstance(value, BaseArray) else value
+        self.arr[key] = np.asarray(value)
 
-    def __lt__(self, other: Any) -> BoolArrayT:
-        """
-        Compares elements of the array with another value or array, returning a boolean
-        array indicating whether each element of the array is less than the
-        corresponding element or value.
-
-        Parameters
-        ----------
-        other : Any
-            The value or array to compare against. Can be a scalar or an array-like
-            object of the same shape as `self.arr`.
-
-        Returns
-        -------
-        BoolArrayT
-            A boolean array (`BoolArrayT`) of the same shape as `self.arr`, where each
-            element represents the result of comparing the corresponding element of
-            `self.arr` with `other`.
-        """
+    def __lt__(self, other: Any) -> Array_Bool_T:
+        """Return self.arr < other"""
         return self.arr < other
 
-    def __le__(self, other: Any) -> BoolArrayT:
-        """
-        Compare the elements of the array with `other` using the <= operator.
-
-        An element-wise comparison between the stored array
-        and the provided `other` parameter. The result of this comparison
-        is a boolean array indicating where the condition is satisfied.
-
-        Parameters
-        ----------
-        other : Any
-            The value or object to compare with
-
-        Returns
-        -------
-        BoolArrayT
-            A boolean array
-        """
+    def __le__(self, other: Any) -> Array_Bool_T:
+        """Return self.arr <= other"""
         return self.arr <= other
 
-    def __ge__(self, other: Any) -> BoolArrayT:
-        """
-        Compares the current array with another value element-wise, determining if each element in the
-        current array is greater than or equal to the corresponding element in the other value. This
-        operation supports broadcasting if the shapes of the arrays are compatible.
-
-        Parameters
-        ----------
-        other : Any
-            The value or array to compare against. Must be broadcast-compatible with the current array.
-
-        Returns
-        -------
-        BoolArrayT
-            A boolean array where each element indicates True if the condition (current array >= other)
-            is met, and False otherwise.
-        """
+    def __ge__(self, other: Any) -> Array_Bool_T:
+        """Return self.arr >= other"""
         return self.arr >= other
 
-    def __gt__(self, other: Any) -> BoolArrayT:
-        """
-        Compares the elements of the instance array with the provided value using the
-        greater-than operator. Returns a boolean array indicating whether each element
-        is greater than the provided value.
-
-        Parameters
-        ----------
-        other : Any
-            The value to compare each element of the instance array with.
-
-        Returns
-        -------
-        BoolArrayT
-            A boolean array where each element indicates the result of the greater-than
-            comparison for the corresponding element of the instance array and the
-            provided value.
-        """
+    def __gt__(self, other: Any) -> Array_Bool_T:
+        """Return self.arr > other"""
         return self.arr > other
 
-    def __eq__(self, other: Any) -> Any: # type: ignore[override]
-        """
-        Compares the current object's array elements with the given object and returns
-        a boolean array indicating element-wise equality.
-
-        Parameters
-        ----------
-        other : Any
-            The object to compare each element of the array with.
-
-        Returns
-        -------
-        BoolArrayT
-            A boolean array where each element is `True` if the corresponding element
-            in the current object's array matches the given object, `False` otherwise.
-        """
+    def __eq__(self, other: Any) -> Any:
+        """Return self.arr == other"""
         return self.arr == other
 
-    def __ne__(self, other: Any) -> Any: # type: ignore[override]
-        """
-        Compares the current object with another object for inequality.
-
-        This method performs an element-wise inequality comparison between the array
-        in the current object and the `other` object provided as an argument. It casts
-        the result to the expected type and returns it.
-
-        Parameters
-        ----------
-        other : Any
-            The object to compare with the current object's array for inequality.
-
-        Returns
-        -------
-        BoolArrayT
-            A boolean array where each element indicates whether the corresponding
-            elements of the object's array and `other` are not equal.
-        """
+    def __ne__(self, other: Any) -> Any:
+        """Return self.arr != other"""
         return self.arr != other
 
     def copy(self: Self,    # type: ignore[override]
-             array: npt.NDArray[Any] | Self | None = None,
+             array: ArrayT | Self | None = None,
              *,
              deep: bool = True,
-             update: Optional[MutableMapping[str, Any]] = None,
+             update: Optional[dict[str, Any]] = None,
              **kwargs: dict[str, Any]) -> Self:
-        """
-        Creates a copy of the current instance with optional modifications to its data.
+        """ Creates a copy of this object.
 
-        This method creates and returns a new instance of the current class,
-        optionally overriding the attributes specified in `update` or replacing the
-        array data using the `array` parameter. If `deep` is True, a deep copy of
-        the current instance's data is created, ensuring that changes to the copy
-        do not affect the original instance.
+        Also supports deep / shallow copies and overriding update of attributes via the `update` dictionary paramter.
 
         Parameters
         ----------
-        array : npt.NDArray[Any] | BaseArray | None, optional
-            An array to override the current instance's array data. If None, no
-            changes are applied to the `arr` attribute unless specified in `update`.
+        array : ArrayT | Self | None, optional
+            If set, directly passed as the `arr` attribute in the new instance
         deep : bool, optional
-            Whether to create a deep copy of the current instance's data. Defaults
-            to True.
-        update : MutableMapping[str, Any] or None, optional
-            A dictionary of key-value pairs to override the instance's attributes.
-            Uses "arr" as a key to specifically update the array data if provided.
+            Deep/shallow copy flag
+        update : dict[str, Any] or None, optional
+            Dictionary of attributes to override in the new instance
         kwargs : dict[str, Any]
-            Additional attributes or configurations to be passed during the creation
-            of the copied instance.
 
         Returns
         -------
         Self
-            A new instance of the same class as the current object, containing the
-            updated and/or copied data.
         """
         update = update or {}
 
@@ -496,6 +321,13 @@ class BaseArray(ABC, BaseModel):
 
 class NumericMixins(BaseArray):
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+        """Subclassable array type with Python built-in numerical and logical operators
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
 
     def __add__(self, other: Any) -> Self:
@@ -594,18 +426,34 @@ class NumericMixins(BaseArray):
 
 
 class FixedLengthArray(NumericMixins):
-    """
-    Array to support objects like Coordinate sets or vectors which have "len()" which maps to their number of items
-    """
     def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+        """Class supporting sample, reduce, extract and mask funcs for row-based data
+
+        E.g., vectors or coordinate sets
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
 
+    # TODO should this generator be different as the typical Generator type definition is different?
     def __iter__(self) -> Generator[tuple[str, Any], None, None]:
         for i in self.arr:
             yield i
 
-    def create_mask(self, selection: IndexLike) -> NDArray[np.bool_] | NDArray[np.int_]:
-        """Creates a boolean vector mask that corresponds to row indices"""
+    def create_mask(self, selection: IndexLike) -> Vector_Bool_T:
+        """Converts a basic or advanced numpy index to a boolean vector mask that corresponds to the row indices
+
+        Parameters
+        ----------
+        selection: IndexLike
+
+        Returns
+        -------
+        Vector_Bool_T
+        """
 
         # Case 1: slice object
         if isinstance(selection, slice):
@@ -618,14 +466,14 @@ class FixedLengthArray(NumericMixins):
         # Case 3: numpy arrays and sequences
         else:
             if isinstance(selection, np.ndarray):
-                selection = cast(np.ndarray, np.atleast_1d(selection.squeeze()))
+                selection = np.atleast_1d(selection.squeeze())
             vector_mask = Vector_IndexT(selection)
 
         # Case 3a: Boolean
         if vector_mask.dtype == np.bool_:
             if vector_mask.shape[0] != len(self):
                 raise ValueError(f"Mask has wrong number of points. Mask:{vector_mask.size}  != array:{len(self)}")
-            return vector_mask
+            return cast(Vector_Bool_T, vector_mask)
 
         # Case 3b: Integer
         else:
@@ -637,20 +485,47 @@ class FixedLengthArray(NumericMixins):
                                f"{len(vector_mask) - np.sum(mask)} points were oversampled\n"
                                f"Duplicate points are not created.")
 
-            return mask
+            return cast(Vector_Bool_T, mask)
 
     def sample(self, index: IndexLike) -> Self:
-        """Return a sample of the array"""
+        """Return a sample copy of the array
+
+        Parameters
+        ----------
+        index: IndexLike
+
+        Returns
+        -------
+        Vector_Bool_T
+        """
         mask = self.create_mask(index)
         return self.copy(self.arr[mask], deep=True)
 
     def reduce(self, index: IndexLike) -> None:
-        """Reduces the array to the points indexed"""
+        """Reduces the array to the points indexed
+
+        Parameters
+        ----------
+        index: IndexLike
+
+        Returns
+        -------
+
+        """
         mask = self.create_mask(index)
         self.arr = self.arr[mask]
 
     def extract(self, index: IndexLike) -> Self:
-        """Returns the points indexed but also reduces the indexed array by these points"""
+        """Splits the array with the indexed points being returned and the object containing the remaining values.
+
+        Parameters
+        ----------
+        index: IndexLike
+
+        Returns
+        -------
+        Self
+        """
         mask = self.create_mask(index)
         extracted = self.sample(mask)
         self.reduce(~mask)
@@ -660,51 +535,88 @@ class FixedLengthArray(NumericMixins):
 class BaseVector(FixedLengthArray):
     arr: VectorT
 
-    def __init__(self, arr: VectorT, **kwargs: dict[str, Any]):
+    def __init__(self, arr: VectorT, **kwargs: dict[str, Any]) -> None:
+        """Shape validated 1D array
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr=arr, **kwargs)
 
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='before')
     @classmethod
-    def coerce_array(cls, value: ArrayT | Self) -> VectorT:
-        value = super(BaseVector, cls).coerce_array(value)
+    def _coerce_array(cls, value: ArrayT | Self) -> VectorT:
+        value = super(BaseVector, cls)._coerce_array(value)
         return np.atleast_1d(value.squeeze())
 
 
 class HomogeneousArray(FixedLengthArray):
-    def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]):
+    def __init__(self, arr: ArrayT, **kwargs: dict[str, Any]) -> None:
+        """Helper class for homogeneous coordinate creation
+
+        Parameters
+        ----------
+        arr: ArrayT
+            Input array data
+        """
         super().__init__(arr, **kwargs)
 
     # noinspection PyPep8Naming
     @property
     def H(self) -> ArrayT:
+        """
+        Returns the homogeneous coordinates of the array by adding a column of ones to the right
+
+        Parameters
+        ----------
+
+        Returns
+        -------
+        ArrayT
+
+        """
         return np.column_stack((self.arr, np.ones(len(self), dtype=self.dtype)))
 
 
 class ArrayNx2(HomogeneousArray):
+    """Shape validated Nx2 array
+
+    Parameters
+    ----------
+    arr: ArrayT
+        Input array data
+    """
     arr: Array_Nx2_T
 
-    def __init__(self, arr: Array_Nx2_T, **kwargs: dict[str, Any]):
+    def __init__(self, arr: Array_Nx2_T, **kwargs: dict[str, Any]) -> None:
         super().__init__(arr=arr, **kwargs)
 
     # noinspection PyNestedDecorators
     @field_validator('arr', mode='plain')
     @classmethod
-    def coerce_array(cls, value: ArrayT) -> Array_Nx2_T:
-        value = super(ArrayNx2, cls).coerce_array(value)
+    def _coerce_array(cls, value: ArrayT) -> Array_Nx2_T:
+        value = super(ArrayNx2, cls)._coerce_array(value)
         return validate_transposed_2d_array(value, 2)
 
 
 class ArrayNx3(HomogeneousArray):
-    arr: Array_Nx3_T
+    """Shape validated Nx3 array
 
-    def __init__(self, arr: Array_Nx3_T, **kwargs: dict[str, Any]):
+    Parameters
+    ----------
+    arr: ArrayT
+        Input array data
+    """
+    arr: Array_Nx3_Float_T
+
+    def __init__(self, arr: Array_Nx3_Float_T, **kwargs: dict[str, Any]) -> None:
         super().__init__(arr=arr, **kwargs)
 
-    # noinspection PyNestedDecorators
     @field_validator('arr', mode='plain')
     @classmethod
-    def coerce_array(cls, value: ArrayT) -> Array_Nx3_T:
-        value = super(ArrayNx3, cls).coerce_array(value)
+    def _coerce_array(cls, value: ArrayT) -> Array_Nx3_Float_T:
+        value = super(ArrayNx3, cls)._coerce_array(value)
         return validate_transposed_2d_array(value, 3)
-
