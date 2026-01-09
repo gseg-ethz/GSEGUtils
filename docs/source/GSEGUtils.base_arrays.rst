@@ -1,8 +1,11 @@
-GSEGUtils.base\_arrays module
-=============================
+GSEGUtils.base\_arrays
+======================
 
+See :doc:`./BaseArrays` for background motivation.
 
 .. automodule:: GSEGUtils.base_arrays
-   :exclude-members: MinMaxKwargsT
-
+   :members:
+   :undoc-members:
+   :exclude-members: __init__, model_config
+   :show-inheritance:
 
