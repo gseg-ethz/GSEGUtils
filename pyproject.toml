@@ -2,8 +2,6 @@
 requires = ["setuptools", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
-#TODO update documentation link and version
-
 [project]
 name = "GSEGUtils"
 description = "General utility functions and classes for GSEG research/projects"
@@ -27,7 +25,9 @@ classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyprojec
     "Topic :: Utilities",
     "Framework :: Pydantic",
 
-    "Private :: Do Not Upload" # REMOVE BEFORE FLIGHT -- PyPI will always reject packages with classifiers beginning with Private ::
+    "License :: OSI Approved :: BSD License",
+
+    "Private :: Do Not Upload", # REMOVE BEFORE FLIGHT -- PyPI will always reject packages with classifiers beginning with Private ::
 ]
 
 dynamic = ["version", "readme"]
@@ -51,7 +51,7 @@ git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--mat
 
 [project.urls]
 #Homepage = "https://example.com"
-#Documentation = "https://readthedocs.org"
+Documentation = "https://gsegutils.readthedocs.io/en/stable/"
 Repository = "https://github.com/gseg-ethz/GSEGUtils.git"
 Issues = "https://github.com/gseg-ethz/GSEGUtils/issues"
 Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
