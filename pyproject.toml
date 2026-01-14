@@ -70,5 +70,6 @@ dev = [
     "mypy~=1.17",             # static typing
     "pre-commit~=4.3",        # git hooks runner
     "pytest~=8.4",            # test framework
+    "pytest-cov~=5.0",        # pytest coverage plugin
     "coverage~=7.0",          # coverage reporting
 ]
