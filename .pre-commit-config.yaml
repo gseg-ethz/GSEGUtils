@@ -1,0 +1,48 @@
+repos:
+  - repo: https://github.com/Lucas-C/pre-commit-hooks
+    rev: v1.5.4
+    hooks:
+      - id: insert-license
+        name: Insert project banner into Python files
+        files: ^src/.*\.(py|pyi)$
+        exclude: ^(?:tests/|examples/|\.venv/|venv/|\.git/|build/|dist/|docs/_build/|\.mypy_cache/|\.pytest_cache/|\.ruff_cache/|\.tox/|\.eggs/|site-packages/)
+        args:
+          - --license-filepath=.license-header.txt
+          - --comment-style=#
+          - --use-current-year
+          - --allow-past-years
+          - --detect-license-in-X-top-lines=30
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+
+  - repo: https://github.com/psf/black
+    rev: 25.1.0
+    hooks:
+      - id: black
+        files: '\.(py|pyi)$'
+
+  - repo: https://github.com/PyCQA/isort
+    rev: 6.0.1
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+
+  - repo: https://github.com/PyCQA/flake8
+    rev: 7.3.0
+    hooks:
+      - id: flake8
+        args: ["--config=.flake8"]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.17.1
+    hooks:
+      - id: mypy
+        args: ["--config-file", "mypy.ini"]
+        pass_filenames: false

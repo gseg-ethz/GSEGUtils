@@ -1,3 +1,16 @@
+# GSEGUtils – General utility functions and classes for GSEG research/projects
+#
+# Copyright (c) 2025–2026 ETH Zurich
+# Department of Civil, Environmental and Geomatic Engineering (D-BAUG)
+# Institute of Geodesy and Photogrammetry
+# Geosensors and Engineering Geodesy
+#
+# Authors:
+#   Nicholas Meyer
+#   Jon Allemand
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
 __all__ = [
     "__author__", "__email__",
     "__version__", "version", "__version_tuple__", "version_tuple",

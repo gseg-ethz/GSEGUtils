@@ -1,0 +1,47 @@
+cff-version: 1.2.0
+title: GSEGUtils
+authors:
+  - given-names: Nicholas
+    family-names: Meyer
+    email: meyernic@ethz.ch
+    affiliation: 'ETH Zurich, Switzerland'
+    orcid: 'https://orcid.org/0009-0004-8943-969X'
+  - given-names: Jon
+    family-names: Allemand
+    affiliation: 'ETH Zurich, Switzerland'
+
+repository-code: https://github.com/gseg-ethz/GSEGUtils
+url: https://github.com/gseg-ethz/GSEGUtils
+
+license: BSD-3-Clause
+
+message: >
+  The main branch reflects the latest released version of the software.
+  All official releases are archived in the company research data archive,
+  which provides the authoritative, version-specific DOIs.
+  Ongoing development takes place on a separate development branch.
+
+preferred-citation:
+  type: software
+  title: GSEGUtils
+  authors:
+    - given-names: Nicholas
+      family-names: meyernic
+    - given-names: Jon
+      family-names: Allemand
+  doi: 10.5281/zenodo.XXXXXXX
+  notes: >
+    This DOI identifies the software concept across all released versions.
+    For reproducibility, please cite the specific version DOI available
+    from the archive landing page.
+
+
+
+
+
+
+
+
+
+
+license: BSD-3-Clause
