@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.4](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.3...v0.4.4) (2026-01-14)
+
+
+### 🧹 Miscellaneous Chores
+
+* Adapt license language to be in line with ETH convention ([8d8ba06](https://github.com/gseg-ethz/GSEGUtils/commit/8d8ba06dcacf6fb9fb98c4cf846d7081a6612bd8))
+* Lint ([e1c7da6](https://github.com/gseg-ethz/GSEGUtils/commit/e1c7da640e109417206e906ccedf5355e891554c))
+
+
+### 🤖 Continuous Integration
+
+* Add pytest-cov to dev dependencies ([af83441](https://github.com/gseg-ethz/GSEGUtils/commit/af83441b4de1d6f729652f145c4b6c28b9f59d23))
+* Fix coverage error ([b2c7faa](https://github.com/gseg-ethz/GSEGUtils/commit/b2c7faa992ef7b12bac666dd61721c832ba0464c))
+* Modify release-please to only run after other ci activities ([f09144f](https://github.com/gseg-ethz/GSEGUtils/commit/f09144f88537622eef9889ddb78004121390f845))
+
 ## [0.4.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.2...v0.4.3) (2026-01-09)
 
 
