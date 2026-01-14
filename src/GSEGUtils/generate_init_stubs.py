@@ -33,23 +33,37 @@ New in this version:
   * any  : overloads for submodule names -> ModuleType, fallback -> NoReturn
 """
 from __future__ import annotations
-import argparse, ast, os, sys
+
+import argparse
+import ast
+import os
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 # ----------------- AST utilities -----------------
 
+
 def _const_str(node: ast.AST) -> str | None:
-    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+    return (
+        node.value
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        else None
+    )
+
 
 def _const_tuple2(node: ast.AST) -> tuple[str, str] | None:
     if isinstance(node, ast.Tuple) and len(node.elts) == 2:
-        a = _const_str(node.elts[0]); b = _const_str(node.elts[1])
+        a = _const_str(node.elts[0])
+        b = _const_str(node.elts[1])
         if a is not None and b is not None:
             return a, b
     return None
 
-def _update_lazy_map_from_dict(dst: dict[str, str | tuple[str, str]], dict_node: ast.Dict) -> None:
+
+def _update_lazy_map_from_dict(
+    dst: dict[str, str | tuple[str, str]], dict_node: ast.Dict
+) -> None:
     for k, v in zip(dict_node.keys, dict_node.values):
         ks = _const_str(k)
         if ks is None:
@@ -62,6 +76,7 @@ def _update_lazy_map_from_dict(dst: dict[str, str | tuple[str, str]], dict_node:
         if vt is not None:
             dst[ks] = vt
 
+
 def _extend_exports_from_seq(dst: list[str], seq: ast.AST) -> None:
     if isinstance(seq, (ast.List, ast.Tuple)):
         for elt in seq.elts:
@@ -69,9 +84,13 @@ def _extend_exports_from_seq(dst: list[str], seq: ast.AST) -> None:
             if s:
                 dst.append(s)
 
+
 # ----------------- Parsing -----------------
 
-def parse_ast(init_py: Path) -> tuple[dict[str, str | tuple[str, str]], list[str], dict[str, bool]]:
+
+def parse_ast(
+    init_py: Path,
+) -> tuple[dict[str, str | tuple[str, str]], list[str], dict[str, bool]]:
     src = init_py.read_text(encoding="utf-8")
     tree = ast.parse(src, filename=str(init_py))
 
@@ -87,14 +106,20 @@ def parse_ast(init_py: Path) -> tuple[dict[str, str | tuple[str, str]], list[str
             if "__all__" in targets:
                 _extend_exports_from_seq(exports, node.value)
                 # __all__ = __all__ + [...]
-                if isinstance(node.value, ast.BinOp) and isinstance(node.value.op, ast.Add):
+                if isinstance(node.value, ast.BinOp) and isinstance(
+                    node.value.op, ast.Add
+                ):
                     _extend_exports_from_seq(exports, node.value.right)
 
             if "_lazy_map" in targets and isinstance(node.value, ast.Dict):
                 _update_lazy_map_from_dict(lazy_map, node.value)
 
             for dn in dunders:
-                if dn in targets and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                if (
+                    dn in targets
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                ):
                     dunders[dn] = True
 
         # Handle annotated assignments (PEP 526): e.g., _lazy_map: dict[...] = {...}
@@ -105,7 +130,11 @@ def parse_ast(init_py: Path) -> tuple[dict[str, str | tuple[str, str]], list[str
                 _extend_exports_from_seq(exports, value)
             if name == "_lazy_map" and isinstance(value, ast.Dict):
                 _update_lazy_map_from_dict(lazy_map, value)
-            if name in dunders and isinstance(value, ast.Constant) and isinstance(value.value, str):
+            if (
+                name in dunders
+                and isinstance(value, ast.Constant)
+                and isinstance(value.value, str)
+            ):
                 dunders[name] = True
 
         # __all__.extend([...]) / __all__.append("x")
@@ -133,7 +162,9 @@ def parse_ast(init_py: Path) -> tuple[dict[str, str | tuple[str, str]], list[str
     exports = [x for x in exports if not (x in seen or seen.add(x))]
     return lazy_map, exports, dunders
 
+
 # ----------------- Stub generation -----------------
+
 
 def build_stub_text(
     lazy_map: dict[str, str | tuple[str, str]],
@@ -144,9 +175,13 @@ def build_stub_text(
     exports = list(exports)
     dunder_names = {"__author__", "__email__", "__all__"}
     # Treat exported names that aren't lazy-mapped as submodules
-    submodules = [n for n in exports if n not in lazy_map and n.isidentifier() and n not in dunder_names]
+    submodules = [
+        n
+        for n in exports
+        if n not in lazy_map and n.isidentifier() and n not in dunder_names
+    ]
 
-    needs_moduletype_overloads = (submodule_mode == "any" and len(submodules) > 0)
+    needs_moduletype_overloads = submodule_mode == "any" and len(submodules) > 0
 
     lines: list[str] = [
         "# Auto-generated stub for lazy exports",
@@ -225,15 +260,32 @@ def build_stub_text(
     lines.append("")
     return "\n".join(lines)
 
+
 # ----------------- Discovery / IO -----------------
 
 DEFAULT_EXCLUDES = {
-    ".git", ".hg", ".svn", ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "build", "dist", "site", "venv", ".venv", "__pycache__", "env", ".env",
+    ".git",
+    ".hg",
+    ".svn",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "site",
+    "venv",
+    ".venv",
+    "__pycache__",
+    "env",
+    ".env",
 }
+
 
 def is_package_dir(p: Path) -> bool:
     return p.is_dir() and (p / "__init__.py").exists()
+
 
 def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
     found: list[Path] = []
@@ -242,7 +294,10 @@ def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
             if is_package_dir(root):
                 found.append(root)
             else:
-                print(f"[skip] Not a package dir (no __init__.py): {root}", file=sys.stderr)
+                print(
+                    f"[skip] Not a package dir (no __init__.py): {root}",
+                    file=sys.stderr,
+                )
             continue
 
         if root.is_file():
@@ -253,7 +308,11 @@ def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
             continue
 
         for dirpath, dirnames, _files in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in DEFAULT_EXCLUDES and not d.startswith(".")]
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in DEFAULT_EXCLUDES and not d.startswith(".")
+            ]
             dpath = Path(dirpath)
             if is_package_dir(dpath):
                 found.append(dpath)
@@ -267,6 +326,7 @@ def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
             unique.append(p)
     return unique
 
+
 def write_stub(init_dir: Path, text: str, overwrite: bool) -> None:
     out = init_dir / "__init__.pyi"
     if out.exists() and not overwrite:
@@ -275,20 +335,34 @@ def write_stub(init_dir: Path, text: str, overwrite: bool) -> None:
     out.write_text(text, encoding="utf-8")
     print(f"[write] {out}")
 
+
 # ----------------- CLI -----------------
 
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate __init__.pyi stubs for lazy-loading packages.")
-    ap.add_argument("paths", type=Path, nargs="+", help="Package dirs or roots to process.")
-    ap.add_argument("--overwrite", action="store_true", help="Overwrite existing __init__.pyi files.")
-    ap.add_argument("--create-py-typed", action="store_true", help="Create py.typed in each processed package dir if missing.")
+    ap = argparse.ArgumentParser(
+        description="Generate __init__.pyi stubs for lazy-loading packages."
+    )
+    ap.add_argument(
+        "paths", type=Path, nargs="+", help="Package dirs or roots to process."
+    )
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing __init__.pyi files.",
+    )
+    ap.add_argument(
+        "--create-py-typed",
+        action="store_true",
+        help="Create py.typed in each processed package dir if missing.",
+    )
     ap.add_argument(
         "--submodule-stubs",
         choices=["eager", "any"],
         default="eager",
         help="How to represent submodules listed in __all__: "
-             "'eager' = real imports in the .pyi (stronger checking), "
-             "'any' = only allow via __getattr__ overloads (ModuleType). Default: eager.",
+        "'eager' = real imports in the .pyi (stronger checking), "
+        "'any' = only allow via __getattr__ overloads (ModuleType). Default: eager.",
     )
     ap.add_argument(
         "--walk",
@@ -315,6 +389,7 @@ def main() -> None:
                     print(f"[write] {pt}")
         except Exception as e:
             print(f"[error] Failed on {init_py}: {e}", file=sys.stderr)
+
 
 if __name__ == "__main__":
     main()

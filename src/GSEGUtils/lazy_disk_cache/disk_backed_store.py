@@ -12,18 +12,28 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import logging
-from pathlib import Path
 import pickle
 import tempfile
-from typing import MutableMapping, Optional, cast, Iterator, Any, runtime_checkable, Protocol, TypeGuard, Callable, Unpack
+from pathlib import Path
+from typing import (
+    Any,
+    Callable,
+    Iterator,
+    MutableMapping,
+    Optional,
+    Protocol,
+    TypeGuard,
+    Unpack,
+    cast,
+    runtime_checkable,
+)
 
-from pydantic import validate_call, ConfigDict
 import numpy as np
 from numpy.typing import NDArray
+from pydantic import ConfigDict, validate_call
 
 # from .disk_backed_ndarray import DiskBackedNDArray
-from .lazy_disk_cache import LazyDiskCacheConfig, LazyDiskCache, LazyDiskCacheKw
-
+from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +43,19 @@ logger = logging.getLogger(__name__)
 # class SupportsOffload(Protocol):
 #     def offload(self) -> None: ...
 
+
 # type Factory[T: LazyDiskCache.rst] = Callable[[_NDArray, Unpack[LazyDiskCacheKw]], T]
 @runtime_checkable
 class Factory[T: LazyDiskCache](Protocol):
     def __call__(self, data: NDArray, **kwargs: Unpack[LazyDiskCacheKw]) -> T: ...
+
 
 type Validator[T] = Callable[[object], TypeGuard[T]]
 
 
 class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     _DBNDArrayFileExt = ".pkl"
-    
+
     _store: dict[str, Optional[T]]
     _cache_dir: Path
     _enable_caching: bool
@@ -53,15 +65,15 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     _factory: Factory[T]
     _value_type: Optional[type[T] | tuple[type[T], ...]]
     _validator: Optional[Validator[T]]
-    
+
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def __init__(
-            self,
-            *,
-            config: LazyDiskCacheConfig = LazyDiskCacheConfig(),
-            factory: Factory[T],
-            value_type: Optional[type[T] | tuple[type[T], ...]] = None,
-            validator: Optional[Validator[T]] = None,
+        self,
+        *,
+        config: LazyDiskCacheConfig = LazyDiskCacheConfig(),
+        factory: Factory[T],
+        value_type: Optional[type[T] | tuple[type[T], ...]] = None,
+        validator: Optional[Validator[T]] = None,
     ) -> None:
 
         self._store = {}
@@ -70,7 +82,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._cache_dir = Path(tempfile.mkdtemp())
         else:
             self._cache_dir = config.cache_path
-        self._automatic_offloading = config.automatic_offloading and config.cache_path is not None
+        self._automatic_offloading = (
+            config.automatic_offloading and config.cache_path is not None
+        )
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
         self._factory = factory
@@ -81,7 +95,11 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._cache_dir.mkdir(parents=True, exist_ok=True)
 
             # Scan for existing files
-            available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
+            available_files = [
+                f
+                for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}")
+                if f.is_file()
+            ]
             for f in available_files:
                 self._store[f.stem] = None
 
@@ -107,11 +125,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 loaded_obj = cast(T, pickle.load(f))
         except FileNotFoundError as e:
             raise KeyError(key) from e
-        
 
         self._store[key] = loaded_obj
         return loaded_obj
-
 
     def __setitem__(self, key: str, value: T) -> None:
         self._store[key] = self._check_T(value)
@@ -121,7 +137,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._store)
-    
+
     def __contains__(self, key):
         return self._store.__contains__(key)
 
@@ -135,28 +151,44 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         return self._cache_dir / f"{feature}{self._DBNDArrayFileExt}"
 
     def add_data_to_store(
-            self,
-            key: str,
-            data: NDArray,
-            *,
-            enable_caching_override: Optional[bool] = None,
-            automatic_offloading_override: Optional[bool] = None,
-            purge_disk_on_gc_override: Optional[bool] = None,
+        self,
+        key: str,
+        data: NDArray,
+        *,
+        enable_caching_override: Optional[bool] = None,
+        automatic_offloading_override: Optional[bool] = None,
+        purge_disk_on_gc_override: Optional[bool] = None,
     ) -> None:
         if key in self:
             raise KeyError(f"Key {key} already exists in store.")
-        
-        enable_caching = enable_caching_override if enable_caching_override is not None else self._enable_caching
-        cache_path=self._cache_dir / f"{key}{self._DBNDArrayFileExt}" if self._cache_dir else None
-        automatic_offloading=automatic_offloading_override if automatic_offloading_override is not None else self._automatic_offloading
-        purge_disk_on_gc=purge_disk_on_gc_override if purge_disk_on_gc_override is not None else self._purge_disk_on_gc
+
+        enable_caching = (
+            enable_caching_override
+            if enable_caching_override is not None
+            else self._enable_caching
+        )
+        cache_path = (
+            self._cache_dir / f"{key}{self._DBNDArrayFileExt}"
+            if self._cache_dir
+            else None
+        )
+        automatic_offloading = (
+            automatic_offloading_override
+            if automatic_offloading_override is not None
+            else self._automatic_offloading
+        )
+        purge_disk_on_gc = (
+            purge_disk_on_gc_override
+            if purge_disk_on_gc_override is not None
+            else self._purge_disk_on_gc
+        )
 
         new_container = self._factory(
             data,
             enable_caching=enable_caching,
             cache_path=cache_path,
             automatic_offloading=automatic_offloading,
-            purge_disk_on_gc=purge_disk_on_gc
+            purge_disk_on_gc=purge_disk_on_gc,
         )
 
         self._store[key] = self._check_T(new_container)
@@ -171,7 +203,6 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         """Returns the directory where cached files are stored."""
         return self._cache_dir
 
-
     def keys(self) -> list[str]:
         """
         Returns a list of all available image keys.
@@ -184,7 +215,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     def items(self) -> Iterator[tuple[str, Optional[T]]]:
         return iter(self._store.items())
 
-    def offload(self, keys: Optional[str | list[str]] = None, pickle_container: bool = False) -> None:
+    def offload(
+        self, keys: Optional[str | list[str]] = None, pickle_container: bool = False
+    ) -> None:
         """
         Offloads selected entries to disk. When no keys are provided, every cached
         entry is considered. Items with `cache_enabled=False` are skipped. When
@@ -201,7 +234,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             if obj is None:
                 continue
             if not obj.cache_enabled:
-                logger.debug("Skipping offload for %s because caching is disabled.", key)
+                logger.debug(
+                    "Skipping offload for %s because caching is disabled.", key
+                )
                 continue
             if pickle_container:
                 with open(self._get_pickle_path(key), "wb") as f:
@@ -215,7 +250,6 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 del obj
             else:
                 obj.offload()
-
 
     def __getstate__(self) -> dict[str, Any]:
         if self._enable_caching:
@@ -234,5 +268,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                         loaded = pickle.load(f)
                     self._store[key] = self._check_T(loaded)
                 except FileNotFoundError:
-                    logger.warning(f"File for key {key} not found in cache directory {self._cache_dir}.")
+                    logger.warning(
+                        f"File for key {key} not found in cache directory {self._cache_dir}."
+                    )
                     continue

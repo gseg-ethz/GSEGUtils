@@ -3,18 +3,22 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import pytest
-from numpydantic import NDArray, Shape # type: ignore[import-untyped]
-from numpydantic.exceptions import DtypeError, ShapeError, NoMatchError # type: ignore[import-untyped]
+from numpydantic import NDArray, Shape  # type: ignore[import-untyped]
+from numpydantic.exceptions import (  # type: ignore[import-untyped]
+    DtypeError,
+    NoMatchError,
+    ShapeError,
+)
 from pydantic import ValidationError
 
-from GSEGUtils.base_arrays import (     # type: ignore[import-untyped]
+from GSEGUtils.base_arrays import (  # type: ignore[import-untyped]
     ArrayNx2,
     ArrayNx3,
     BaseArray,
-    NumericMixins,
     BaseVector,
     FixedLengthArray,
     HomogeneousArray,
+    NumericMixins,
 )
 from GSEGUtils.base_types import make_ndarray_type  # type: ignore[import-untyped]
 
@@ -23,6 +27,7 @@ class TestNpydanticType:
     """
     Tests to support the make_ndarray_type function as a simple helper function
     """
+
     def test_shape_definitions(self) -> None:
         """
         Tests the use of the make_ndarray_type function for creating numpydantic type objects
@@ -39,10 +44,16 @@ class TestNpydanticType:
         assert NDArray[Shape["*, ..."], Any] == make_ndarray_type()
 
     def test_type_definitions(self) -> None:
-        assert NDArray[Shape["*"], np.float32] == make_ndarray_type(None, dtype=np.float32)
-        assert NDArray[Shape["*"], np.float64] == make_ndarray_type(None, dtype=np.float64)
+        assert NDArray[Shape["*"], np.float32] == make_ndarray_type(
+            None, dtype=np.float32
+        )
+        assert NDArray[Shape["*"], np.float64] == make_ndarray_type(
+            None, dtype=np.float64
+        )
         assert NDArray[Shape["*"], np.uint8] == make_ndarray_type(None, dtype=np.uint8)
-        assert NDArray[Shape["*"], np.uint16] == make_ndarray_type(None, dtype=np.uint16)
+        assert NDArray[Shape["*"], np.uint16] == make_ndarray_type(
+            None, dtype=np.uint16
+        )
         assert NDArray[Shape["*"], np.int32] == make_ndarray_type(None, dtype=np.int32)
         assert NDArray[Shape["*"], np.bool_] == make_ndarray_type(None, dtype=np.bool_)
         assert NDArray[Shape["*, ..."], np.bool_] == make_ndarray_type(dtype=np.bool_)
@@ -52,7 +63,7 @@ class TestNpydanticType:
         float_64_validator = make_ndarray_type(None, dtype=np.float64)
 
         with pytest.raises(DtypeError):
-            float_64_validator(np.random.rand(10,3).astype(np.float32))
+            float_64_validator(np.random.rand(10, 3).astype(np.float32))
 
         # Test shape validation
         shape_10_3 = make_ndarray_type(10, 3)
@@ -85,10 +96,10 @@ class TestBaseArray:
     def check_init_from_reference(data: npt.NDArray[Any], cls: type) -> Any:
         a = cls(arr=data)
         assert isinstance(a, cls)
-        assert a is not data                    # base id does not match
-        assert a.arr is data                    # array id matches
-        assert np.all(a == data)                # Values are identical
-        assert a.arr.base is None               # ensure it's not a view
+        assert a is not data  # base id does not match
+        assert a.arr is data  # array id matches
+        assert np.all(a == data)  # Values are identical
+        assert a.arr.base is None  # ensure it's not a view
         return a
 
     def check_initialisation_options(self, data: npt.NDArray[np.floating]) -> None:
@@ -98,45 +109,57 @@ class TestBaseArray:
         self.check_init_from_array_like(b, self.cls, a)
 
     @staticmethod
-    def check_init_from_copy(data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike) -> Any:
+    def check_init_from_copy(
+        data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike
+    ) -> Any:
         # Tests on a copy that is passed
         a_copied = cls(arr=data.copy())
-        assert ref_array is not a_copied        # New object
-        assert a_copied is not data             # Data differs to new array
-        assert a_copied.arr is not data         # Array is a new object, not a copy
-        assert a_copied.arr.base is None        # Ensure it's a copy and not a view
-        assert np.all(a_copied == data)         # Values are identical
+        assert ref_array is not a_copied  # New object
+        assert a_copied is not data  # Data differs to new array
+        assert a_copied.arr is not data  # Array is a new object, not a copy
+        assert a_copied.arr.base is None  # Ensure it's a copy and not a view
+        assert np.all(a_copied == data)  # Values are identical
         return a_copied
 
     @staticmethod
-    def check_init_from_view(data:npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike) -> Any:
+    def check_init_from_view(
+        data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike
+    ) -> Any:
         # Tests on a view that is passed
         a_view = cls(arr=data.view())
-        assert ref_array is not a_view          # New object
-        assert a_view is not data               # Also a new object
-        assert a_view.arr is not data           # View creates a new object
-        assert a_view.arr.base is data          # But it does have a base which is the data object
-        assert np.all(a_view == data)           # Values are identical
+        assert ref_array is not a_view  # New object
+        assert a_view is not data  # Also a new object
+        assert a_view.arr is not data  # View creates a new object
+        assert (
+            a_view.arr.base is data
+        )  # But it does have a base which is the data object
+        assert np.all(a_view == data)  # Values are identical
 
     @staticmethod
-    def check_init_from_array_like(data: Any, cls: type, ref_array: npt.ArrayLike) -> Any:
+    def check_init_from_array_like(
+        data: Any, cls: type, ref_array: npt.ArrayLike
+    ) -> Any:
         # Tests on a view that is passed
         a_base_array = cls(arr=data)
-        assert ref_array is not a_base_array          # New object
-        assert a_base_array is not data               # Also a new object
-        assert a_base_array.arr is not data           # View creates a new object
-        assert a_base_array.arr is data.arr           # But the array is a reference
-        assert a_base_array.arr.base is None          # Check it's not a view
-        assert np.all(a_base_array == data)           # Values are identical
+        assert ref_array is not a_base_array  # New object
+        assert a_base_array is not data  # Also a new object
+        assert a_base_array.arr is not data  # View creates a new object
+        assert a_base_array.arr is data.arr  # But the array is a reference
+        assert a_base_array.arr.base is None  # Check it's not a view
+        assert np.all(a_base_array == data)  # Values are identical
 
-    @pytest.mark.parametrize("input_values", ({"dict": "Should fail"}, "String is bad", {1, 2, 3}, None))
+    @pytest.mark.parametrize(
+        "input_values", ({"dict": "Should fail"}, "String is bad", {1, 2, 3}, None)
+    )
     def test_invalid_input_types(self, input_values: Any) -> None:
         with pytest.raises(ValidationError):
             self.cls(arr=input_values)
 
     def test_general_base_model(self) -> None:
         assert "arr" in self.cls.model_fields
-        assert hasattr(self.cls, "model_fields")  # ensure we stick with the 'arr' attribute naming convention
+        assert hasattr(
+            self.cls, "model_fields"
+        )  # ensure we stick with the 'arr' attribute naming convention
         assert hasattr(self.cls, "model_config")
         assert isinstance(self.cls.model_fields["arr"].annotation, NDArray)
 
@@ -178,7 +201,7 @@ class TestBaseArray:
         # Case value is True / 1
         # noinspection PyTypeChecker
         a = self.cls(arr=True)
-        assert a.shape == (1, )
+        assert a.shape == (1,)
         assert a.dtype == np.bool_
         assert a.arr == True
 
@@ -206,18 +229,18 @@ class TestBaseArray:
     def test_coerce_to_numpy_invalid(self) -> None:
         # Case using a set is an object type
         with pytest.raises(ValidationError):
-        # noinspection PyTypeChecker
+            # noinspection PyTypeChecker
             self.cls(arr={1, 2, 3})
 
         # Fails on unsupported objects
         with pytest.raises(ValidationError):
-        # noinspection PyTypeChecker
+            # noinspection PyTypeChecker
             self.cls(arr=object())
 
         # Dict doesn't work
         with pytest.raises(ValidationError):
-        # noinspection PyTypeChecker
-            self.cls(arr={'abc': 124})
+            # noinspection PyTypeChecker
+            self.cls(arr={"abc": 124})
 
         # Not supporting complex arrays at this point
         with pytest.raises(ValidationError):
@@ -225,9 +248,9 @@ class TestBaseArray:
 
         # Fail on a list of strings
         with pytest.raises(ValidationError):
-        # noinspection PyTypeChecker
-            self.cls(arr=['a', '23'])
-            
+            # noinspection PyTypeChecker
+            self.cls(arr=["a", "23"])
+
     #
     # def test_freeze(self) -> None:
     #     warnings.warn("This method is deprecated", DeprecationWarning)
@@ -304,28 +327,30 @@ class TestBaseArray:
     def test_copy_shallow(self) -> None:
         a = BaseArray(arr=self.rand_32())
         arr_2 = a.copy(deep=False)
-        assert arr_2 is not a         # The base object differs
-        assert arr_2.arr is a.arr     # But the array object is just a reference
-        assert np.all(arr_2 == a)     # Copy should have exactly equal values (no precision loss)
+        assert arr_2 is not a  # The base object differs
+        assert arr_2.arr is a.arr  # But the array object is just a reference
+        assert np.all(
+            arr_2 == a
+        )  # Copy should have exactly equal values (no precision loss)
 
     def test_copy_deep(self) -> None:
         # Basic case
         a = BaseArray(arr=self.rand_32())
         arr_2 = a.copy(deep=True)
-        assert arr_2 is not a                     # The base object differs
-        assert id(arr_2.arr) is not id(a.arr)     # The array object is also new
+        assert arr_2 is not a  # The base object differs
+        assert id(arr_2.arr) is not id(a.arr)  # The array object is also new
         assert np.all(arr_2 == a)
 
         # Test on passing positional arguments
-        rand = np.random.rand(100,4)
+        rand = np.random.rand(100, 4)
         arr_3 = a.copy(rand, deep=True)
         assert np.all(arr_3 == rand)
         assert arr_3 is not rand
         assert id(arr_3.arr) is not id(rand)
 
         # Test on passing of update argument
-        rand2 = np.random.rand(100,4)
-        arr_4 = a.copy(update={'arr': rand2}, deep=True)
+        rand2 = np.random.rand(100, 4)
+        arr_4 = a.copy(update={"arr": rand2}, deep=True)
         assert np.all(arr_4 == rand2)
         assert arr_4 is not rand2
         assert id(arr_4.arr) is not id(rand2)
@@ -337,7 +362,7 @@ class TestBaseArray:
         b = self.rand_32()
         array_3 = a.copy(b)
         assert np.all(array_3.arr == b)
-        assert array_3.arr is b     # Positional array bypasses deepcopy
+        assert array_3.arr is b  # Positional array bypasses deepcopy
         assert array_3.arr is not a.arr
         assert array_3 is not a
 
@@ -355,21 +380,21 @@ class TestBaseArray:
         assert array_5 is not a
 
         # And as an update kwarg
-        array_6 = a.copy(update={'arr': b})
+        array_6 = a.copy(update={"arr": b})
         assert np.all(array_6.arr == b)
         assert array_6.arr is b
         assert array_6.arr is not a.arr
         assert array_6 is not a
 
         # Test that update bypasses the deepcopy
-        array_7 = a.copy(update={'arr': b}, deep=True)
+        array_7 = a.copy(update={"arr": b}, deep=True)
         assert np.all(array_7.arr == b)
-        assert array_7.arr is b     # Update array bypasses deepcopy
+        assert array_7.arr is b  # Update array bypasses deepcopy
         assert array_7.arr is not a.arr
         assert array_7 is not a
 
         # Test when a BaseArray is passed as the update parameter
-        array_8 = a.copy(update={'arr': self.cls(arr=b)})
+        array_8 = a.copy(update={"arr": self.cls(arr=b)})
         assert np.all(array_6.arr == b)
         assert array_8.arr is b
         assert array_8.arr is not a.arr
@@ -390,7 +415,16 @@ class TestBaseArray:
         assert np.allclose(a, 1)
 
     def test_getitem(self) -> None:
-        data = [[1, 2, 3,], [4, 5, 6], [-1.2, -5.6, -9.4], [2, -2, 2]]
+        data = [
+            [
+                1,
+                2,
+                3,
+            ],
+            [4, 5, 6],
+            [-1.2, -5.6, -9.4],
+            [2, -2, 2],
+        ]
         array_np = np.array(data)
         # noinspection PyTypeChecker
         array_base = self.cls(arr=data)
@@ -411,7 +445,7 @@ class TestBaseArray:
         result = array_base[[0, 1, 1, 3, 3]]
         assert np.all(array_np[[0, 1, 1, 3, 3]] == result)
         assert len(result) == 5
-        assert result.shape == (5,3)
+        assert result.shape == (5, 3)
         assert id(array_np[[0, 1, 1, 3, 3]]) is not id(result)
         assert isinstance(result, BaseArray)
 
@@ -459,14 +493,14 @@ class TestBaseArray:
         # Case 3 - Multi-indexing, array
         a = array.copy()
         # Rows
-        a[[1, 3, 4]] = [[0,1,2], [1, 2, 3], [2, 3, 4]]
-        assert np.all(a[[1, 3, 4]] == [[0,1,2], [1, 2, 3], [2, 3, 4]])
+        a[[1, 3, 4]] = [[0, 1, 2], [1, 2, 3], [2, 3, 4]]
+        assert np.all(a[[1, 3, 4]] == [[0, 1, 2], [1, 2, 3], [2, 3, 4]])
         assert isinstance(a, BaseArray)
 
         # Case 4 - Slice
         a = array.copy()
-        a[::4] = [[0,1,2], [1, 2, 3], [2, 3, 4]]
-        assert np.all(a[::4] == [[0,1,2], [1, 2, 3], [2, 3, 4]])
+        a[::4] = [[0, 1, 2], [1, 2, 3], [2, 3, 4]]
+        assert np.all(a[::4] == [[0, 1, 2], [1, 2, 3], [2, 3, 4]])
         assert isinstance(a, BaseArray)
 
         # Case 4 - Multi-dimension indexing
@@ -478,7 +512,7 @@ class TestBaseArray:
 
         # Case 5 - Unsupported type (string)
         with pytest.raises(IndexError):
-            a['1'] = 3
+            a["1"] = 3
 
     def test_logical_mixins(self) -> None:
         # Test that the behaviour results in the same logic as that of numpy
@@ -552,13 +586,13 @@ class TestBaseArray:
         assert a.size == 300
 
         # Compare against a view
-        b = np.reshape(a, (3, 100))     # a view
-        assert a.shape == (100, 3)            # The original shape has not changed
-        assert b.shape == (3, 100)            # The new shape is different
-        assert b.base is not a.arr            # The view base is a copy
-        assert isinstance(a, BaseArray)        # Base is not changed
-        assert isinstance(b, np.ndarray)      # Reshape returns a numpy array object
-        assert b.shape == a.T.shape           # Transpose should match
+        b = np.reshape(a, (3, 100))  # a view
+        assert a.shape == (100, 3)  # The original shape has not changed
+        assert b.shape == (3, 100)  # The new shape is different
+        assert b.base is not a.arr  # The view base is a copy
+        assert isinstance(a, BaseArray)  # Base is not changed
+        assert isinstance(b, np.ndarray)  # Reshape returns a numpy array object
+        assert b.shape == a.T.shape  # Transpose should match
 
         # Test another shape more complex
         b = np.reshape(a.arr, (5, 60))
@@ -567,7 +601,7 @@ class TestBaseArray:
 
         # Check that all values are equal
         assert np.sum(b) == 300 == np.sum(a)
-        assert b.base is a.arr                  # This time the array is the base
+        assert b.base is a.arr  # This time the array is the base
 
     def test_view(self) -> None:
         a = BaseArray(arr=self.rand_32())
@@ -616,7 +650,7 @@ class TestNumpyMixins(TestBaseArray):
         assert np.allclose(c, a)
         assert isinstance(c, NumericMixins)
 
-        c = g ** 3
+        c = g**3
         assert np.allclose(c, 8)
         assert isinstance(c, NumericMixins)
 
@@ -648,7 +682,7 @@ class TestNumpyMixins(TestBaseArray):
         assert np.allclose(c, 1 - a)
         assert isinstance(c, NumericMixins)
 
-        c = 3 ** g
+        c = 3**g
         assert np.allclose(c, 9)
         assert isinstance(c, NumericMixins)
 
@@ -699,15 +733,15 @@ class TestNumpyMixins(TestBaseArray):
         assert np.all(abs(temp) <= 0.5)
 
     def test_mat_mul_mixins(self):
-        a_ = np.random.rand(5,3)
-        b_ = np.random.rand(3,2)
+        a_ = np.random.rand(5, 3)
+        b_ = np.random.rand(3, 2)
         c_expected = a_ @ b_
         c_expected_inv = b_.T @ a_.T
 
         a_ = self.cls(arr=a_)
         b_ = self.cls(arr=b_)
         c_ = a_ @ b_
-        assert c_.shape == (5,2)
+        assert c_.shape == (5, 2)
         assert np.all(c_ == c_expected)
         assert isinstance(c_, self.cls)
 
@@ -718,21 +752,20 @@ class TestNumpyMixins(TestBaseArray):
         assert np.all(c_inv == c_expected_inv)
         assert isinstance(c_inv, self.cls)
 
-        a_ = np.random.rand(5,3)
-        b_ = np.random.rand(3,3)
+        a_ = np.random.rand(5, 3)
+        b_ = np.random.rand(3, 3)
         c_expected = a_ @ b_
         a_ = self.cls(arr=a_)
         b_ = self.cls(arr=b_)
         a_ @= b_
 
-        assert a_.shape == (5,3)
+        assert a_.shape == (5, 3)
         assert np.all(a_ == c_expected)
         assert isinstance(a_, self.cls)
 
-        b_ = np.random.rand(3,2)
+        b_ = np.random.rand(3, 2)
         with pytest.raises(ValueError):
             a_ @= b_
-
 
 
 class TestFixedLength(TestNumpyMixins):
@@ -808,7 +841,7 @@ class TestFixedLength(TestNumpyMixins):
         for i in (8, 50, 100):
             with pytest.raises(ValueError):
                 array_fl.create_mask(np.random.randint(0, 2, i, dtype=bool))
-    
+
     def test_create_mask_from_sequence(self) -> None:
         array_fl = self.cls(arr=self.rand_32())
         mask = array_fl.create_mask((0, 1, 2))
@@ -842,7 +875,9 @@ class TestFixedLength(TestNumpyMixins):
         with pytest.raises(IndexError):
             array_fl.create_mask(np.array([0, 4, 15]))
 
-    @pytest.mark.parametrize('value', ('1 2 3', True, np.random.rand(10), {1: '1', 2: '2'}))
+    @pytest.mark.parametrize(
+        "value", ("1 2 3", True, np.random.rand(10), {1: "1", 2: "2"})
+    )
     def test_invalid_create_mask_values(self, value: Any) -> None:
         array_fl = self.cls(arr=self.rand_32())
 
@@ -862,7 +897,7 @@ class TestFixedLength(TestNumpyMixins):
         assert len(sample) != len(array_fl)
 
         # Oversampling shouldn't work
-        indices = [1,1,1,1, 3,3,3,3, 4,4,4,4, 5]
+        indices = [1, 1, 1, 1, 3, 3, 3, 3, 4, 4, 4, 4, 5]
         sample = array_fl.sample(indices)
         assert len(sample) != len(indices)
         assert id(sample) != id(array_fl)
@@ -895,7 +930,7 @@ class TestFixedLength(TestNumpyMixins):
         assert id(array_fl.arr) != id(base_vals.arr)
 
         mask = array_fl.create_mask(indices)
-        #Check the extracted values match the indices
+        # Check the extracted values match the indices
         assert len(extracted) == len(indices)
         assert np.all(extracted == array_fl[mask])
         assert np.all(base_vals == array_fl[~mask])
@@ -916,10 +951,15 @@ class TestBaseVector(TestFixedLength):
         assert np.sum(vec) < 10
         assert vec.shape == (10,)
 
-    @pytest.mark.parametrize('value', (np.ones((10, 1)),
-                                       np.ones((1, 10, 1)),
-                                       np.ones((10, 1, 1)),
-                                       BaseArray(arr=np.ones((1,10)))))
+    @pytest.mark.parametrize(
+        "value",
+        (
+            np.ones((10, 1)),
+            np.ones((1, 10, 1)),
+            np.ones((10, 1, 1)),
+            BaseArray(arr=np.ones((1, 10))),
+        ),
+    )
     def test_squeeze_coercion(self, value: npt.ArrayLike) -> None:
         vec = self.cls(arr=value)
         assert vec.size == 10
@@ -927,7 +967,9 @@ class TestBaseVector(TestFixedLength):
         assert np.sum(vec) == 10
         assert vec.shape == (10,)
 
-    @pytest.mark.parametrize('value', (np.random.rand(10, 3), BaseArray(arr=np.random.rand(10, 2))))
+    @pytest.mark.parametrize(
+        "value", (np.random.rand(10, 3), BaseArray(arr=np.random.rand(10, 2)))
+    )
     def test_vector_validation(self, value: npt.ArrayLike) -> None:
         with pytest.raises(ValidationError):
             self.cls(arr=value)
@@ -960,7 +1002,7 @@ class TestHomogeneous(TestFixedLength):
         h = array.H
         assert len(array) == len(h)
         assert isinstance(h, np.ndarray)
-        assert array.shape[1]+1 == h.shape[1]
+        assert array.shape[1] + 1 == h.shape[1]
         assert np.all(h[:, -1] == 1)
         assert h.dtype == array.dtype
         assert np.all(array == h[:, :-1])
@@ -971,7 +1013,7 @@ class TestArrayNx2(TestHomogeneous):
     base_shape = (10, 2)
 
     def test_transpose(self) -> None:
-        a = self.rand_32().T    # (2, 10)
+        a = self.rand_32().T  # (2, 10)
 
         b = self.cls(arr=a)
         assert np.all(b.T == a)

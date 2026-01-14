@@ -138,5 +138,3 @@ Modules
 
    GSEGUtils.base_arrays
    GSEGUtils.base_types
-
-

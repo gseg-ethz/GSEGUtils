@@ -4,12 +4,12 @@ import numpy as np
 
 from GSEGUtils.constants import (
     DEFAULT_CONFIG,
-    VALIDATE_RETURN_CONFIG,
-    validate_variables,
     EPS,
     HALF_PI,
     PI,
-    TWO_PI
+    TWO_PI,
+    VALIDATE_RETURN_CONFIG,
+    validate_variables,
 )
 
 
@@ -29,4 +29,3 @@ def test_default_pydantic_config():
     assert DEFAULT_CONFIG.get("str_to_lower", True)
     assert VALIDATE_RETURN_CONFIG.get("validate_return", True)
     assert isinstance(validate_variables, Callable)
-

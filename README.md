@@ -6,7 +6,7 @@
 GSEGUtils provides some tools and functionality that are used across other development or research projects.
 These are particularly focussed in the direction of research within the group.
 
-The main goal if this repo is to help software development efforts and allow more focus on algorithm 
+The main goal if this repo is to help software development efforts and allow more focus on algorithm
 development, data processing and research rather than code debugging and maintenance.
 
 Currently this module includes:
@@ -16,7 +16,7 @@ Currently this module includes:
 | **BaseArrays**      | Sub-classable array objects with automated validation on type, shape and attributes |
 | **Lazy Disk Cache** | Automated data offloading for memory management                                     |
 | **Util**            | Includes utility functions such as angle unit conversions                           |
-| **Validators**      | Helper functions for performing validation and normalisation                        | 
+| **Validators**      | Helper functions for performing validation and normalisation                        |
 
 ## Installation
 
@@ -55,9 +55,9 @@ np.True_
 np.True_
 
 coords3D = Array_Nx3(np.random.rand(20, 3))
-coords3d.arr = np.random.rand(100) 
+coords3d.arr = np.random.rand(100)
 # RAISES ERROR -> invalid shape not of (N, 3), expected (N,)
 
-coords3d.arr = np.random.rand(100, 3) 
+coords3d.arr = np.random.rand(100, 3)
 # Valid as the array is of shape Nx3
 ```

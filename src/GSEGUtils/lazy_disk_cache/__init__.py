@@ -11,9 +11,14 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-__all__ = ["LazyDiskCache","LazyDiskCacheKw", "LazyDiskCacheConfig",
-           "DiskBackedNDArray", "DiskBackedStore"]
+__all__ = [
+    "LazyDiskCache",
+    "LazyDiskCacheKw",
+    "LazyDiskCacheConfig",
+    "DiskBackedNDArray",
+    "DiskBackedStore",
+]
 
-from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheKw, LazyDiskCacheConfig
 from .disk_backed_ndarray import DiskBackedNDArray
 from .disk_backed_store import DiskBackedStore
+from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw

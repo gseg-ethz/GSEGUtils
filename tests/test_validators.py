@@ -1,35 +1,47 @@
-import pytest
 from abc import ABC
 from typing import Callable
 
 import numpy as np
+import pytest
 
 from GSEGUtils.constants import HALF_PI, PI, TWO_PI
 from GSEGUtils.validators import (
-    validate_azimuth_angles,
-    validate_inclination_angles,
-    validate_spherical_angles,
-    validate_horizontal_angles,
-    validate_zenith_angles,
-    validate_radius,
+    _normalize_base,
     coerce_wrapped_azimuth_angles,
     coerce_wrapped_horizontal_angles,
-    validate_transposed_2d_array,
     convert_slice_to_integer_range,
-    validate_in_range,
-    normalize_min_max,
     linear_map_dtype,
-    normalize_self,
-    _normalize_base,
-    normalize_uint8,
-    normalize_uint16,
     normalize_int8,
     normalize_int16,
     normalize_int32,
-    normalize_int64
+    normalize_int64,
+    normalize_min_max,
+    normalize_self,
+    normalize_uint8,
+    normalize_uint16,
+    validate_azimuth_angles,
+    validate_horizontal_angles,
+    validate_in_range,
+    validate_inclination_angles,
+    validate_radius,
+    validate_spherical_angles,
+    validate_transposed_2d_array,
+    validate_zenith_angles,
 )
 
-COORDINATE_3D_PROPERTIES = ("x", "y", "z", "r", "v", "hz", "rho", "theta", "phi", "xyz", "spher")
+COORDINATE_3D_PROPERTIES = (
+    "x",
+    "y",
+    "z",
+    "r",
+    "v",
+    "hz",
+    "rho",
+    "theta",
+    "phi",
+    "xyz",
+    "spher",
+)
 
 
 class BaseAngleTestClass(ABC):
@@ -67,7 +79,7 @@ class TestValidation(BaseAngleTestClass):
                 (np.array([0, 2 * np.pi, 1.7, -np.pi - 3]), main_test),
                 (float(72), main_test),
                 (int(-44), main_test),
-                (np.array([0, 1.3, np.pi, np.pi * 1.5, np.pi*2]), main_test),
+                (np.array([0, 1.3, np.pi, np.pi * 1.5, np.pi * 2]), main_test),
             ],
         )
         def test_invalid_values(self, values: np.ndarray, func: Callable):
@@ -189,7 +201,15 @@ class TestValidation(BaseAngleTestClass):
             "values, func",
             [
                 (
-                    np.array([[np.random.rand(10) * 100, np.random.rand(10) * TWO_PI - PI, np.random.rand(10) * PI]]),
+                    np.array(
+                        [
+                            [
+                                np.random.rand(10) * 100,
+                                np.random.rand(10) * TWO_PI - PI,
+                                np.random.rand(10) * PI,
+                            ]
+                        ]
+                    ),
                     main_test,
                 )
             ],
@@ -241,8 +261,9 @@ class TestValidation(BaseAngleTestClass):
                     main_test,
                 ),
                 (
-                    "Not an array", main_test,
-                )
+                    "Not an array",
+                    main_test,
+                ),
             ],
         )
         def test_invalid_values(self, values: np.ndarray, func: Callable):
@@ -302,34 +323,44 @@ def test_invalid_transposed_2d():
         validate_transposed_2d_array(a, n=3)
 
 
-
-@pytest.mark.parametrize(("slice_obj", "expected"), (
-                         (slice(None, None, None), [i for i in range(10)]),
-                         (slice(0, None, None), [i for i in range(10)]),
-                         (slice(0, 5, None), [i for i in range(5)]),
-                         (slice(3, 8, None), [i for i in range(3, 8)]),
-                         (slice(3, 8, 2), [3, 5, 7]),
-                         (slice(3, 9, 2), [3, 5, 7]),
-                         (slice(3, 9, -1), []),
-                         (slice(9, 3, -1), [9, 8, 7, 6, 5, 4]),
-                         (slice(None, None, 3), [0, 3, 6, 9]),
-                         (slice(-1, -3, -1), [9, 8]),
-                         (slice(-1, -3, None), []),
-                         (slice(-2, -10, -2), [8, 6, 4, 2]),
-                         (slice(-2, None, -2), [8, 6, 4, 2, 0]),
-                         (slice(None, 4, None), [0, 1, 2, 3]),
-))
+@pytest.mark.parametrize(
+    ("slice_obj", "expected"),
+    (
+        (slice(None, None, None), [i for i in range(10)]),
+        (slice(0, None, None), [i for i in range(10)]),
+        (slice(0, 5, None), [i for i in range(5)]),
+        (slice(3, 8, None), [i for i in range(3, 8)]),
+        (slice(3, 8, 2), [3, 5, 7]),
+        (slice(3, 9, 2), [3, 5, 7]),
+        (slice(3, 9, -1), []),
+        (slice(9, 3, -1), [9, 8, 7, 6, 5, 4]),
+        (slice(None, None, 3), [0, 3, 6, 9]),
+        (slice(-1, -3, -1), [9, 8]),
+        (slice(-1, -3, None), []),
+        (slice(-2, -10, -2), [8, 6, 4, 2]),
+        (slice(-2, None, -2), [8, 6, 4, 2, 0]),
+        (slice(None, 4, None), [0, 1, 2, 3]),
+    ),
+)
 def test_slice_to_integer_range(slice_obj, expected):
     result = convert_slice_to_integer_range(slice_obj, 10)
     assert np.all(result == expected)
 
-@pytest.mark.parametrize(("value", "v_min", "v_max"), (
-    (np.full(2, 2), 1, 4),
-    (np.arange(100), -1, 100),
-    (np.linspace(-np.pi, np.pi, 100, endpoint=True), -np.pi-0.0001, np.pi+0.0001),
-    ([-2, 7, 1004, 200.43], -34, 10000),
-    (1, 0, 2)
-))
+
+@pytest.mark.parametrize(
+    ("value", "v_min", "v_max"),
+    (
+        (np.full(2, 2), 1, 4),
+        (np.arange(100), -1, 100),
+        (
+            np.linspace(-np.pi, np.pi, 100, endpoint=True),
+            -np.pi - 0.0001,
+            np.pi + 0.0001,
+        ),
+        ([-2, 7, 1004, 200.43], -34, 10000),
+        (1, 0, 2),
+    ),
+)
 def test_validate_in_range(value, v_min, v_max):
     assert validate_in_range(value, v_min, v_max) is None
 
@@ -348,14 +379,17 @@ def test_validate_in_range_invalid():
         validate_in_range(np.array([100123]), 10, 100)
 
 
-@pytest.mark.parametrize(("func", "dtype"), (
-                         (normalize_uint8, np.uint8),
-                         (normalize_uint16, np.uint16),
-                         (normalize_int8, np.int8),
-                         (normalize_int16, np.int16),
-                         (normalize_int32, np.int32),
-                         (normalize_int64, np.int64)
-))
+@pytest.mark.parametrize(
+    ("func", "dtype"),
+    (
+        (normalize_uint8, np.uint8),
+        (normalize_uint16, np.uint16),
+        (normalize_int8, np.int8),
+        (normalize_int16, np.int16),
+        (normalize_int32, np.int32),
+        (normalize_int64, np.int64),
+    ),
+)
 def test_normalize_to_dedicated_int_dtype_funcs(func, dtype: np.dtype):
     values = np.random.rand(100).astype(np.float64)
     lower = np.iinfo(dtype).min
@@ -424,7 +458,7 @@ def test_normalize_min_max_dtype_conversions():
         (np.int16, -32768, 32767),
         (np.int32, -2147483648, 2147483647),
         (np.float32, -1.0, 1.0),
-        (np.float64, -1.0, 1.0)
+        (np.float64, -1.0, 1.0),
     ]
 
     input_array = np.linspace(-100, 100, 1000)
@@ -450,7 +484,7 @@ def test_normalize_min_max_invalid_inputs():
         normalize_min_max(np.array([1, 2, 3]), 0, 1, np.float32, v_min=5, v_max=5)
 
     with pytest.raises(TypeError):
-        array = np.array([[ 0.+0.j,  0.+0.j], [ 0.+0.j,  0.+0.j]])
+        array = np.array([[0.0 + 0.0j, 0.0 + 0.0j], [0.0 + 0.0j, 0.0 + 0.0j]])
         normalize_min_max(array, 0, 1, np.float32)
 
 
@@ -493,16 +527,19 @@ def test_linear_map_dtype_same_type():
     assert result.dtype == np.int32
 
 
-@pytest.mark.parametrize(("src_type", "target_type"), (
+@pytest.mark.parametrize(
+    ("src_type", "target_type"),
+    (
         (np.int8, np.int16),
         (np.uint8, np.uint16),
         (np.uint16, np.uint32),
-        (np.int8, np.uint8)
-))
+        (np.int8, np.uint8),
+    ),
+)
 def test_linear_map_dtype_integer_conversions(src_type, target_type):
     # Create array with full range of source type
     info = np.iinfo(src_type)
-    array = np.array([info.min, (info.max+info.min) / 2, info.max], dtype=src_type)
+    array = np.array([info.min, (info.max + info.min) / 2, info.max], dtype=src_type)
 
     result = linear_map_dtype(array, target_type)
 
@@ -539,13 +576,17 @@ def test_linear_map_dtype_integer_to_float():
     for int_type in int_types:
         for float_type in float_types:
             info = np.iinfo(int_type)
-            array = np.array([info.min, (info.max + info.min) / 2, info.max], dtype=int_type)
+            array = np.array(
+                [info.min, (info.max + info.min) / 2, info.max], dtype=int_type
+            )
 
             result = linear_map_dtype(array, float_type)
 
             assert result.dtype == float_type
             assert np.all((result >= 0.0) & (result <= 1.0))
-            assert np.allclose(result[1], 0.5, atol = 1/(info.max-info.min))  # Middle value should be mapped to 0.5
+            assert np.allclose(
+                result[1], 0.5, atol=1 / (info.max - info.min)
+            )  # Middle value should be mapped to 0.5
 
 
 def test_linear_map_dtype_float_to_integer():
@@ -590,7 +631,7 @@ def test_linear_map_dtype_edge_cases():
 def test_linear_map_dtype_invalid_inputs():
     # Test invalid input dtype
     with pytest.raises(TypeError):
-        array = np.array(['a', 'b', 'c'])
+        array = np.array(["a", "b", "c"])
         linear_map_dtype(array, np.float32)
 
     # Test invalid target dtype
@@ -626,7 +667,7 @@ def test_normalize_self_integer_types():
         (np.int8, [2, 10, 30]),
         (np.int16, [-100, 0, 500]),
         (np.uint8, [50, 100, 200]),
-        (np.uint16, [1000, 2000, 3000])
+        (np.uint16, [1000, 2000, 3000]),
     ]
 
     for dtype, values in test_cases:
@@ -649,7 +690,7 @@ def test_normalize_self_float_types():
         [-10.5, 0.0, 5.7],  # Mixed positive/negative
         [1.5, 2.0, 4.8],  # All positive
         [-5.0, -3.0, -1.0],  # All negative
-        [100.5, 200.8, 300.1]  # Large values
+        [100.5, 200.8, 300.1],  # Large values
     ]
 
     for dtype in float_types:
@@ -667,24 +708,22 @@ def test_normalize_self_float_types():
             # Check if relative ordering and spacing is preserved
             min_val, max_val = array.min(), array.max()
             expected = (array - min_val) / (max_val - min_val)
-            np.testing.assert_allclose(result, expected, rtol=1e-6 if dtype == np.float32 else 1e-15)
+            np.testing.assert_allclose(
+                result, expected, rtol=1e-6 if dtype == np.float32 else 1e-15
+            )
 
 
 def test_normalize_self_multidimensional():
     # Test 2D integer array
-    array_2d = np.array([
-        [10, 20, 30],
-        [40, 50, 60]
-    ], dtype=np.uint8)
+    array_2d = np.array([[10, 20, 30], [40, 50, 60]], dtype=np.uint8)
     result_2d = normalize_self(array_2d)
     assert result_2d.shape == array_2d.shape
     assert result_2d.dtype == np.uint8
 
     # Test 3D float array
-    array_3d = np.array([
-        [[0.1, 0.2], [0.3, 0.4]],
-        [[0.5, 0.6], [0.7, 0.8]]
-    ], dtype=np.float32)
+    array_3d = np.array(
+        [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]], dtype=np.float32
+    )
     result_3d = normalize_self(array_3d)
     assert result_3d.shape == array_3d.shape
     assert result_3d.dtype == np.float32
@@ -694,7 +733,7 @@ def test_normalize_self_multidimensional():
 def test_normalize_self_invalid_inputs():
     invalid_arrays = [
         (np.array([1 + 2j, 3 + 4j], dtype=np.complex64), TypeError),
-        (np.array(['a', 'b', 'c']), TypeError)
+        (np.array(["a", "b", "c"]), TypeError),
     ]
 
     for array, expected_error in invalid_arrays:
@@ -721,7 +760,7 @@ def test_normalize_base_to_float():
     """Test normalization to floating point types"""
     test_cases = [
         (np.array([0, 128, 255], dtype=np.uint8), np.float32),
-        (np.array([-32768, 0, 32767], dtype=np.int16), np.float64)
+        (np.array([-32768, 0, 32767], dtype=np.int16), np.float64),
     ]
 
     for array, target_dtype in test_cases:
@@ -773,7 +812,7 @@ def test_normalize_base_invalid_inputs():
     """Test invalid input handling"""
     invalid_arrays = [
         (np.array([1 + 2j, 3 + 4j], dtype=np.complex64), np.float32),
-        (np.array(['a', 'b', 'c']), np.float32),
+        (np.array(["a", "b", "c"]), np.float32),
     ]
 
     for array, target_dtype in invalid_arrays:
@@ -794,4 +833,3 @@ def test_normalize_base_special_values():
     result_int = _normalize_base(array, np.uint8)
     assert result_int.dtype == np.uint8
     assert np.all((result_int >= 0) & (result_int <= 255))
-

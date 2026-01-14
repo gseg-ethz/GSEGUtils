@@ -13,17 +13,19 @@
 
 import logging
 import logging.config
-from pathlib import Path
 import tempfile
-from typing import Optional, Literal
+from pathlib import Path
+from typing import Literal, Optional
 
+LOGGING_LEVELS = Literal[
+    "CRITICAL", "FATAL", "ERROR", "WARN", "WARNING", "INFO", "DEBUG", "NOTSET"
+]
 
-LOGGING_LEVELS = Literal['CRITICAL', 'FATAL', 'ERROR', 'WARN', 'WARNING', 'INFO', 'DEBUG', 'NOTSET']
 
 def setup_logging(
-        logfile_path: Optional[Path | str] = None,
-        console_level: LOGGING_LEVELS = "WARNING",
-        file_level: LOGGING_LEVELS = "DEBUG",
+    logfile_path: Optional[Path | str] = None,
+    console_level: LOGGING_LEVELS = "WARNING",
+    file_level: LOGGING_LEVELS = "DEBUG",
 ) -> Path:
     if logfile_path is None:
         logfile_path = Path(tempfile.mkdtemp()) / "debug.log"
@@ -43,26 +45,24 @@ def setup_logging(
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
-            "simple": {
-                "format": "[%(levelname)s]: %(message)s"
-            },
+            "simple": {"format": "[%(levelname)s]: %(message)s"},
             "detailed": {
                 "()": "colorlog.ColoredFormatter",  # This tells dictConfig to instantiate ColoredFormatter
                 "format": "%(log_color)s[%(levelname)s|%(name)s|L%(lineno)d] %(asctime)s: %(message)s",
                 # "format": "%(log_color)s%(levelname)s:%(name)s:%(message)s",
-                "datefmt": "%Y-%m-%dT%H:%M:%S%z"
+                "datefmt": "%Y-%m-%dT%H:%M:%S%z",
             },
             "file": {
                 "format": "[%(levelname)s|%(name)s|L%(lineno)d] %(asctime)s: %(message)s",
-                "datefmt": "%Y-%m-%dT%H:%M:%S%z"
-            }
+                "datefmt": "%Y-%m-%dT%H:%M:%S%z",
+            },
         },
         "handlers": {
             "stdout": {
                 "class": "logging.StreamHandler",
                 "formatter": "detailed",
                 "level": console_level,
-                "stream": "ext://sys.stdout"
+                "stream": "ext://sys.stdout",
             },
             "file": {
                 "class": "logging.FileHandler",
@@ -70,28 +70,22 @@ def setup_logging(
                 "filename": logfile_path,
                 "level": file_level,
                 "mode": "a",  # append mode
-                "encoding": "utf-8"
-            }
+                "encoding": "utf-8",
+            },
         },
         "loggers": {
-            "root": {
-                "level": numeric_root,
-                "handlers": [
-                    "stdout",
-                    "file"
-                ]
+            "root": {"level": numeric_root, "handlers": ["stdout", "file"]},
+            "matplotlib": {
+                "level": "WARNING",
+                "handlers": ["stdout"],
+                "propagate": False,
             },
-            'matplotlib': {
-                'level': 'WARNING',
-                'handlers': ['stdout'],
-                'propagate': False,
+            "PIL": {
+                "level": "WARNING",
+                "handlers": ["stdout"],
+                "propagate": False,
             },
-            'PIL': {
-                'level': 'WARNING',
-                'handlers': ['stdout'],
-                'propagate': False,
-            },
-        }
+        },
     }
 
     logging.config.dictConfig(log_config)

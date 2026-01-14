@@ -12,24 +12,18 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from pathlib import Path
-from typing import Unpack, Self
+from typing import Self, Unpack
 
 import numpy as np
-from numpy.typing import DTypeLike, NDArray
 from numpy.lib.mixins import NDArrayOperatorsMixin
+from numpy.typing import DTypeLike, NDArray
 
 from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw
 
 
 class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
 
-
-    def __init__(
-            self,
-            data: NDArray,
-            **settings: Unpack[LazyDiskCacheKw]
-
-    ) -> None:
+    def __init__(self, data: NDArray, **settings: Unpack[LazyDiskCacheKw]) -> None:
         self._data = data
         self._shape = data.shape
         self._dtype = data.dtype
@@ -43,7 +37,7 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
     # ) -> Self:
     #     if not isinstance(file_path, Path):
     #         file_path = str(file_path)
-        
+
     #     if not Path(file_path).exists():
     #         raise FileNotFoundError(f"File '{file_path}' does not exist.")
     #     array_data = np.load(file_path)
@@ -57,10 +51,8 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
         arr = self._data
         return arr.astype(dtype, copy=True) if dtype else arr.copy()
 
-
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
         raise NotImplementedError("Not implemented.")
-
 
     @LazyDiskCache.ensure_loaded
     def __getitem__(self, key):
@@ -76,7 +68,7 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
         return self._shape, self._dtype, self._data
 
     def _drop_buffer(self) -> None:
-        self._data = None   # type: ignore
+        self._data = None  # type: ignore
 
     def _describe_shape_dtype(self) -> tuple[tuple[int, ...], DTypeLike]:
         return self._shape, self._dtype

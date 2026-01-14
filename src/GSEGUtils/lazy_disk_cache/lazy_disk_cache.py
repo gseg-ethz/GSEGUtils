@@ -11,26 +11,36 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import logging
+import os
+import tempfile
+import threading
+import weakref
 from abc import ABC, abstractmethod
 from dataclasses import asdict, replace
 from functools import wraps
 from pathlib import Path
-import threading
-from typing import Optional, Any, Literal, Unpack, TypedDict, Required, NotRequired, Self, cast
-import logging
-import weakref
-import tempfile
-import os
+from typing import (
+    Any,
+    Literal,
+    NotRequired,
+    Optional,
+    Required,
+    Self,
+    TypedDict,
+    Unpack,
+    cast,
+)
 
 import numpy as np
-from numpy.typing import NDArray, DTypeLike
-
-from pydantic import validate_call, ConfigDict
+from numpy.typing import DTypeLike, NDArray
+from pydantic import ConfigDict, validate_call
 from pydantic.dataclasses import dataclass
 
-from GSEGUtils.config import get_defaults, CacheDefaults
+from GSEGUtils.config import CacheDefaults, get_defaults
 
 logger = logging.getLogger(__name__)
+
 
 class LazyDiskCacheKw(TypedDict, total=False):
     enable_caching: bool
@@ -38,13 +48,14 @@ class LazyDiskCacheKw(TypedDict, total=False):
     purge_disk_on_gc: bool
     automatic_offloading: bool
 
+
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True), frozen=True)
 class LazyDiskCacheConfig:
     enable_caching: bool = False
     cache_path: Optional[Path] = None
     purge_disk_on_gc: bool = True
     automatic_offloading: bool = False
-    
+
     def as_kwargs(self) -> LazyDiskCacheKw:
         lazy_disk_cache_kw = LazyDiskCacheKw(
             enable_caching=self.enable_caching,
@@ -53,14 +64,14 @@ class LazyDiskCacheConfig:
             automatic_offloading=self.automatic_offloading,
         )
         return lazy_disk_cache_kw
-    
+
     @classmethod
     def from_kwargs(cls, settings: LazyDiskCacheKw) -> Self:
         return cls(**settings)
-    
+
     def updated(self, **overrides: LazyDiskCacheKw) -> Self:
         return replace(self, **overrides)
-    
+
     @validate_call()
     def extend_cache_path(self, new_folder: str) -> Self:
         new_path = self.cache_path / new_folder if self.cache_path else None
@@ -74,20 +85,21 @@ class LazyDiskCache(ABC):
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def __init__(
-            self,
-            **settings: Unpack[LazyDiskCacheKw],
-            # **overrides: Unpack[CacheDefaults],
+        self,
+        **settings: Unpack[LazyDiskCacheKw],
+        # **overrides: Unpack[CacheDefaults],
     ) -> None:
         config = LazyDiskCacheConfig(**settings)
         self._init_from_config(config)
-
 
     def _init_from_config(self, config: LazyDiskCacheConfig) -> None:
         # defaults = get_defaults()
         # automatic_offloading = overrides.get("preset_automatic_offloading", defaults["preset_automatic_offloading"])
         self._enable_caching = config.enable_caching
         if config.cache_path is None:
-            fd, cache_path = tempfile.mkstemp(suffix=self._MEMMAP_SUFFIX) # Todo: Think about a case where the provided path is a dir
+            fd, cache_path = tempfile.mkstemp(
+                suffix=self._MEMMAP_SUFFIX
+            )  # Todo: Think about a case where the provided path is a dir
             os.close(fd)
             self._cache_path = Path(cache_path)
         else:
@@ -95,7 +107,9 @@ class LazyDiskCache(ABC):
         # elif cache_path.is_dir():
 
         # self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX) if cache_path else None
-        self._automatic_offloading = config.automatic_offloading #and (cache_path is not None)
+        self._automatic_offloading = (
+            config.automatic_offloading
+        )  # and (cache_path is not None)
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
         self._lock = threading.RLock()
@@ -110,8 +124,7 @@ class LazyDiskCache(ABC):
         if config.automatic_offloading:
             self.offload()
         if self._cache_path and self._purge_disk_on_gc:
-            self._finalizer = weakref.finalize(self, lambda p = self._cache_path: p.unlink(missing_ok=True)) # type: ignore
-
+            self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))  # type: ignore
 
     def _convert_to_memmap(self) -> None:
         """
@@ -125,10 +138,16 @@ class LazyDiskCache(ABC):
             # 1) allocate or reopen the mmap file
             if self._mmap is None:
                 self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-                mode: Literal["w+", "r+"] = "w+" if not self._cache_path.exists() else "r+"
-                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode=mode, shape=shape)
+                mode: Literal["w+", "r+"] = (
+                    "w+" if not self._cache_path.exists() else "r+"
+                )
+                self._mmap = np.memmap(
+                    self._cache_path, dtype=dtype, mode=mode, shape=shape
+                )
             elif self._mmap.mode != "r+":
-                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode="r+", shape=shape)
+                self._mmap = np.memmap(
+                    self._cache_path, dtype=dtype, mode="r+", shape=shape
+                )
 
             self._mmap[:] = array
 
@@ -174,6 +193,7 @@ class LazyDiskCache(ABC):
             if self.automatic_offloading and was_offloaded:
                 self.offload()
             return result
+
         return wrapper
 
     @property
@@ -220,11 +240,10 @@ class LazyDiskCache(ABC):
         Disable automatic deletion of the cache file when the object is garbage-collected.
         """
         with self._lock:
-            if hasattr(self, '_finalizer'):
+            if hasattr(self, "_finalizer"):
                 self._finalizer.detach()
             self._purge_disk_on_gc = False
             logger.debug(f"Disabled purge for {self._cache_path}")
-
 
     def enable_purge(self):
         """
@@ -234,12 +253,14 @@ class LazyDiskCache(ABC):
         with self._lock:
             if not self._cache_path:
                 return
-            if hasattr(self, '_finalizer') and self._finalizer.alive:
+            if hasattr(self, "_finalizer") and self._finalizer.alive:
                 # already enabled
                 self._purge_disk_on_gc = True
                 return
             # register a new finalizer
-            self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
+            self._finalizer = weakref.finalize(
+                self, lambda p=self._cache_path: p.unlink(missing_ok=True)
+            )
             self._purge_disk_on_gc = True
             logger.debug(f"Enabled purge for {self._cache_path}")
 
@@ -257,10 +278,14 @@ class LazyDiskCache(ABC):
         """Flush the current buffer to disk, drop the in-RAM array, and mark offloaded."""
         with self._lock:
             if not self._enable_caching:
-                logger.info(f"Caching disabled ==> {self.__class__}.`offload()` ignored for {id(self)}.")
+                logger.info(
+                    f"Caching disabled ==> {self.__class__}.`offload()` ignored for {id(self)}."
+                )
                 return
             if self.offloaded:
-                logger.info(f"{self.__class__}: {id(self)} already offloaded to {self.cache_path}.")
+                logger.info(
+                    f"{self.__class__}: {id(self)} already offloaded to {self.cache_path}."
+                )
                 return
 
             # make sure we have a memmap buffer
@@ -271,7 +296,7 @@ class LazyDiskCache(ABC):
             shape, dtype, array = self._describe_buffer()
             if not isinstance(self._mmap, np.memmap):
                 # should not really happen, but just in case:
-                self._mmap[:] = np.array(array, dtype=dtype, copy=True) # type: ignore
+                self._mmap[:] = np.array(array, dtype=dtype, copy=True)  # type: ignore
             else:
                 # if subclass buffer is plain ndarray, copy it in
                 if not isinstance(array, np.memmap):
@@ -290,10 +315,7 @@ class LazyDiskCache(ABC):
                 self.on_offload()
             except Exception:
                 logger.exception("Error in on_offload hook")
-            logger.debug(
-                f"Flushed buffer to from {self._cache_path}."
-            )
-
+            logger.debug(f"Flushed buffer to from {self._cache_path}.")
 
     def load(self, mode: Literal["r", "r+", "w+", "c"] = "r+") -> None:
         """Reload the buffer from disk into memory (i.e. make self._mmap your active buffer)."""
@@ -303,14 +325,15 @@ class LazyDiskCache(ABC):
 
             # (re)open the mmap if needed
             shape, dtype = self._describe_shape_dtype()
-            if (self._mmap is None
-                    or self._mmap.shape  != shape
-                    or self._mmap.dtype  != np.dtype(dtype)
-                    or self._mmap.mode   != mode):
-                self._mmap = np.memmap(self._cache_path,
-                                       dtype=dtype,
-                                       mode=mode,
-                                       shape=shape)
+            if (
+                self._mmap is None
+                or self._mmap.shape != shape
+                or self._mmap.dtype != np.dtype(dtype)
+                or self._mmap.mode != mode
+            ):
+                self._mmap = np.memmap(
+                    self._cache_path, dtype=dtype, mode=mode, shape=shape
+                )
 
             # hand that mmap to your subclass as its “buffer”
             self._set_buffer(self._mmap)
@@ -336,8 +359,7 @@ class LazyDiskCache(ABC):
     #             "purge_disk_on_gc": bool
     #             "automatic_offloading": bool
     #     }
-    
-    
+
     def __getstate__(self):
         # if hasattr(self, "_finalizer"):
         #     self._finalizer.detach()
@@ -354,7 +376,6 @@ class LazyDiskCache(ABC):
         self._lock = threading.RLock()
         # if self._cache_path and self._purge_disk_on_gc:
         #     self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
-
 
     @abstractmethod
     def _describe_buffer(self) -> tuple[tuple[int, ...], DTypeLike, NDArray]:

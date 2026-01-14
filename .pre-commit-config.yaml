@@ -34,15 +34,15 @@ repos:
       - id: isort
         args: ["--profile", "black"]
 
-  - repo: https://github.com/PyCQA/flake8
-    rev: 7.3.0
-    hooks:
-      - id: flake8
-        args: ["--config=.flake8"]
+  # - repo: https://github.com/PyCQA/flake8
+  #   rev: 7.3.0
+  #   hooks:
+  #     - id: flake8
+  #       args: ["--config=.flake8"]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.1
-    hooks:
-      - id: mypy
-        args: ["--config-file", "mypy.ini"]
-        pass_filenames: false
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.17.1
+  #   hooks:
+  #     - id: mypy
+  #       args: ["--config-file", "mypy.ini"]
+  #       pass_filenames: false

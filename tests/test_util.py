@@ -1,7 +1,8 @@
-import pytest
 import numpy as np
+import pytest
 
 from GSEGUtils.util import AngleUnit, convert_angles, unique_rows_fast
+
 
 class TestUtil:
     def test_bypass_immutability_decorator(self):
@@ -19,36 +20,50 @@ class TestConvertAngle:
     def test_rad_to_deg(self):
         rad_values = np.array([np.pi, np.pi / 2, np.pi / 4])
         expected_deg = np.array([180, 90, 45])
-        np.testing.assert_array_almost_equal(convert_angles(rad_values, AngleUnit.RAD, AngleUnit.DEGREE), expected_deg)
+        np.testing.assert_array_almost_equal(
+            convert_angles(rad_values, AngleUnit.RAD, AngleUnit.DEGREE), expected_deg
+        )
 
     def test_deg_to_rad(self):
         deg_values = np.array([180, 90, 45])
         rad_values = np.array([np.pi, np.pi / 2, np.pi / 4])
-        np.testing.assert_array_almost_equal(convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.RAD), rad_values)
+        np.testing.assert_array_almost_equal(
+            convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.RAD), rad_values
+        )
 
     def test_deg_to_gon(self):
         deg_values = np.array([180, 90, 45])
         expected_gon = np.array([200, 100, 50])
-        np.testing.assert_array_almost_equal(convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.GON), expected_gon)
+        np.testing.assert_array_almost_equal(
+            convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.GON), expected_gon
+        )
 
     def test_gon_to_deg(self):
         gon_values = np.array([200, 100, 50])
         expected_deg = np.array([180, 90, 45])
-        np.testing.assert_array_almost_equal(convert_angles(gon_values, AngleUnit.GON, AngleUnit.DEGREE), expected_deg)
+        np.testing.assert_array_almost_equal(
+            convert_angles(gon_values, AngleUnit.GON, AngleUnit.DEGREE), expected_deg
+        )
 
     def test_gon_to_rad(self):
         gon_values = np.array([200, 100, 50])
         expected_rad = np.array([np.pi, np.pi / 2, np.pi / 4])
-        np.testing.assert_array_almost_equal(convert_angles(gon_values, AngleUnit.GON, AngleUnit.RAD), expected_rad)
+        np.testing.assert_array_almost_equal(
+            convert_angles(gon_values, AngleUnit.GON, AngleUnit.RAD), expected_rad
+        )
 
     def test_rad_to_gon(self):
         rad_values = np.array([np.pi, np.pi / 2, np.pi / 4])
         expected_gon = np.array([200, 100, 50])
-        np.testing.assert_array_almost_equal(convert_angles(rad_values, AngleUnit.RAD, AngleUnit.GON), expected_gon)
+        np.testing.assert_array_almost_equal(
+            convert_angles(rad_values, AngleUnit.RAD, AngleUnit.GON), expected_gon
+        )
 
     def test_same_unit_conversion(self):
         values = np.array([1, 2, 3])
-        np.testing.assert_array_equal(convert_angles(values, AngleUnit.DEGREE, AngleUnit.DEGREE), values)
+        np.testing.assert_array_equal(
+            convert_angles(values, AngleUnit.DEGREE, AngleUnit.DEGREE), values
+        )
 
     def test_array_sizes(self):
         large_array = np.linspace(0, 100, 500)
@@ -78,11 +93,11 @@ class TestConvertAngle:
         assert out != value
         returned = convert_angles(value, AngleUnit.RAD, AngleUnit.RAD, out=out)
         assert id_value == id(value)
-        assert before_value == value    # hasn't changed
+        assert before_value == value  # hasn't changed
         assert id(out) == id_out
-        assert before_out == out        # hasn't changed
+        assert before_out == out  # hasn't changed
         assert returned is None
-        assert 'Input values are not an ndarray' in caplog.text
+        assert "Input values are not an ndarray" in caplog.text
 
     def test_inplace(self):
         values = np.array([np.pi, np.pi / 2])
@@ -99,26 +114,17 @@ class TestConvertAngle:
         with pytest.raises(ValueError):
             convert_angles(values, AngleUnit.RAD, "invalid_target", out=values)
 
+
 # Tests written by Claude 3.5 Sonnet
 def test_unique_rows_fast():
     # Test case 1: Basic functionality with distinct rows
-    input_array = np.array([
-        [1, 2],
-        [3, 4],
-        [5, 6]
-    ], dtype=np.int32)
+    input_array = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.int32)
     unique, inverse = unique_rows_fast(input_array)
     assert np.array_equal(unique, input_array)
     assert np.array_equal(inverse, [0, 1, 2])
 
     # Test case 2: Array with duplicate rows
-    input_array = np.array([
-        [1, 2],
-        [3, 4],
-        [1, 2],
-        [5, 6],
-        [3, 4]
-    ], dtype=np.int32)
+    input_array = np.array([[1, 2], [3, 4], [1, 2], [5, 6], [3, 4]], dtype=np.int32)
     unique, inverse = unique_rows_fast(input_array)
     expected_unique = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.int32)
     expected_inverse = [0, 1, 0, 2, 1]
@@ -132,12 +138,7 @@ def test_unique_rows_fast():
     assert np.array_equal(inverse, [0])
 
     # Test case 4: Higher dimensional data
-    input_array = np.array([
-        [1, 2, 3],
-        [4, 5, 6],
-        [1, 2, 3],
-        [7, 8, 9]
-    ], dtype=np.int32)
+    input_array = np.array([[1, 2, 3], [4, 5, 6], [1, 2, 3], [7, 8, 9]], dtype=np.int32)
     unique, inverse = unique_rows_fast(input_array)
     expected_unique = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype=np.int32)
     expected_inverse = [0, 1, 0, 2]
@@ -166,7 +167,7 @@ def test_unique_rows_fast_performance():
     large_array = np.random.randint(0, 1000, size=(n_rows, n_cols), dtype=np.int32)
 
     # Add some duplicates
-    large_array[n_rows // 2:] = large_array[:n_rows // 2]
+    large_array[n_rows // 2 :] = large_array[: n_rows // 2]
 
     # Time both implementations
     import time

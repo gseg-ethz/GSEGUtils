@@ -73,6 +73,3 @@ Accessing the different classes can then be easily done by importing from `GSEGU
     coords3D = Array_Nx3(np.random.rand(20))
     coords3d.arr = np.random.rand(100) # Valid
     coords3d.arr = np.random.rand(100, 3) # RAISES ERROR -> invalid shape not of (N, 3), expected (N,)
-
-
-

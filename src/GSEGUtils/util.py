@@ -11,7 +11,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-""" GSEGUtils.util
+"""GSEGUtils.util
 This module provides utility functions and constants for angle conversion and numerical operations,
 along with an enumeration for specifying angle units.
 """
@@ -23,7 +23,7 @@ from typing import Optional, cast
 import numpy as np
 import numpy.typing as npt
 
-from .base_types import ArrayT, Array_Int32_T, Array_Float_T
+from .base_types import Array_Float_T, Array_Int32_T, ArrayT
 
 logger = logging.getLogger(__name__.split(".")[0])
 
@@ -31,21 +31,23 @@ logger = logging.getLogger(__name__.split(".")[0])
 class AngleUnit(StrEnum):
     """Enumerator for angular units.
 
-        * AngleUnit.RAD = 'rad'
-        * AngleUnit.DEGREE = 'deg'
-        * AngleUnit.GON = 'gon'
+    * AngleUnit.RAD = 'rad'
+    * AngleUnit.DEGREE = 'deg'
+    * AngleUnit.GON = 'gon'
 
     """
+
     RAD = "rad"
     DEGREE = "deg"
     GON = "gon"
 
 
-def convert_angles(values: Array_Float_T,
-                   source_unit: AngleUnit,
-                   target_unit: AngleUnit,
-                   out: Optional[Array_Float_T] = None
-                   ) -> Array_Float_T|None:
+def convert_angles(
+    values: Array_Float_T,
+    source_unit: AngleUnit,
+    target_unit: AngleUnit,
+    out: Optional[Array_Float_T] = None,
+) -> Array_Float_T | None:
     """
     Converts an array of angles from one unit to another
 
@@ -103,7 +105,9 @@ def convert_angles(values: Array_Float_T,
     if out is not None:
         out = cast(npt.NDArray[np.floating], out)
         if not isinstance(out, np.ndarray):
-            logger.warning(f"Input values are not an ndarray, returning None and not assigning converted values")
+            logger.warning(
+                f"Input values are not an ndarray, returning None and not assigning converted values"
+            )
             return None
 
     if source_unit == target_unit:
@@ -113,7 +117,6 @@ def convert_angles(values: Array_Float_T,
             if isinstance(values, np.ndarray):
                 out[...] = values
             return None
-
 
     elif source_unit == AngleUnit.RAD:
         if target_unit == AngleUnit.DEGREE:
@@ -133,9 +136,12 @@ def convert_angles(values: Array_Float_T,
         else:
             return _gon2deg(values, out=out)
 
+
 # TODO updated naming to not be private
-def _rad2deg(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> Array_Float_T|float|None:
-    """ Convert radians to degrees.
+def _rad2deg(
+    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
+) -> Array_Float_T | float | None:
+    """Convert radians to degrees.
 
     Parameters
     ----------
@@ -148,8 +154,11 @@ def _rad2deg(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> 
     """
     return np.rad2deg(values, out=out)
 
-def _rad2gon(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> Array_Float_T|float|None:
-    """ Convert radians to gradians(gon).
+
+def _rad2gon(
+    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
+) -> Array_Float_T | float | None:
+    """Convert radians to gradians(gon).
 
     Parameters
     ----------
@@ -162,8 +171,11 @@ def _rad2gon(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> 
     """
     return np.multiply(values, 200 / np.pi, out=out)
 
-def _deg2rad(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> Array_Float_T|float|None:
-    """ Convert degrees to radians.
+
+def _deg2rad(
+    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
+) -> Array_Float_T | float | None:
+    """Convert degrees to radians.
 
     Parameters
     ----------
@@ -176,8 +188,11 @@ def _deg2rad(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> 
     """
     return np.deg2rad(values, out=out)
 
-def _deg2gon(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> Array_Float_T|float|None:
-    """ Convert degrees to gradians(gon).
+
+def _deg2gon(
+    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
+) -> Array_Float_T | float | None:
+    """Convert degrees to gradians(gon).
 
     Parameters
     ----------
@@ -190,8 +205,11 @@ def _deg2gon(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> 
     """
     return np.multiply(values, 200 / 180, out=out)
 
-def _gon2rad(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> Array_Float_T|float|None:
-    """ Convert gradians(gon) to radians.
+
+def _gon2rad(
+    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
+) -> Array_Float_T | float | None:
+    """Convert gradians(gon) to radians.
 
     Parameters
     ----------
@@ -204,8 +222,11 @@ def _gon2rad(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> 
     """
     return np.multiply(values, np.pi / 200, out=out)
 
-def _gon2deg(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> Array_Float_T|float|None:
-    """ Convert gradians(gon) to degrees.
+
+def _gon2deg(
+    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
+) -> Array_Float_T | float | None:
+    """Convert gradians(gon) to degrees.
 
     Parameters
     ----------
@@ -218,8 +239,9 @@ def _gon2deg(values: Array_Float_T|float, out: Optional[Array_Float_T]=None) -> 
     """
     return np.multiply(values, 180 / 200, out=out)
 
+
 def unique_rows_fast(bin_idx: Array_Int32_T) -> tuple[ArrayT, Array_Int32_T]:
-    """ Determine unique rows in a 2D array of integers.
+    """Determine unique rows in a 2D array of integers.
     Returns `(unique_rows, inverse_indices)` exactly like `np.unique(bin_idx, axis=0, return_inverse=True)`
     but ~5–10× faster for large N.
 
@@ -245,4 +267,4 @@ def unique_rows_fast(bin_idx: Array_Int32_T) -> tuple[ArrayT, Array_Int32_T]:
     # turn the blobs back into an (M, D) int32 array
     uniq = uniq_blob.view(arr.dtype).reshape(-1, arr.shape[1])
 
-    return uniq, inv    # type: ignore
+    return uniq, inv  # type: ignore

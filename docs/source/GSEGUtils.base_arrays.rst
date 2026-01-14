@@ -8,4 +8,3 @@ See :doc:`./BaseArrays` for background motivation.
    :undoc-members:
    :exclude-members: __init__, model_config
    :show-inheritance:
-

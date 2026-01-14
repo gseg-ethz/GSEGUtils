@@ -18,23 +18,24 @@ import logging
 import numpy as np
 from numpy import typing as npt
 
-from .constants import HALF_PI, PI, TWO_PI
 from .base_types import (
-    ArrayT,
-    Array_Nx3_Float_T,
-    Array_Integer_T,
     Array_Float_T,
-    Array_Uint8_T,
-    Array_Uint16_T,
     Array_Int8_T,
     Array_Int16_T,
     Array_Int32_T,
     Array_Int64_T,
+    Array_Integer_T,
+    Array_Nx3_Float_T,
     Array_NxM_T,
-    VectorT
+    Array_Uint8_T,
+    Array_Uint16_T,
+    ArrayT,
+    VectorT,
 )
+from .constants import HALF_PI, PI, TWO_PI
 
 logger = logging.getLogger(__name__.split(".")[0])
+
 
 def validate_spherical_angles(array: Array_Nx3_Float_T) -> Array_Nx3_Float_T:
     """Check spherical coordinates are valid.
@@ -68,8 +69,9 @@ def validate_spherical_angles(array: Array_Nx3_Float_T) -> Array_Nx3_Float_T:
 
     raise TypeError(f"Input values should be an ndarray not : {type(array)}")
 
+
 def validate_radius(array: Array_Float_T) -> Array_Float_T:
-    """ Check radii are non-negative.
+    """Check radii are non-negative.
 
     Parameters
     ----------
@@ -95,8 +97,9 @@ def validate_radius(array: Array_Float_T) -> Array_Float_T:
 
     raise TypeError(f"Input values should be an ndarray not : {type(array)}")
 
+
 def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
-    """ Check if azimuths in range of [0, 2π]
+    """Check if azimuths in range of [0, 2π]
 
     Parameters
     ----------
@@ -125,10 +128,13 @@ def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
         else:
             arr_min, arr_max = array.min(), array.max()
 
-        raise ValueError(f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]")
+        raise ValueError(
+            f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]"
+        )
+
 
 def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
-    """ Check if azimuths in range of [-π, +π]
+    """Check if azimuths in range of [-π, +π]
 
     Parameters
     ----------
@@ -157,10 +163,13 @@ def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
         else:
             arr_min, arr_max = array.min(), array.max()
 
-        raise ValueError(f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]")
+        raise ValueError(
+            f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]"
+        )
+
 
 def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
-    """ Check if zenith angles in range of [0, +π]
+    """Check if zenith angles in range of [0, +π]
 
     Parameters
     ----------
@@ -186,10 +195,13 @@ def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
     else:
         if -HALF_PI <= array.min() and array.max() <= HALF_PI:
             raise ValueError("Input Angles in [-pi/2, +pi/2] but should be [0, +pi]")
-        raise ValueError(f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]")
+        raise ValueError(
+            f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]"
+        )
+
 
 def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
-    """ Check if inclination angles in range of [-π/2, +π/2]
+    """Check if inclination angles in range of [-π/2, +π/2]
 
     Parameters
     ----------
@@ -217,10 +229,13 @@ def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
             array_min, array_max = 0, PI
         else:
             array_min, array_max = array.min(), array.max()
-        raise ValueError(f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]")
+        raise ValueError(
+            f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]"
+        )
+
 
 def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
-    """ Coerces azimuth angles to be within the range [0, 2π).
+    """Coerces azimuth angles to be within the range [0, 2π).
 
     Parameters
     ----------
@@ -235,8 +250,9 @@ def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
     array[array > TWO_PI] -= TWO_PI
     return array
 
+
 def coerce_wrapped_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
-    """ Coerce horizontal angles to range [-π, π)
+    """Coerce horizontal angles to range [-π, π)
 
     Parameters
     ----------
@@ -251,8 +267,9 @@ def coerce_wrapped_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
     array[array > PI] -= TWO_PI
     return array
 
-def validate_transposed_2d_array(array: Array_NxM_T|VectorT, n: int) -> Array_NxM_T:
-    """ Ensure an array is of MxN shape or NxM shape and transpose if necessary.
+
+def validate_transposed_2d_array(array: Array_NxM_T | VectorT, n: int) -> Array_NxM_T:
+    """Ensure an array is of MxN shape or NxM shape and transpose if necessary.
 
     Parameters
     ----------
@@ -283,10 +300,13 @@ def validate_transposed_2d_array(array: Array_NxM_T|VectorT, n: int) -> Array_Nx
         if array.shape[0] != n:
             return array.reshape(-1, n)
 
-    raise ValueError(f"Input array must be 2-dimensional of Mx{n} or {n}xM shape. Received: {array.shape}")
+    raise ValueError(
+        f"Input array must be 2-dimensional of Mx{n} or {n}xM shape. Received: {array.shape}"
+    )
+
 
 def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integer_T:
-    """ Convert a slice object to an array of integer indices.
+    """Convert a slice object to an array of integer indices.
 
     Parameters
     ----------
@@ -326,8 +346,9 @@ def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integ
     # Convert slice objects to a numpy integer array
     return np.arange(start=start, stop=stop, step=step)
 
+
 def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> None:
-    """ Check if values are within the target range.
+    """Check if values are within the target range.
 
     Parameters
     ----------
@@ -349,7 +370,9 @@ def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> No
     val_max: float | int = value.max()
 
     if (val_min < target_min) and (val_max > target_max):
-        raise ValueError(f"Min and max values [{val_min},{val_max}] exceeds bounds [{target_min},{target_max}].")
+        raise ValueError(
+            f"Min and max values [{val_min},{val_max}] exceeds bounds [{target_min},{target_max}]."
+        )
 
     elif val_min < target_min:
         raise ValueError(f"Min value {val_min} exceeds lower limit {target_min}.")
@@ -357,9 +380,16 @@ def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> No
     elif val_max > target_max:
         raise ValueError(f"Max value {val_max} exceeds upper limit {target_max}.")
 
-def normalize_min_max(array: ArrayT, lower: float|int, upper: float|int, target_dtype: npt.DtypeLike,
-                      v_min: float|int|None=None, v_max: float|int|None=None) -> ArrayT:
-    """ Normalize and scale the values in a numpy array to a specified range using min-max scaling.
+
+def normalize_min_max(
+    array: ArrayT,
+    lower: float | int,
+    upper: float | int,
+    target_dtype: npt.DtypeLike,
+    v_min: float | int | None = None,
+    v_max: float | int | None = None,
+) -> ArrayT:
+    """Normalize and scale the values in a numpy array to a specified range using min-max scaling.
 
     The input array is initially normalized using v_min, v_max where array.min() and array.max()
     are the default if not set.
@@ -390,9 +420,11 @@ def normalize_min_max(array: ArrayT, lower: float|int, upper: float|int, target_
     if not isinstance(array, np.ndarray):
         raise TypeError(f"Input array must be a numpy array not {type(array)}")
 
-    if (not np.issubdtype(array.dtype, np.floating) and
-            not np.issubdtype(array.dtype, np.integer) and
-            not np.issubdtype(array.dtype, np.bool)):
+    if (
+        not np.issubdtype(array.dtype, np.floating)
+        and not np.issubdtype(array.dtype, np.integer)
+        and not np.issubdtype(array.dtype, np.bool)
+    ):
         raise TypeError(f"Cannot convert numpy array of type {array.dtype}")
 
     array = array.astype(np.float64)
@@ -410,8 +442,9 @@ def normalize_min_max(array: ArrayT, lower: float|int, upper: float|int, target_
     array = np.add(array * (upper - lower), lower)
     return np.clip(array, lower, upper).astype(target_dtype)
 
+
 def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
-    """ Linearly map the array values to the target dtype.
+    """Linearly map the array values to the target dtype.
 
     This function maps the input array values based on the current datatype's minimum
     and maximum supported values to those of the target datatype.
@@ -467,12 +500,15 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
     origin_min, origin_max = get_dtype_min_max(array.dtype)
     target_min, target_max = get_dtype_min_max(target_dtype)
 
-    return normalize_min_max(array=array,
-                             lower=target_min,
-                             upper=target_max,
-                             target_dtype=target_dtype,
-                             v_min=origin_min,
-                             v_max=origin_max)
+    return normalize_min_max(
+        array=array,
+        lower=target_min,
+        upper=target_max,
+        target_dtype=target_dtype,
+        v_min=origin_min,
+        v_max=origin_max,
+    )
+
 
 def normalize_self(array: ArrayT) -> ArrayT:
     """Normalizes an input array to the limits expected by the array's dtype.
@@ -495,6 +531,7 @@ def normalize_self(array: ArrayT) -> ArrayT:
         lower, upper = np.iinfo(array.dtype).min, np.iinfo(array.dtype).max
 
     return normalize_min_max(array, lower, upper, array.dtype)
+
 
 def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
     """Helper function for normalizing input array values to target_dtype limits.
@@ -520,13 +557,30 @@ def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
             return normalize_min_max(array, 0, 1, target_dtype)
 
         if 0 <= array.min() <= array.max() <= 1:
-            return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype, 0, 1)
+            return normalize_min_max(
+                array,
+                np.iinfo(target_dtype).min,
+                np.iinfo(target_dtype).max,
+                target_dtype,
+                0,
+                1,
+            )
 
         elif -1 <= array.min() <= array.max() <= 1:
-            return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype, -1, 1)
+            return normalize_min_max(
+                array,
+                np.iinfo(target_dtype).min,
+                np.iinfo(target_dtype).max,
+                target_dtype,
+                -1,
+                1,
+            )
 
-        return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype)
+        return normalize_min_max(
+            array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype
+        )
     return array
+
 
 def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
     """Normalize to UInt8
@@ -541,6 +595,7 @@ def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
     """
     return _normalize_base(array, np.uint8)
 
+
 def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
     """Normalize to UInt16
 
@@ -553,6 +608,7 @@ def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
     Array_Uint16_T
     """
     return _normalize_base(array, np.uint16)
+
 
 def normalize_int8(array: ArrayT) -> Array_Int8_T:
     """Normalize to Int8
@@ -567,6 +623,7 @@ def normalize_int8(array: ArrayT) -> Array_Int8_T:
     """
     return _normalize_base(array, np.int8)
 
+
 def normalize_int16(array: ArrayT) -> Array_Int16_T:
     """Normalize to Int16
 
@@ -579,6 +636,7 @@ def normalize_int16(array: ArrayT) -> Array_Int16_T:
     Array_Int16_T
     """
     return _normalize_base(array, np.int16)
+
 
 def normalize_int32(array: ArrayT) -> Array_Int32_T:
     """Normalize to Int32
@@ -593,6 +651,7 @@ def normalize_int32(array: ArrayT) -> Array_Int32_T:
     """
     return _normalize_base(array, np.int32)
 
+
 def normalize_int64(array: ArrayT) -> Array_Int64_T:
     """Normalize to Int64
 
@@ -605,5 +664,6 @@ def normalize_int64(array: ArrayT) -> Array_Int64_T:
     Array_Int64_T
     """
     return _normalize_base(array, np.int64)
+
 
 # TODO normalize functions should be in utils
