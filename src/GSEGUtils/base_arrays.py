@@ -100,17 +100,27 @@ class BaseArray(ABC, BaseModel):
     @field_validator("arr", mode="before")
     @classmethod
     def _coerce_array(cls, value: npt.ArrayLike) -> ArrayT:
-        """Coerce an object to a numpy array to assign to the new object.
+        """Coerce a numpy-array-like input into a 1-D-or-higher ndarray for storage in ``arr``.
+
+        Contract independent of any specific caller library. Three input paths:
+
+        - ``BaseArray`` instance: unwraps via ``.arr`` (passthrough of the wrapped ndarray).
+        - ``np.ndarray`` instance: passthrough.
+        - Scalar, list, or list-of-list: promoted via ``np.atleast_1d(np.asarray(...))``
+          to a 1-D-or-higher ndarray.
+
+        Guarantees output dimension >= 1.
 
         Parameters
         ----------
-        value: npt.ArrayLike
+        value : npt.ArrayLike
+            Input to coerce. Any object accepted by ``np.asarray``.
 
         Returns
         -------
         ArrayT
+            ndarray with at least one dimension.
         """
-        # TODO Is this needed? Will PCHandler tests still pass?
         if isinstance(value, BaseArray):
             value = value.arr
 
