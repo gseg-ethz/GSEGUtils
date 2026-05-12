@@ -345,23 +345,28 @@ def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integ
 
 
 def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> None:
-    """Check if values are within the target range.
+    """Validate that all values in ``value`` lie within ``[target_min, target_max]``.
+
+    Contract independent of any specific caller library. Inclusive bounds on both
+    sides; the combined out-of-range case (both ``min < target_min`` AND
+    ``max > target_max``) raises a single combined-message ``ValueError`` distinct
+    from the single-side branches. This is intentional, not a redundant branch.
 
     Parameters
     ----------
     value : ArrayT
-        Input array
+        Input array. Coerced via ``np.asarray`` before reduction.
     target_min : float
-        Lower inclusive limit
+        Inclusive lower bound.
     target_max : float
-        Upper inclusive limit
+        Inclusive upper bound.
 
     Raises
     ------
     ValueError
-        Values outside of range
+        If any value lies outside ``[target_min, target_max]``. Three branches:
+        single-side-low, single-side-high, or combined dual-out-of-range.
     """
-    # TODO should be consistent - check usage in PCHandler
     value = np.asarray(value)
     val_min: float | int = value.min()
     val_max: float | int = value.max()
