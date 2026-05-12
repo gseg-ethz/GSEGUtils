@@ -21,6 +21,7 @@ for integer row de-duplication).
 """
 
 import logging
+import warnings
 from enum import StrEnum
 from typing import Optional, cast
 
@@ -28,6 +29,18 @@ import numpy as np
 import numpy.typing as npt
 
 from .base_types import Array_Float_T, Array_Int32_T, ArrayT
+
+__all__ = [
+    "AngleUnit",
+    "convert_angles",
+    "rad2deg",
+    "rad2gon",
+    "deg2rad",
+    "deg2gon",
+    "gon2rad",
+    "gon2deg",
+    "unique_rows_fast",
+]
 
 logger = logging.getLogger(__name__.split(".")[0])
 
@@ -120,112 +133,213 @@ def convert_angles(  # noqa: C901  # Pair-wise unit conversion dispatch — bran
 
     elif source_unit == AngleUnit.RAD:
         if target_unit == AngleUnit.DEGREE:
-            return _rad2deg(values) if out is None else _rad2deg(values, out=out)
+            return rad2deg(values) if out is None else rad2deg(values, out=out)
         else:
-            return _rad2gon(values, out=out)
+            return rad2gon(values, out=out)
 
     elif source_unit == AngleUnit.DEGREE:
         if target_unit == AngleUnit.RAD:
-            return _deg2rad(values, out=out)
+            return deg2rad(values, out=out)
         else:
-            return _deg2gon(values, out=out)
+            return deg2gon(values, out=out)
 
     else:
         if target_unit == AngleUnit.RAD:
-            return _gon2rad(values, out=out)
+            return gon2rad(values, out=out)
         else:
-            return _gon2deg(values, out=out)
+            return gon2deg(values, out=out)
 
 
-# TODO updated naming to not be private
-def _rad2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+def rad2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert radians to degrees.
 
     Parameters
     ----------
-    values : Array_Float_T|float
-    out : Optional[Array_Float_T], default=None
+    values : Array_Float_T or float
+        Input angle(s) in radians.
+    out : Array_Float_T, optional
+        Output array for in-place writes. Default = None.
 
     Returns
     -------
-    Array_Float_T|float|None
+    Array_Float_T, float, or None
+        Converted angle(s) in degrees, or ``None`` when ``out`` is provided.
     """
     return np.rad2deg(values, out=out)
 
 
-def _rad2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
-    """Convert radians to gradians(gon).
+def rad2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Convert radians to gradians (gon).
 
     Parameters
     ----------
-    values : Array_Float_T|float
-    out : Optional[Array_Float_T], default=None
+    values : Array_Float_T or float
+        Input angle(s) in radians.
+    out : Array_Float_T, optional
+        Output array for in-place writes. Default = None.
 
     Returns
     -------
-    Array_Float_T|float|None
+    Array_Float_T, float, or None
+        Converted angle(s) in gradians, or ``None`` when ``out`` is provided.
     """
     return np.multiply(values, 200 / np.pi, out=out)
 
 
-def _deg2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+def deg2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert degrees to radians.
 
     Parameters
     ----------
-    values : Array_Float_T|float
-    out : Optional[Array_Float_T], default=None
+    values : Array_Float_T or float
+        Input angle(s) in degrees.
+    out : Array_Float_T, optional
+        Output array for in-place writes. Default = None.
 
     Returns
     -------
-    Array_Float_T|float|None
+    Array_Float_T, float, or None
+        Converted angle(s) in radians, or ``None`` when ``out`` is provided.
     """
     return np.deg2rad(values, out=out)
 
 
-def _deg2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
-    """Convert degrees to gradians(gon).
+def deg2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Convert degrees to gradians (gon).
 
     Parameters
     ----------
-    values : Array_Float_T|float
-    out : Optional[Array_Float_T], default=None
+    values : Array_Float_T or float
+        Input angle(s) in degrees.
+    out : Array_Float_T, optional
+        Output array for in-place writes. Default = None.
 
     Returns
     -------
-    Array_Float_T|float|None
+    Array_Float_T, float, or None
+        Converted angle(s) in gradians, or ``None`` when ``out`` is provided.
     """
     return np.multiply(values, 200 / 180, out=out)
 
 
-def _gon2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
-    """Convert gradians(gon) to radians.
+def gon2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Convert gradians (gon) to radians.
 
     Parameters
     ----------
-    values : Array_Float_T|float
-    out : Optional[Array_Float_T], default=None
+    values : Array_Float_T or float
+        Input angle(s) in gradians.
+    out : Array_Float_T, optional
+        Output array for in-place writes. Default = None.
 
     Returns
     -------
-    Array_Float_T|float|None
+    Array_Float_T, float, or None
+        Converted angle(s) in radians, or ``None`` when ``out`` is provided.
     """
     return np.multiply(values, np.pi / 200, out=out)
 
 
-def _gon2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
-    """Convert gradians(gon) to degrees.
+def gon2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Convert gradians (gon) to degrees.
 
     Parameters
     ----------
-    values : Array_Float_T|float
-    out : Optional[Array_Float_T], default=None
+    values : Array_Float_T or float
+        Input angle(s) in gradians.
+    out : Array_Float_T, optional
+        Output array for in-place writes. Default = None.
 
     Returns
     -------
-    Array_Float_T|float|None
+    Array_Float_T, float, or None
+        Converted angle(s) in degrees, or ``None`` when ``out`` is provided.
     """
     return np.multiply(values, 180 / 200, out=out)
+
+
+def _rad2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Delegate to :func:`rad2deg` — deprecated alias retained for backwards compatibility.
+
+    .. deprecated:: 0.5
+       The underscore alias will be removed in v0.6. Use :func:`rad2deg`.
+    """
+    warnings.warn(
+        "GSEGUtils.util._rad2deg is deprecated; use rad2deg. The underscore alias will be removed in v0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return rad2deg(values, out=out)
+
+
+def _rad2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Delegate to :func:`rad2gon` — deprecated alias retained for backwards compatibility.
+
+    .. deprecated:: 0.5
+       The underscore alias will be removed in v0.6. Use :func:`rad2gon`.
+    """
+    warnings.warn(
+        "GSEGUtils.util._rad2gon is deprecated; use rad2gon. The underscore alias will be removed in v0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return rad2gon(values, out=out)
+
+
+def _deg2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Delegate to :func:`deg2rad` — deprecated alias retained for backwards compatibility.
+
+    .. deprecated:: 0.5
+       The underscore alias will be removed in v0.6. Use :func:`deg2rad`.
+    """
+    warnings.warn(
+        "GSEGUtils.util._deg2rad is deprecated; use deg2rad. The underscore alias will be removed in v0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return deg2rad(values, out=out)
+
+
+def _deg2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Delegate to :func:`deg2gon` — deprecated alias retained for backwards compatibility.
+
+    .. deprecated:: 0.5
+       The underscore alias will be removed in v0.6. Use :func:`deg2gon`.
+    """
+    warnings.warn(
+        "GSEGUtils.util._deg2gon is deprecated; use deg2gon. The underscore alias will be removed in v0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return deg2gon(values, out=out)
+
+
+def _gon2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Delegate to :func:`gon2rad` — deprecated alias retained for backwards compatibility.
+
+    .. deprecated:: 0.5
+       The underscore alias will be removed in v0.6. Use :func:`gon2rad`.
+    """
+    warnings.warn(
+        "GSEGUtils.util._gon2rad is deprecated; use gon2rad. The underscore alias will be removed in v0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return gon2rad(values, out=out)
+
+
+def _gon2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
+    """Delegate to :func:`gon2deg` — deprecated alias retained for backwards compatibility.
+
+    .. deprecated:: 0.5
+       The underscore alias will be removed in v0.6. Use :func:`gon2deg`.
+    """
+    warnings.warn(
+        "GSEGUtils.util._gon2deg is deprecated; use gon2deg. The underscore alias will be removed in v0.6.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return gon2deg(values, out=out)
 
 
 def unique_rows_fast(bin_idx: Array_Int32_T) -> tuple[ArrayT, Array_Int32_T]:
