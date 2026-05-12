@@ -11,6 +11,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""``MutableMapping`` of named :class:`LazyDiskCache` entries sharing a cache dir.
+
+Provides :class:`DiskBackedStore`, the multi-entry container that complements
+:class:`DiskBackedNDArray` (single-entry) and supports pickling the whole store
+via :meth:`__getstate__` / :meth:`__setstate__`.
+"""
+
 import logging
 import pickle
 import tempfile
@@ -46,13 +53,34 @@ logger = logging.getLogger(__name__)
 # type Factory[T: LazyDiskCache.rst] = Callable[[_NDArray, Unpack[LazyDiskCacheKw]], T]
 @runtime_checkable
 class Factory[T: LazyDiskCache](Protocol):
-    def __call__(self, data: NDArray, **kwargs: Unpack[LazyDiskCacheKw]) -> T: ...
+    """Protocol for callables that construct a :class:`LazyDiskCache` subtype from raw data."""
+
+    def __call__(self, data: NDArray, **kwargs: Unpack[LazyDiskCacheKw]) -> T:
+        """Construct a new cache entry of type ``T`` wrapping ``data``."""
+        ...
 
 
 type Validator[T] = Callable[[object], TypeGuard[T]]
 
 
 class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
+    """Mapping of string keys to :class:`LazyDiskCache` entries with shared offload directory.
+
+    Parameters
+    ----------
+    config : LazyDiskCacheConfig, optional
+        Shared cache configuration (cache dir, caching flag, offload policy,
+        purge-on-gc policy). Defaults to ``LazyDiskCacheConfig()``.
+    factory : Factory[T]
+        Callable used to wrap raw arrays into the concrete cache subtype ``T``
+        when :meth:`add_data_to_store` is called.
+    value_type : type[T] or tuple of type[T], optional
+        If set, every value inserted must be an instance of this type / one of
+        these types.
+    validator : Validator[T], optional
+        Additional runtime check executed on every insert.
+    """
+
     _DBNDArrayFileExt = ".pkl"
 
     _store: dict[str, Optional[T]]
@@ -109,6 +137,13 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         return cast(T, value)
 
     def __getitem__(self, key: str) -> T:
+        """Return the entry for ``key``, loading it from disk on a cache miss.
+
+        Raises
+        ------
+        KeyError
+            If no in-memory entry and no on-disk pickle file exist for ``key``.
+        """
         obj = self._store.get(key, None)
         if obj is not None:
             return obj
@@ -123,21 +158,27 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         return loaded_obj
 
     def __setitem__(self, key: str, value: T) -> None:
+        """Validate ``value`` and store it under ``key`` in memory."""
         self._store[key] = self._check_T(value)
 
     def __delitem__(self, key: str) -> None:
+        """Remove ``key`` from the in-memory store."""
         del self._store[key]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the keys currently tracked by the store."""
         return iter(self._store)
 
     def __contains__(self, key):
+        """Return ``True`` if ``key`` is tracked (in memory or on disk)."""
         return self._store.__contains__(key)
 
     def __len__(self) -> int:
+        """Return the number of tracked keys."""
         return len(self._store)
 
     def __repr__(self) -> str:
+        """Return a debug representation listing the currently-tracked keys."""
         return f"<DiskBackedStore({list(self._store.keys())})>"
 
     def _get_pickle_path(self, feature: str) -> Path:
@@ -152,6 +193,26 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         automatic_offloading_override: Optional[bool] = None,
         purge_disk_on_gc_override: Optional[bool] = None,
     ) -> None:
+        """Wrap ``data`` via the configured factory and insert it under ``key``.
+
+        Parameters
+        ----------
+        key : str
+            Key under which the new cache entry is registered.
+        data : NDArray
+            Raw array to be wrapped.
+        enable_caching_override : bool, optional
+            Per-entry override for the store-level caching flag.
+        automatic_offloading_override : bool, optional
+            Per-entry override for the store-level auto-offload flag.
+        purge_disk_on_gc_override : bool, optional
+            Per-entry override for the store-level purge-on-gc flag.
+
+        Raises
+        ------
+        KeyError
+            If ``key`` is already present in the store.
+        """
         if key in self:
             raise KeyError(f"Key {key} already exists in store.")
 
@@ -176,32 +237,41 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
     @property
     def store(self) -> dict[str, Optional[T]]:
-        """Returns the internal store dictionary."""
+        """Return the internal mapping of keys to in-memory entries (``None`` if offloaded)."""
         return self._store
 
     @property
     def cache_dir(self) -> Path:
-        """Returns the directory where cached files are stored."""
+        """Return the directory where offloaded pickles are written."""
         return self._cache_dir
 
     def keys(self) -> list[str]:
-        """
-        Returns a list of all available image keys.
-        """
+        """Return a list of all tracked keys."""
         return list(self._store.keys())
 
     def values(self) -> Iterator[Optional[T]]:
+        """Iterate over the current in-memory entries (``None`` where offloaded)."""
         return iter(self._store.values())
 
     def items(self) -> Iterator[tuple[str, Optional[T]]]:
+        """Iterate over ``(key, value)`` pairs (``value`` is ``None`` where offloaded)."""
         return iter(self._store.items())
 
     def offload(self, keys: Optional[str | list[str]] = None, pickle_container: bool = False) -> None:
-        """
-        Offloads selected entries to disk. When no keys are provided, every cached
-        entry is considered. Items with `cache_enabled=False` are skipped. When
-        `pickle_container` is True we pickle the entire container, clear the in-memory
-        reference, and rely on lazy reload the next time the key is accessed.
+        """Offload selected entries to disk.
+
+        When no keys are provided every cached entry is considered. Items with
+        ``cache_enabled=False`` are skipped. When ``pickle_container`` is ``True``
+        the entire container is pickled, the in-memory reference is cleared, and
+        the next access reloads it lazily.
+
+        Parameters
+        ----------
+        keys : str or list[str], optional
+            Specific keys to offload. Defaults to every tracked key.
+        pickle_container : bool, optional
+            When ``True`` pickle the wrapping container; when ``False`` (default)
+            delegate to each entry's own :meth:`offload` method.
         """
         if keys is None:
             keys = self.keys()
@@ -229,12 +299,14 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 obj.offload()
 
     def __getstate__(self) -> dict[str, Any]:
+        """Offload everything before pickling and return the resulting ``__dict__`` snapshot."""
         if self._enable_caching:
             self.offload(pickle_container=True)
         state = self.__dict__.copy()
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state from a pickle and reload any offloaded entries that still exist on disk."""
         self.__dict__.update(state)
         if self._enable_caching:
             for key in list(self.keys()):

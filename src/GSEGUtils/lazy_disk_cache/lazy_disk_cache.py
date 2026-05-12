@@ -11,6 +11,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Abstract :class:`LazyDiskCache` base + configuration TypedDict / dataclass.
+
+Defines the offload-to-memmap / load-back-into-memory protocol that
+:class:`DiskBackedNDArray` and any future cache subclasses implement.
+"""
+
 import logging
 import os
 import tempfile
@@ -37,6 +43,23 @@ logger = logging.getLogger(__name__)
 
 
 class LazyDiskCacheKw(TypedDict, total=False):
+    """Keyword-argument TypedDict for :class:`LazyDiskCache` constructors.
+
+    Attributes
+    ----------
+    enable_caching : bool
+        When ``True`` the live buffer is backed by a ``numpy.memmap``; when
+        ``False`` it stays in plain RAM.
+    cache_path : pathlib.Path, optional
+        Destination path for the memmap file. When ``None`` a temporary file is
+        created.
+    purge_disk_on_gc : bool
+        When ``True`` the memmap file is deleted via :func:`weakref.finalize`
+        once the cache object is collected.
+    automatic_offloading : bool
+        When ``True`` the cache offloads after every load.
+    """
+
     enable_caching: bool
     cache_path: Optional[Path]
     purge_disk_on_gc: bool
@@ -45,12 +68,30 @@ class LazyDiskCacheKw(TypedDict, total=False):
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True), frozen=True)
 class LazyDiskCacheConfig:
+    """Frozen pydantic dataclass mirroring :class:`LazyDiskCacheKw`.
+
+    Useful as a single argument that can be threaded through factory chains and
+    re-derived via :meth:`updated` / :meth:`extend_cache_path`.
+
+    Attributes
+    ----------
+    enable_caching : bool
+        See :class:`LazyDiskCacheKw`.
+    cache_path : pathlib.Path, optional
+        See :class:`LazyDiskCacheKw`.
+    purge_disk_on_gc : bool
+        See :class:`LazyDiskCacheKw`.
+    automatic_offloading : bool
+        See :class:`LazyDiskCacheKw`.
+    """
+
     enable_caching: bool = False
     cache_path: Optional[Path] = None
     purge_disk_on_gc: bool = True
     automatic_offloading: bool = False
 
     def as_kwargs(self) -> LazyDiskCacheKw:
+        """Return the configuration as a :class:`LazyDiskCacheKw` mapping."""
         lazy_disk_cache_kw = LazyDiskCacheKw(
             enable_caching=self.enable_caching,
             cache_path=self.cache_path,
@@ -61,13 +102,29 @@ class LazyDiskCacheConfig:
 
     @classmethod
     def from_kwargs(cls, settings: LazyDiskCacheKw) -> Self:
+        """Construct a :class:`LazyDiskCacheConfig` from a TypedDict-shaped mapping."""
         return cls(**settings)
 
     def updated(self, **overrides: LazyDiskCacheKw) -> Self:
+        """Return a copy of this configuration with the given fields overridden."""
         return replace(self, **overrides)
 
     @validate_call()
     def extend_cache_path(self, new_folder: str) -> Self:
+        """Return a copy with ``cache_path`` extended by ``new_folder``.
+
+        Parameters
+        ----------
+        new_folder : str
+            Sub-directory name to append to the existing ``cache_path``.
+
+        Returns
+        -------
+        LazyDiskCacheConfig
+            A new configuration. If ``self.cache_path`` is ``None`` the new
+            configuration also carries ``cache_path=None`` (and an informational
+            log entry is emitted).
+        """
         new_path = self.cache_path / new_folder if self.cache_path else None
         if new_path is None:
             logger.info("Cache path is None; cannot extend.")
@@ -75,6 +132,15 @@ class LazyDiskCacheConfig:
 
 
 class LazyDiskCache(ABC):
+    """Abstract base for cache objects that transparently offload to a NumPy memmap.
+
+    Subclasses provide the live buffer via :meth:`_describe_buffer` /
+    :meth:`_set_buffer` and the shape/dtype metadata via
+    :meth:`_describe_shape_dtype`; the base class handles the offload/load
+    state machine, the finalizer that cleans up the memmap on GC, and the
+    pickle protocol.
+    """
+
     _MEMMAP_SUFFIX = ".dat"
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
@@ -119,9 +185,11 @@ class LazyDiskCache(ABC):
             self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))  # type: ignore
 
     def _convert_to_memmap(self) -> None:
-        """
-        Allocate (or reopen) the persistent memmap file and switch
-        your live buffer to it, but do *not* flush or drop the old array.
+        """Allocate (or reopen) the persistent memmap and adopt it as the live buffer.
+
+        The previous in-memory array is fully faulted into RAM and copied into
+        the memmap before the subclass buffer pointer is swapped over. The old
+        array is not flushed or freed by this method.
         """
         with self._lock:
             shape, dtype, array = self._describe_buffer()
@@ -170,6 +238,12 @@ class LazyDiskCache(ABC):
 
     @staticmethod
     def ensure_loaded(func):
+        """Decorate ``func`` so the cache is materialised before the call and offloaded afterwards.
+
+        If ``self.automatic_offloading`` is ``True`` and the cache was offloaded
+        on entry, it is re-offloaded once the wrapped function returns.
+        """
+
         @wraps(func)
         def wrapper(self, *args, **kwargs):
             was_offloaded = self.offloaded
@@ -184,22 +258,27 @@ class LazyDiskCache(ABC):
 
     @property
     def offloaded(self) -> bool:
+        """Return ``True`` when the live buffer currently lives on disk."""
         return not self._in_memory
 
     @property
     def automatic_offloading(self) -> bool:
+        """Return whether the cache automatically offloads after each load."""
         return self._automatic_offloading
 
     @automatic_offloading.setter
     def automatic_offloading(self, value: bool):
+        """Toggle automatic offloading."""
         assert isinstance(value, bool)
         self._automatic_offloading = value
 
     @property
     def cache_enabled(self) -> bool:
+        """Return ``True`` when this instance is backed by a memmap."""
         return self._enable_caching
 
     def enable_caching(self) -> None:
+        """Turn on memmap-backed caching, converting the live buffer if needed."""
         if self._enable_caching:
             return
         self._enable_caching = True
@@ -210,6 +289,7 @@ class LazyDiskCache(ABC):
             self.offload()
 
     def disable_caching(self) -> None:
+        """Turn off memmap-backed caching, copying any memmap content back into RAM."""
         if not self._enable_caching:
             return
         self.load()
@@ -219,12 +299,11 @@ class LazyDiskCache(ABC):
 
     @property
     def purge_disk_on_gc(self) -> bool:
+        """Return whether the memmap file is deleted when this object is collected."""
         return self._purge_disk_on_gc
 
     def disable_purge(self):
-        """
-        Disable automatic deletion of the cache file when the object is garbage-collected.
-        """
+        """Disable automatic deletion of the cache file on garbage collection."""
         with self._lock:
             if hasattr(self, "_finalizer"):
                 self._finalizer.detach()
@@ -232,9 +311,10 @@ class LazyDiskCache(ABC):
             logger.debug(f"Disabled purge for {self._cache_path}")
 
     def enable_purge(self):
-        """
-        Enable automatic deletion of the cache file when the object is garbage-collected.
-        Registers a new finalizer if needed.
+        """Enable automatic deletion of the cache file on garbage collection.
+
+        Registers a fresh :func:`weakref.finalize` callback if one is not
+        currently alive.
         """
         with self._lock:
             if not self._cache_path:
@@ -250,10 +330,12 @@ class LazyDiskCache(ABC):
 
     @property
     def cache_path(self) -> Optional[Path]:
+        """Return the memmap file path associated with this cache."""
         return self._cache_path
 
     @cache_path.setter
     def cache_path(self, value: Path):
+        """Set the memmap file path and ensure the parent directory exists."""
         assert isinstance(value, Path)
         self._cache_path = value
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,6 +421,7 @@ class LazyDiskCache(ABC):
     #     }
 
     def __getstate__(self):
+        """Detach the finalizer, offload to disk, and return a pickle-safe ``__dict__``."""
         # if hasattr(self, "_finalizer"):
         #     self._finalizer.detach()
         self.disable_purge()
@@ -350,6 +433,7 @@ class LazyDiskCache(ABC):
         return state
 
     def __setstate__(self, state):
+        """Restore state from a pickle and re-create the thread lock."""
         self.__dict__.update(state)
         self._lock = threading.RLock()
         # if self._cache_path and self._purge_disk_on_gc:
@@ -357,29 +441,29 @@ class LazyDiskCache(ABC):
 
     @abstractmethod
     def _describe_buffer(self) -> tuple[tuple[int, ...], DTypeLike, NDArray]:
-        """Return (shape, dtype, in-memory array)"""
+        """Return ``(shape, dtype, in_memory_array)`` describing the current live buffer."""
         ...
 
     @abstractmethod
     def _drop_buffer(self) -> None:
-        """Drop the in-memory array (e.g. set to None or similar)"""
+        """Drop the in-memory array reference (e.g. set the subclass slot to ``None``)."""
         ...
 
     @abstractmethod
     def _describe_shape_dtype(self) -> tuple[tuple[int, ...], DTypeLike]:
-        """Return (shape, dtype) without accessing the full array"""
+        """Return ``(shape, dtype)`` without materialising the full array."""
         ...
 
     @abstractmethod
     def _set_buffer(self, buf: NDArray) -> None:
-        """Given a memmap, restore it into your object"""
+        """Adopt ``buf`` as the new live buffer (typically a memmap returned from disk)."""
         ...
 
     # Optional hooks subclasses can override
     def on_offload(self) -> None:  # noqa: B027  # Optional override hook — intentionally no-op default; not abstract.
-        """Hook called after offloading to disk. Use to prune resources."""
+        """Run after offloading to disk; subclasses may override to prune extra resources."""
         pass
 
     def on_load(self) -> None:  # noqa: B027  # Optional override hook — intentionally no-op default; not abstract.
-        """Hook called after loading into memory. Use to cleanup or reinitialize."""
+        """Run after loading from disk; subclasses may override to reinitialise extra state."""
         pass
