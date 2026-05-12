@@ -12,25 +12,28 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""
-generate_init_stubs.py  —  Pure AST stub generator for lazy __init__.py
+"""Pure-AST ``__init__.pyi`` stub generator for lazy-loading packages.
 
-- Parses __all__ and _lazy_map from __init__.py without importing.
-- Supports:
-  * _lazy_map values as "module" or ("module", "RealName")
-  * __all__ as list/tuple literals, += list(...), extend/append
-  * Annotated assignments (PEP 526): e.g. _lazy_map: dict[str, str | tuple[str,str]] = {...}
-- Options:
-  * --walk : traverse given roots and process all package dirs with __init__.py
-  * --submodule-stubs {eager,any} : default eager (real imports in .pyi) or Any-typed submodules
-  * --create-py-typed : create py.typed per package if missing
-  * --overwrite : overwrite existing __init__.pyi
+Parses ``__all__`` and ``_lazy_map`` from each package's ``__init__.py`` without
+importing the package, then emits a typed companion stub.
 
-New in this version:
-- Stub includes a concrete __all__: Final[list[str]] = [...]
-- Stub adds __getattr__ typing:
-  * eager: def __getattr__(name: str) -> NoReturn  (everything should be declared)
-  * any  : overloads for submodule names -> ModuleType, fallback -> NoReturn
+Supported source patterns:
+
+- ``_lazy_map`` values written as ``"module"`` or ``("module", "RealName")``.
+- ``__all__`` as a list/tuple literal, ``+= list(...)``, or ``.extend`` / ``.append`` calls.
+- PEP 526 annotated assignments, e.g. ``_lazy_map: dict[str, str | tuple[str, str]] = {...}``.
+
+CLI options:
+
+- ``--walk`` traverses each given root and processes every directory that contains
+  an ``__init__.py``.
+- ``--submodule-stubs {eager,any}`` selects between real imports of submodules in
+  the stub (default ``eager``) and an ``__getattr__`` ``ModuleType`` overload (``any``).
+- ``--create-py-typed`` writes a ``py.typed`` marker per package if missing.
+- ``--overwrite`` replaces an existing ``__init__.pyi``.
+
+The emitted stub always includes a concrete ``__all__: Final[list[str]] = [...]``
+and a typed ``__getattr__`` declaration matching the chosen submodule mode.
 """
 
 from __future__ import annotations
@@ -86,6 +89,20 @@ def _extend_exports_from_seq(dst: list[str], seq: ast.AST) -> None:
 def parse_ast(  # noqa: C901  # AST visitor — branching density is intrinsic; refactor deferred to Phase 6 tech-debt sweep.
     init_py: Path,
 ) -> tuple[dict[str, str | tuple[str, str]], list[str], dict[str, bool]]:
+    """Parse a package's ``__init__.py`` and extract its lazy-loader metadata.
+
+    Parameters
+    ----------
+    init_py : pathlib.Path
+        Path to the ``__init__.py`` file to inspect.
+
+    Returns
+    -------
+    tuple of (dict, list, dict)
+        ``(lazy_map, exports, dunders)`` — see module docstring for the supported
+        source patterns. ``dunders`` is a flag dict reporting which of
+        ``__author__`` / ``__email__`` were assigned a string literal.
+    """
     src = init_py.read_text(encoding="utf-8")
     tree = ast.parse(src, filename=str(init_py))
 
@@ -157,6 +174,26 @@ def build_stub_text(  # noqa: C901  # Stub template assembly — branching densi
     dunders: dict[str, bool],
     submodule_mode: str,  # "eager" | "any"
 ) -> str:
+    """Render the textual contents of an ``__init__.pyi`` stub.
+
+    Parameters
+    ----------
+    lazy_map : dict[str, str | tuple[str, str]]
+        Mapping from each public name to either its backing module or
+        ``(module, real_name)`` for re-exported aliases.
+    exports : Iterable[str]
+        Names that should appear in the stub's ``__all__``.
+    dunders : dict[str, bool]
+        Flags indicating which dunder attributes were assigned in the source.
+    submodule_mode : str
+        Either ``"eager"`` (emit ``from . import sub as sub`` lines) or ``"any"``
+        (declare submodules only via an ``__getattr__`` ``ModuleType`` overload).
+
+    Returns
+    -------
+    str
+        The complete stub source text terminated with a newline.
+    """
     exports = list(exports)
     dunder_names = {"__author__", "__email__", "__all__"}
     # Treat exported names that aren't lazy-mapped as submodules
@@ -265,10 +302,27 @@ DEFAULT_EXCLUDES = {
 
 
 def is_package_dir(p: Path) -> bool:
+    """Return ``True`` when ``p`` is a directory containing an ``__init__.py``."""
     return p.is_dir() and (p / "__init__.py").exists()
 
 
 def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
+    """Locate package directories under the given roots.
+
+    Parameters
+    ----------
+    roots : list[pathlib.Path]
+        Starting points to inspect.
+    walk : bool
+        When ``True`` recursively scans each root for any package directory; when
+        ``False`` only the root itself is considered.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Discovered package directories, de-duplicated while preserving insertion
+        order.
+    """
     found: list[Path] = []
     for root in roots:
         if not walk:
@@ -305,6 +359,18 @@ def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
 
 
 def write_stub(init_dir: Path, text: str, overwrite: bool) -> None:
+    """Write a rendered stub to ``<init_dir>/__init__.pyi``.
+
+    Parameters
+    ----------
+    init_dir : pathlib.Path
+        Package directory that should receive the stub.
+    text : str
+        Stub source text, typically the return value of :func:`build_stub_text`.
+    overwrite : bool
+        When ``False`` an existing ``__init__.pyi`` is left untouched and a
+        message is printed to stderr; when ``True`` it is replaced.
+    """
     out = init_dir / "__init__.pyi"
     if out.exists() and not overwrite:
         print(f"[skip] {out} exists (use --overwrite)", file=sys.stderr)
@@ -317,6 +383,7 @@ def write_stub(init_dir: Path, text: str, overwrite: bool) -> None:
 
 
 def main() -> None:
+    """Command-line entry point for the stub generator."""
     ap = argparse.ArgumentParser(description="Generate __init__.pyi stubs for lazy-loading packages.")
     ap.add_argument("paths", type=Path, nargs="+", help="Package dirs or roots to process.")
     ap.add_argument(

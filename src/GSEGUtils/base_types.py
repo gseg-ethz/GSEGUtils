@@ -11,6 +11,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Shape-constrained numpydantic ``NDArray`` aliases and related TypedDicts.
+
+Provides ~80 ``<Shape>_<Dtype>_T`` type aliases used as Pydantic field annotations
+throughout the GSEG packages, plus a few orchestration helpers
+(:class:`DtypeDict`, :func:`make_ndarray_type`).
+"""
+
 from __future__ import annotations
 
 from typing import (
@@ -169,8 +176,14 @@ IndexDtypes = (Integer, Bool)
 
 
 class DtypeDict(TypedDict):
-    """
-    Dictionary object used for defining field names and types for a struct numpy array
+    """Field-name / field-dtype mapping for constructing a NumPy structured dtype.
+
+    Attributes
+    ----------
+    names : list[str]
+        Ordered field names.
+    formats : list[numpy.typing.DTypeLike]
+        Per-field dtypes, positionally aligned with ``names``.
     """
 
     names: list[str]  #:
@@ -472,22 +485,28 @@ Vector_2_T = NDArray[Shape["2"], ArrayDtypes]  #: Vector of size 2
 
 
 def make_ndarray_type(*dimensions: int | str | None, dtype: npt.DTypeLike | None = None) -> NDArray:
-    """Makes a |NDArray| Type object from a defined shape and dtype
+    """Build a numpydantic ``NDArray`` type alias from a runtime shape and dtype.
 
     Parameters
     ----------
-    *dimensions: int | str | None
-    dtype: :any:`npt.DTypeLike <numpy.typing.DTypeLike>` | None
+    *dimensions : int | str | None
+        Per-axis shape constraints. ``int`` fixes the axis length, ``str`` is
+        passed through to numpydantic verbatim (e.g. ``"N"`` for named-dim binding),
+        and ``None`` is rendered as the wildcard ``"*"``.
+    dtype : numpy.typing.DTypeLike, optional
+        Element dtype constraint. When ``None`` the default :data:`ArrayDtypes`
+        union is used.
 
     Returns
     -------
-    |NDArray|
+    NDArray
+        A parameterised ``numpydantic.NDArray`` type suitable as a Pydantic field
+        annotation.
 
     Examples
     --------
-    >>> make_ndarray_type(3, 4, dtype=np.float32) # => NDArray[Shape['3, 4'], dtype=np.float32]]
-    >>> make_ndarray_type(3, None, None, None, dtype=np.uint8) # => NDArray[Shape['3, *, *, *'], dtype=np.uint8]]
-
+    >>> make_ndarray_type(3, 4, dtype=np.float32)  # => NDArray[Shape['3, 4'], dtype=np.float32]
+    >>> make_ndarray_type(3, None, None, None, dtype=np.uint8)
     """
     if len(dimensions) == 0:  # type: ignore
         shape_list = ["*", "..."]
