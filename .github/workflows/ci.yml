@@ -71,7 +71,7 @@ jobs:
           annotate: warnings
           # NOTE: leave the `warnings` input UNSET — setting it to `true` would
           # ESCALATE warnings to exit 1 (Pitfall 2 in 01-RESEARCH.md). The
-          # warn-only semantics here come from `continue-on-error: true` above.
+          # warn-only semantics come from the step-level continue-on-error flag.
           working-directory: .
 
       - name: Upload pyright report
