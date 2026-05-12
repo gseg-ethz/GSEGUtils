@@ -31,6 +31,7 @@ class TestNpydanticType:
     def test_shape_definitions(self) -> None:
         """
         Tests the use of the make_ndarray_type function for creating numpydantic type objects
+
         Returns
         -------
 

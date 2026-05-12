@@ -63,6 +63,25 @@ jobs:
       - name: Install dev deps
         run: pip install .[dev]
 
+      - name: Pyright (informational)
+        id: pyright
+        continue-on-error: true
+        uses: jakebailey/pyright-action@v3
+        with:
+          annotate: warnings
+          # NOTE: leave the `warnings` input UNSET — setting it to `true` would
+          # ESCALATE warnings to exit 1 (Pitfall 2 in 01-RESEARCH.md). The
+          # warn-only semantics here come from `continue-on-error: true` above.
+          working-directory: .
+
+      - name: Upload pyright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyright-report-${{ github.run_id }}
+          path: .pyright-report.json
+          if-no-files-found: ignore
+
       - name: Run tests
         run: pytest --cov=GSEGUtils --cov-report=xml
 

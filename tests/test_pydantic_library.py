@@ -58,7 +58,7 @@ class TestPydantic:
         assert hasattr(pydantic_copy, "name")
         assert "abcdef" == pydantic_copy.name
         assert hasattr(base_array_copy, "name")
-        assert getattr(base_array_copy, "name") is None
+        assert base_array_copy.name is None
 
     def test_exclude_on_model_copy(self):
         class A(BaseModel):
