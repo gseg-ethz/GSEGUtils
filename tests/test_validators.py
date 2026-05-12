@@ -576,17 +576,13 @@ def test_linear_map_dtype_integer_to_float():
     for int_type in int_types:
         for float_type in float_types:
             info = np.iinfo(int_type)
-            array = np.array(
-                [info.min, (info.max + info.min) / 2, info.max], dtype=int_type
-            )
+            array = np.array([info.min, (info.max + info.min) / 2, info.max], dtype=int_type)
 
             result = linear_map_dtype(array, float_type)
 
             assert result.dtype == float_type
             assert np.all((result >= 0.0) & (result <= 1.0))
-            assert np.allclose(
-                result[1], 0.5, atol=1 / (info.max - info.min)
-            )  # Middle value should be mapped to 0.5
+            assert np.allclose(result[1], 0.5, atol=1 / (info.max - info.min))  # Middle value should be mapped to 0.5
 
 
 def test_linear_map_dtype_float_to_integer():
@@ -708,9 +704,7 @@ def test_normalize_self_float_types():
             # Check if relative ordering and spacing is preserved
             min_val, max_val = array.min(), array.max()
             expected = (array - min_val) / (max_val - min_val)
-            np.testing.assert_allclose(
-                result, expected, rtol=1e-6 if dtype == np.float32 else 1e-15
-            )
+            np.testing.assert_allclose(result, expected, rtol=1e-6 if dtype == np.float32 else 1e-15)
 
 
 def test_normalize_self_multidimensional():
@@ -721,9 +715,7 @@ def test_normalize_self_multidimensional():
     assert result_2d.dtype == np.uint8
 
     # Test 3D float array
-    array_3d = np.array(
-        [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]], dtype=np.float32
-    )
+    array_3d = np.array([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]], dtype=np.float32)
     result_3d = normalize_self(array_3d)
     assert result_3d.shape == array_3d.shape
     assert result_3d.dtype == np.float32

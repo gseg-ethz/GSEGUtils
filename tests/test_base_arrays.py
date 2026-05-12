@@ -44,16 +44,10 @@ class TestNpydanticType:
         assert NDArray[Shape["*, ..."], Any] == make_ndarray_type()
 
     def test_type_definitions(self) -> None:
-        assert NDArray[Shape["*"], np.float32] == make_ndarray_type(
-            None, dtype=np.float32
-        )
-        assert NDArray[Shape["*"], np.float64] == make_ndarray_type(
-            None, dtype=np.float64
-        )
+        assert NDArray[Shape["*"], np.float32] == make_ndarray_type(None, dtype=np.float32)
+        assert NDArray[Shape["*"], np.float64] == make_ndarray_type(None, dtype=np.float64)
         assert NDArray[Shape["*"], np.uint8] == make_ndarray_type(None, dtype=np.uint8)
-        assert NDArray[Shape["*"], np.uint16] == make_ndarray_type(
-            None, dtype=np.uint16
-        )
+        assert NDArray[Shape["*"], np.uint16] == make_ndarray_type(None, dtype=np.uint16)
         assert NDArray[Shape["*"], np.int32] == make_ndarray_type(None, dtype=np.int32)
         assert NDArray[Shape["*"], np.bool_] == make_ndarray_type(None, dtype=np.bool_)
         assert NDArray[Shape["*, ..."], np.bool_] == make_ndarray_type(dtype=np.bool_)
@@ -109,9 +103,7 @@ class TestBaseArray:
         self.check_init_from_array_like(b, self.cls, a)
 
     @staticmethod
-    def check_init_from_copy(
-        data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike
-    ) -> Any:
+    def check_init_from_copy(data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike) -> Any:
         # Tests on a copy that is passed
         a_copied = cls(arr=data.copy())
         assert ref_array is not a_copied  # New object
@@ -122,23 +114,17 @@ class TestBaseArray:
         return a_copied
 
     @staticmethod
-    def check_init_from_view(
-        data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike
-    ) -> Any:
+    def check_init_from_view(data: npt.NDArray[Any], cls: type, ref_array: npt.ArrayLike) -> Any:
         # Tests on a view that is passed
         a_view = cls(arr=data.view())
         assert ref_array is not a_view  # New object
         assert a_view is not data  # Also a new object
         assert a_view.arr is not data  # View creates a new object
-        assert (
-            a_view.arr.base is data
-        )  # But it does have a base which is the data object
+        assert a_view.arr.base is data  # But it does have a base which is the data object
         assert np.all(a_view == data)  # Values are identical
 
     @staticmethod
-    def check_init_from_array_like(
-        data: Any, cls: type, ref_array: npt.ArrayLike
-    ) -> Any:
+    def check_init_from_array_like(data: Any, cls: type, ref_array: npt.ArrayLike) -> Any:
         # Tests on a view that is passed
         a_base_array = cls(arr=data)
         assert ref_array is not a_base_array  # New object
@@ -148,18 +134,14 @@ class TestBaseArray:
         assert a_base_array.arr.base is None  # Check it's not a view
         assert np.all(a_base_array == data)  # Values are identical
 
-    @pytest.mark.parametrize(
-        "input_values", ({"dict": "Should fail"}, "String is bad", {1, 2, 3}, None)
-    )
+    @pytest.mark.parametrize("input_values", ({"dict": "Should fail"}, "String is bad", {1, 2, 3}, None))
     def test_invalid_input_types(self, input_values: Any) -> None:
         with pytest.raises(ValidationError):
             self.cls(arr=input_values)
 
     def test_general_base_model(self) -> None:
         assert "arr" in self.cls.model_fields
-        assert hasattr(
-            self.cls, "model_fields"
-        )  # ensure we stick with the 'arr' attribute naming convention
+        assert hasattr(self.cls, "model_fields")  # ensure we stick with the 'arr' attribute naming convention
         assert hasattr(self.cls, "model_config")
         assert isinstance(self.cls.model_fields["arr"].annotation, NDArray)
 
@@ -329,9 +311,7 @@ class TestBaseArray:
         arr_2 = a.copy(deep=False)
         assert arr_2 is not a  # The base object differs
         assert arr_2.arr is a.arr  # But the array object is just a reference
-        assert np.all(
-            arr_2 == a
-        )  # Copy should have exactly equal values (no precision loss)
+        assert np.all(arr_2 == a)  # Copy should have exactly equal values (no precision loss)
 
     def test_copy_deep(self) -> None:
         # Basic case
@@ -875,9 +855,7 @@ class TestFixedLength(TestNumpyMixins):
         with pytest.raises(IndexError):
             array_fl.create_mask(np.array([0, 4, 15]))
 
-    @pytest.mark.parametrize(
-        "value", ("1 2 3", True, np.random.rand(10), {1: "1", 2: "2"})
-    )
+    @pytest.mark.parametrize("value", ("1 2 3", True, np.random.rand(10), {1: "1", 2: "2"}))
     def test_invalid_create_mask_values(self, value: Any) -> None:
         array_fl = self.cls(arr=self.rand_32())
 
@@ -967,9 +945,7 @@ class TestBaseVector(TestFixedLength):
         assert np.sum(vec) == 10
         assert vec.shape == (10,)
 
-    @pytest.mark.parametrize(
-        "value", (np.random.rand(10, 3), BaseArray(arr=np.random.rand(10, 2)))
-    )
+    @pytest.mark.parametrize("value", (np.random.rand(10, 3), BaseArray(arr=np.random.rand(10, 2))))
     def test_vector_validation(self, value: npt.ArrayLike) -> None:
         with pytest.raises(ValidationError):
             self.cls(arr=value)

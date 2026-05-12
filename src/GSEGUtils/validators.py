@@ -128,9 +128,7 @@ def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
         else:
             arr_min, arr_max = array.min(), array.max()
 
-        raise ValueError(
-            f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]"
-        )
+        raise ValueError(f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]")
 
 
 def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
@@ -163,9 +161,7 @@ def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
         else:
             arr_min, arr_max = array.min(), array.max()
 
-        raise ValueError(
-            f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]"
-        )
+        raise ValueError(f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]")
 
 
 def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
@@ -195,9 +191,7 @@ def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
     else:
         if -HALF_PI <= array.min() and array.max() <= HALF_PI:
             raise ValueError("Input Angles in [-pi/2, +pi/2] but should be [0, +pi]")
-        raise ValueError(
-            f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]"
-        )
+        raise ValueError(f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]")
 
 
 def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
@@ -229,9 +223,7 @@ def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
             array_min, array_max = 0, PI
         else:
             array_min, array_max = array.min(), array.max()
-        raise ValueError(
-            f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]"
-        )
+        raise ValueError(f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]")
 
 
 def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
@@ -300,9 +292,7 @@ def validate_transposed_2d_array(array: Array_NxM_T | VectorT, n: int) -> Array_
         if array.shape[0] != n:
             return array.reshape(-1, n)
 
-    raise ValueError(
-        f"Input array must be 2-dimensional of Mx{n} or {n}xM shape. Received: {array.shape}"
-    )
+    raise ValueError(f"Input array must be 2-dimensional of Mx{n} or {n}xM shape. Received: {array.shape}")
 
 
 def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integer_T:
@@ -370,9 +360,7 @@ def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> No
     val_max: float | int = value.max()
 
     if (val_min < target_min) and (val_max > target_max):
-        raise ValueError(
-            f"Min and max values [{val_min},{val_max}] exceeds bounds [{target_min},{target_max}]."
-        )
+        raise ValueError(f"Min and max values [{val_min},{val_max}] exceeds bounds [{target_min},{target_max}].")
 
     elif val_min < target_min:
         raise ValueError(f"Min value {val_min} exceeds lower limit {target_min}.")
@@ -477,7 +465,6 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
     TypeError
         Non-floating or integer object type passed
     """
-
     array = np.asarray(array)
 
     if target_dtype in (np.float64, np.int64, np.uint64):
@@ -525,7 +512,7 @@ def normalize_self(array: ArrayT) -> ArrayT:
     ArrayT
     """
     if np.dtype(array.dtype).kind not in ["u", "i"]:
-        logger.debug(f"Scalar field is floating. Converting to [0.0, 1.0].")
+        logger.debug("Scalar field is floating. Converting to [0.0, 1.0].")
         lower, upper = 0, 1
     else:
         lower, upper = np.iinfo(array.dtype).min, np.iinfo(array.dtype).max
@@ -576,9 +563,7 @@ def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
                 1,
             )
 
-        return normalize_min_max(
-            array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype
-        )
+        return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype)
     return array
 
 

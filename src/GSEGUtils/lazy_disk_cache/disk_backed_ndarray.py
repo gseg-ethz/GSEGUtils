@@ -11,18 +11,16 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from pathlib import Path
-from typing import Self, Unpack
+from typing import Unpack
 
 import numpy as np
 from numpy.lib.mixins import NDArrayOperatorsMixin
 from numpy.typing import DTypeLike, NDArray
 
-from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw
+from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheKw
 
 
 class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
-
     def __init__(self, data: NDArray, **settings: Unpack[LazyDiskCacheKw]) -> None:
         self._data = data
         self._shape = data.shape

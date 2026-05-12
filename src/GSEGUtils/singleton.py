@@ -12,7 +12,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import threading
-from typing import ClassVar, Self
+from typing import ClassVar
 
 
 class SingletonMeta(type):

@@ -17,9 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
-LOGGING_LEVELS = Literal[
-    "CRITICAL", "FATAL", "ERROR", "WARN", "WARNING", "INFO", "DEBUG", "NOTSET"
-]
+LOGGING_LEVELS = Literal["CRITICAL", "FATAL", "ERROR", "WARN", "WARNING", "INFO", "DEBUG", "NOTSET"]
 
 
 def setup_logging(

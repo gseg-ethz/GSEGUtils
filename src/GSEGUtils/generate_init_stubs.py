@@ -32,6 +32,7 @@ New in this version:
   * eager: def __getattr__(name: str) -> NoReturn  (everything should be declared)
   * any  : overloads for submodule names -> ModuleType, fallback -> NoReturn
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,17 +40,13 @@ import ast
 import os
 import sys
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 # ----------------- AST utilities -----------------
 
 
 def _const_str(node: ast.AST) -> str | None:
-    return (
-        node.value
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        else None
-    )
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
 
 def _const_tuple2(node: ast.AST) -> tuple[str, str] | None:
@@ -61,9 +58,7 @@ def _const_tuple2(node: ast.AST) -> tuple[str, str] | None:
     return None
 
 
-def _update_lazy_map_from_dict(
-    dst: dict[str, str | tuple[str, str]], dict_node: ast.Dict
-) -> None:
+def _update_lazy_map_from_dict(dst: dict[str, str | tuple[str, str]], dict_node: ast.Dict) -> None:
     for k, v in zip(dict_node.keys, dict_node.values):
         ks = _const_str(k)
         if ks is None:
@@ -106,20 +101,14 @@ def parse_ast(
             if "__all__" in targets:
                 _extend_exports_from_seq(exports, node.value)
                 # __all__ = __all__ + [...]
-                if isinstance(node.value, ast.BinOp) and isinstance(
-                    node.value.op, ast.Add
-                ):
+                if isinstance(node.value, ast.BinOp) and isinstance(node.value.op, ast.Add):
                     _extend_exports_from_seq(exports, node.value.right)
 
             if "_lazy_map" in targets and isinstance(node.value, ast.Dict):
                 _update_lazy_map_from_dict(lazy_map, node.value)
 
             for dn in dunders:
-                if (
-                    dn in targets
-                    and isinstance(node.value, ast.Constant)
-                    and isinstance(node.value.value, str)
-                ):
+                if dn in targets and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
                     dunders[dn] = True
 
         # Handle annotated assignments (PEP 526): e.g., _lazy_map: dict[...] = {...}
@@ -130,11 +119,7 @@ def parse_ast(
                 _extend_exports_from_seq(exports, value)
             if name == "_lazy_map" and isinstance(value, ast.Dict):
                 _update_lazy_map_from_dict(lazy_map, value)
-            if (
-                name in dunders
-                and isinstance(value, ast.Constant)
-                and isinstance(value.value, str)
-            ):
+            if name in dunders and isinstance(value, ast.Constant) and isinstance(value.value, str):
                 dunders[name] = True
 
         # __all__.extend([...]) / __all__.append("x")
@@ -175,11 +160,7 @@ def build_stub_text(
     exports = list(exports)
     dunder_names = {"__author__", "__email__", "__all__"}
     # Treat exported names that aren't lazy-mapped as submodules
-    submodules = [
-        n
-        for n in exports
-        if n not in lazy_map and n.isidentifier() and n not in dunder_names
-    ]
+    submodules = [n for n in exports if n not in lazy_map and n.isidentifier() and n not in dunder_names]
 
     needs_moduletype_overloads = submodule_mode == "any" and len(submodules) > 0
 
@@ -308,11 +289,7 @@ def find_package_dirs(roots: list[Path], walk: bool) -> list[Path]:
             continue
 
         for dirpath, dirnames, _files in os.walk(root):
-            dirnames[:] = [
-                d
-                for d in dirnames
-                if d not in DEFAULT_EXCLUDES and not d.startswith(".")
-            ]
+            dirnames[:] = [d for d in dirnames if d not in DEFAULT_EXCLUDES and not d.startswith(".")]
             dpath = Path(dirpath)
             if is_package_dir(dpath):
                 found.append(dpath)
@@ -340,12 +317,8 @@ def write_stub(init_dir: Path, text: str, overwrite: bool) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Generate __init__.pyi stubs for lazy-loading packages."
-    )
-    ap.add_argument(
-        "paths", type=Path, nargs="+", help="Package dirs or roots to process."
-    )
+    ap = argparse.ArgumentParser(description="Generate __init__.pyi stubs for lazy-loading packages.")
+    ap.add_argument("paths", type=Path, nargs="+", help="Package dirs or roots to process.")
     ap.add_argument(
         "--overwrite",
         action="store_true",

@@ -28,7 +28,6 @@ from typing import (
     runtime_checkable,
 )
 
-import numpy as np
 from numpy.typing import NDArray
 from pydantic import ConfigDict, validate_call
 
@@ -82,9 +81,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._cache_dir = Path(tempfile.mkdtemp())
         else:
             self._cache_dir = config.cache_path
-        self._automatic_offloading = (
-            config.automatic_offloading and config.cache_path is not None
-        )
+        self._automatic_offloading = config.automatic_offloading and config.cache_path is not None
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
         self._factory = factory
@@ -95,11 +92,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._cache_dir.mkdir(parents=True, exist_ok=True)
 
             # Scan for existing files
-            available_files = [
-                f
-                for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}")
-                if f.is_file()
-            ]
+            available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
             for f in available_files:
                 self._store[f.stem] = None
 
@@ -162,25 +155,13 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         if key in self:
             raise KeyError(f"Key {key} already exists in store.")
 
-        enable_caching = (
-            enable_caching_override
-            if enable_caching_override is not None
-            else self._enable_caching
-        )
-        cache_path = (
-            self._cache_dir / f"{key}{self._DBNDArrayFileExt}"
-            if self._cache_dir
-            else None
-        )
+        enable_caching = enable_caching_override if enable_caching_override is not None else self._enable_caching
+        cache_path = self._cache_dir / f"{key}{self._DBNDArrayFileExt}" if self._cache_dir else None
         automatic_offloading = (
-            automatic_offloading_override
-            if automatic_offloading_override is not None
-            else self._automatic_offloading
+            automatic_offloading_override if automatic_offloading_override is not None else self._automatic_offloading
         )
         purge_disk_on_gc = (
-            purge_disk_on_gc_override
-            if purge_disk_on_gc_override is not None
-            else self._purge_disk_on_gc
+            purge_disk_on_gc_override if purge_disk_on_gc_override is not None else self._purge_disk_on_gc
         )
 
         new_container = self._factory(
@@ -215,9 +196,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     def items(self) -> Iterator[tuple[str, Optional[T]]]:
         return iter(self._store.items())
 
-    def offload(
-        self, keys: Optional[str | list[str]] = None, pickle_container: bool = False
-    ) -> None:
+    def offload(self, keys: Optional[str | list[str]] = None, pickle_container: bool = False) -> None:
         """
         Offloads selected entries to disk. When no keys are provided, every cached
         entry is considered. Items with `cache_enabled=False` are skipped. When
@@ -234,9 +213,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             if obj is None:
                 continue
             if not obj.cache_enabled:
-                logger.debug(
-                    "Skipping offload for %s because caching is disabled.", key
-                )
+                logger.debug("Skipping offload for %s because caching is disabled.", key)
                 continue
             if pickle_container:
                 with open(self._get_pickle_path(key), "wb") as f:
@@ -268,7 +245,5 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                         loaded = pickle.load(f)
                     self._store[key] = self._check_T(loaded)
                 except FileNotFoundError:
-                    logger.warning(
-                        f"File for key {key} not found in cache directory {self._cache_dir}."
-                    )
+                    logger.warning(f"File for key {key} not found in cache directory {self._cache_dir}.")
                     continue

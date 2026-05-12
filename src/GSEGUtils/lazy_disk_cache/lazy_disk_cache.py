@@ -17,27 +17,21 @@ import tempfile
 import threading
 import weakref
 from abc import ABC, abstractmethod
-from dataclasses import asdict, replace
+from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import (
-    Any,
     Literal,
-    NotRequired,
     Optional,
-    Required,
     Self,
     TypedDict,
     Unpack,
-    cast,
 )
 
 import numpy as np
 from numpy.typing import DTypeLike, NDArray
 from pydantic import ConfigDict, validate_call
 from pydantic.dataclasses import dataclass
-
-from GSEGUtils.config import CacheDefaults, get_defaults
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +101,7 @@ class LazyDiskCache(ABC):
         # elif cache_path.is_dir():
 
         # self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX) if cache_path else None
-        self._automatic_offloading = (
-            config.automatic_offloading
-        )  # and (cache_path is not None)
+        self._automatic_offloading = config.automatic_offloading  # and (cache_path is not None)
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
         self._lock = threading.RLock()
@@ -138,16 +130,10 @@ class LazyDiskCache(ABC):
             # 1) allocate or reopen the mmap file
             if self._mmap is None:
                 self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-                mode: Literal["w+", "r+"] = (
-                    "w+" if not self._cache_path.exists() else "r+"
-                )
-                self._mmap = np.memmap(
-                    self._cache_path, dtype=dtype, mode=mode, shape=shape
-                )
+                mode: Literal["w+", "r+"] = "w+" if not self._cache_path.exists() else "r+"
+                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode=mode, shape=shape)
             elif self._mmap.mode != "r+":
-                self._mmap = np.memmap(
-                    self._cache_path, dtype=dtype, mode="r+", shape=shape
-                )
+                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode="r+", shape=shape)
 
             self._mmap[:] = array
 
@@ -258,9 +244,7 @@ class LazyDiskCache(ABC):
                 self._purge_disk_on_gc = True
                 return
             # register a new finalizer
-            self._finalizer = weakref.finalize(
-                self, lambda p=self._cache_path: p.unlink(missing_ok=True)
-            )
+            self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
             self._purge_disk_on_gc = True
             logger.debug(f"Enabled purge for {self._cache_path}")
 
@@ -278,14 +262,10 @@ class LazyDiskCache(ABC):
         """Flush the current buffer to disk, drop the in-RAM array, and mark offloaded."""
         with self._lock:
             if not self._enable_caching:
-                logger.info(
-                    f"Caching disabled ==> {self.__class__}.`offload()` ignored for {id(self)}."
-                )
+                logger.info(f"Caching disabled ==> {self.__class__}.`offload()` ignored for {id(self)}.")
                 return
             if self.offloaded:
-                logger.info(
-                    f"{self.__class__}: {id(self)} already offloaded to {self.cache_path}."
-                )
+                logger.info(f"{self.__class__}: {id(self)} already offloaded to {self.cache_path}.")
                 return
 
             # make sure we have a memmap buffer
@@ -331,9 +311,7 @@ class LazyDiskCache(ABC):
                 or self._mmap.dtype != np.dtype(dtype)
                 or self._mmap.mode != mode
             ):
-                self._mmap = np.memmap(
-                    self._cache_path, dtype=dtype, mode=mode, shape=shape
-                )
+                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode=mode, shape=shape)
 
             # hand that mmap to your subclass as its “buffer”
             self._set_buffer(self._mmap)

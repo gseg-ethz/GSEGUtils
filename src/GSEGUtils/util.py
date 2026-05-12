@@ -95,7 +95,6 @@ def convert_angles(
         array([ 0., 100., 200., 400.])
 
     """
-
     if source_unit not in AngleUnit:
         raise ValueError(f"Invalid source unit: {source_unit}")
 
@@ -105,9 +104,7 @@ def convert_angles(
     if out is not None:
         out = cast(npt.NDArray[np.floating], out)
         if not isinstance(out, np.ndarray):
-            logger.warning(
-                f"Input values are not an ndarray, returning None and not assigning converted values"
-            )
+            logger.warning("Input values are not an ndarray, returning None and not assigning converted values")
             return None
 
     if source_unit == target_unit:
@@ -138,9 +135,7 @@ def convert_angles(
 
 
 # TODO updated naming to not be private
-def _rad2deg(
-    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
-) -> Array_Float_T | float | None:
+def _rad2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert radians to degrees.
 
     Parameters
@@ -155,9 +150,7 @@ def _rad2deg(
     return np.rad2deg(values, out=out)
 
 
-def _rad2gon(
-    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
-) -> Array_Float_T | float | None:
+def _rad2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert radians to gradians(gon).
 
     Parameters
@@ -172,9 +165,7 @@ def _rad2gon(
     return np.multiply(values, 200 / np.pi, out=out)
 
 
-def _deg2rad(
-    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
-) -> Array_Float_T | float | None:
+def _deg2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert degrees to radians.
 
     Parameters
@@ -189,9 +180,7 @@ def _deg2rad(
     return np.deg2rad(values, out=out)
 
 
-def _deg2gon(
-    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
-) -> Array_Float_T | float | None:
+def _deg2gon(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert degrees to gradians(gon).
 
     Parameters
@@ -206,9 +195,7 @@ def _deg2gon(
     return np.multiply(values, 200 / 180, out=out)
 
 
-def _gon2rad(
-    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
-) -> Array_Float_T | float | None:
+def _gon2rad(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert gradians(gon) to radians.
 
     Parameters
@@ -223,9 +210,7 @@ def _gon2rad(
     return np.multiply(values, np.pi / 200, out=out)
 
 
-def _gon2deg(
-    values: Array_Float_T | float, out: Optional[Array_Float_T] = None
-) -> Array_Float_T | float | None:
+def _gon2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None) -> Array_Float_T | float | None:
     """Convert gradians(gon) to degrees.
 
     Parameters

@@ -31,8 +31,6 @@ import numpy as np
 import numpy.typing as npt
 
 # noinspection PyProtectedMember
-from numpy._typing._array_like import _ArrayLikeBool_co
-from numpydantic import NDArray  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from .base_types import (
@@ -467,12 +465,9 @@ class FixedLengthArray(NumericMixins):
         -------
         Vector_Bool_T
         """
-
         # Case 1: slice object
         if isinstance(selection, slice):
-            vector_mask = convert_slice_to_integer_range(
-                selection=selection, length=len(self)
-            )
+            vector_mask = convert_slice_to_integer_range(selection=selection, length=len(self))
 
         # Case 2: single integer
         elif isinstance(selection, int):
@@ -487,9 +482,7 @@ class FixedLengthArray(NumericMixins):
         # Case 3a: Boolean
         if vector_mask.dtype == np.bool_:
             if vector_mask.shape[0] != len(self):
-                raise ValueError(
-                    f"Mask has wrong number of points. Mask:{vector_mask.size}  != array:{len(self)}"
-                )
+                raise ValueError(f"Mask has wrong number of points. Mask:{vector_mask.size}  != array:{len(self)}")
             return cast(Vector_Bool_T, vector_mask)
 
         # Case 3b: Integer

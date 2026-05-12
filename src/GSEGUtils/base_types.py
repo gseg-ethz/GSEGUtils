@@ -42,7 +42,6 @@ from numpydantic.dtype import (  # type: ignore[import-not-found]
     UInt32,
     UnsignedInteger,
 )
-from numpydantic.types import NDArrayType  # type: ignore[import-not-found]
 from pydantic import StringConstraints
 
 __all__ = [
@@ -204,9 +203,7 @@ Additional specific dtype definitions:
 Array_Float_T = NDArray[Shape["*, ..."], Float]  #: See :any:`ArrayT`
 Array_Integer_T = NDArray[Shape["*, ..."], Integer]  #: See :any:`ArrayT`
 Array_SignedInteger_T = NDArray[Shape["*, ..."], SignedInteger]  #: See :any:`ArrayT`
-Array_UnsignedInteger_T = NDArray[
-    Shape["*, ..."], UnsignedInteger
-]  #: See :any:`ArrayT`
+Array_UnsignedInteger_T = NDArray[Shape["*, ..."], UnsignedInteger]  #: See :any:`ArrayT`
 Array_Bool_T = NDArray[Shape["*, ..."], Bool]  #: See :any:`ArrayT`
 Array_Float32_T = NDArray[Shape["*, ..."], Float32]  #: See :any:`ArrayT`
 Array_Float64_T = NDArray[Shape["*, ..."], Float64]  #: See :any:`ArrayT`
@@ -243,12 +240,8 @@ Additional specific dtype definitions:
 """
 Array_NxM_Float_T = NDArray[Shape["*, *"], Float]  #: See :any:`Array_NxM_T`
 Array_NxM_Integer_T = NDArray[Shape["*, *"], Integer]  #: See :any:`Array_NxM_T`
-Array_NxM_SignedInteger_T = NDArray[
-    Shape["*, *"], SignedInteger
-]  #: See :any:`Array_NxM_T`
-Array_NxM_UnsignedInteger_T = NDArray[
-    Shape["*, *"], UnsignedInteger
-]  #: See :any:`Array_NxM_T`
+Array_NxM_SignedInteger_T = NDArray[Shape["*, *"], SignedInteger]  #: See :any:`Array_NxM_T`
+Array_NxM_UnsignedInteger_T = NDArray[Shape["*, *"], UnsignedInteger]  #: See :any:`Array_NxM_T`
 Array_NxM_Bool_T = NDArray[Shape["*, *"], Bool]  #: See :any:`Array_NxM_T`
 Array_NxM_Float32_T = NDArray[Shape["*, *"], Float32]  #: See :any:`Array_NxM_T`
 Array_NxM_Float64_T = NDArray[Shape["*, *"], Float64]  #: See :any:`Array_NxM_T`
@@ -299,12 +292,8 @@ Array_Nx2_T = NDArray[Shape["*, 2"], ArrayDtypes]
 """
 Array_Nx2_Float_T = NDArray[Shape["*, 2"], Float]  #: See :any:`Array_Nx2_T`
 Array_Nx2_Integer_T = NDArray[Shape["*, 2"], Integer]  #: See :any:`Array_Nx2_T`
-Array_Nx2_SignedInteger_T = NDArray[
-    Shape["*, 2"], SignedInteger
-]  #: See :any:`Array_Nx2_T`
-Array_Nx2_UnsignedInteger_T = NDArray[
-    Shape["*, 2"], UnsignedInteger
-]  #: See :any:`Array_Nx2_T`
+Array_Nx2_SignedInteger_T = NDArray[Shape["*, 2"], SignedInteger]  #: See :any:`Array_Nx2_T`
+Array_Nx2_UnsignedInteger_T = NDArray[Shape["*, 2"], UnsignedInteger]  #: See :any:`Array_Nx2_T`
 Array_Nx2_Bool_T = NDArray[Shape["*, 2"], Bool]  #: See :any:`Array_Nx2_T`
 Array_Nx2_Float32_T = NDArray[Shape["*, 2"], Float32]  #: See :any:`Array_Nx2_T`
 Array_Nx2_Float64_T = NDArray[Shape["*, 2"], Float64]  #: See :any:`Array_Nx2_T`
@@ -343,12 +332,8 @@ Array_Nx3_T = NDArray[Shape["*, 3"], ArrayDtypes]
 # Nx3 Generalised dtypes
 Array_Nx3_Float_T = NDArray[Shape["*, 3"], Float]  #: See :any:`Array_Nx3_T`
 Array_Nx3_Integer_T = NDArray[Shape["*, 3"], Integer]  #: See :any:`Array_Nx3_T`
-Array_Nx3_SignedInteger_T = NDArray[
-    Shape["*, 3"], SignedInteger
-]  #: See :any:`Array_Nx3_T`
-Array_Nx3_UnsignedInteger_T = NDArray[
-    Shape["*, 3"], UnsignedInteger
-]  #: See :any:`Array_Nx3_T`
+Array_Nx3_SignedInteger_T = NDArray[Shape["*, 3"], SignedInteger]  #: See :any:`Array_Nx3_T`
+Array_Nx3_UnsignedInteger_T = NDArray[Shape["*, 3"], UnsignedInteger]  #: See :any:`Array_Nx3_T`
 Array_Nx3_Bool_T = NDArray[Shape["*, 3"], Bool]  #: See :any:`Array_Nx3_T`
 
 # Nx3 Specific dtypes
@@ -467,9 +452,7 @@ Vector_3_T = NDArray[Shape["3"], ArrayDtypes]
 Vector_3_Float_T = NDArray[Shape["3"], Float]  #: See :any:`Vector_3_T`
 Vector_3_Integer_T = NDArray[Shape["3"], Integer]  #: See :any:`Vector_3_T`
 Vector_3_SignedInteger_T = NDArray[Shape["3"], SignedInteger]  #: See :any:`Vector_3_T`
-Vector_3_UnsignedInteger_T = NDArray[
-    Shape["3"], UnsignedInteger
-]  #: See :any:`Vector_3_T`
+Vector_3_UnsignedInteger_T = NDArray[Shape["3"], UnsignedInteger]  #: See :any:`Vector_3_T`
 Vector_3_Bool_T = NDArray[Shape["3"], Bool]  #: See :any:`Vector_3_T`
 Vector_3_Float32_T = NDArray[Shape["3"], Float32]  #: See :any:`Vector_3_T`
 Vector_3_Float64_T = NDArray[Shape["3"], Float64]  #: See :any:`Vector_3_T`
@@ -486,9 +469,7 @@ Vector_4_T = NDArray[Shape["4"], ArrayDtypes]  #: Vector of size 4
 Vector_2_T = NDArray[Shape["2"], ArrayDtypes]  #: Vector of size 2
 
 
-def make_ndarray_type(
-    *dimensions: int | str | None, dtype: npt.DTypeLike | None = None
-) -> NDArray:
+def make_ndarray_type(*dimensions: int | str | None, dtype: npt.DTypeLike | None = None) -> NDArray:
     """Makes a |NDArray| Type object from a defined shape and dtype
 
     Parameters
@@ -502,7 +483,6 @@ def make_ndarray_type(
 
     Examples
     --------
-
     >>> make_ndarray_type(3, 4, dtype=np.float32) # => NDArray[Shape['3, 4'], dtype=np.float32]]
     >>> make_ndarray_type(3, None, None, None, dtype=np.uint8) # => NDArray[Shape['3, *, *, *'], dtype=np.uint8]]
 

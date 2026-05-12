@@ -12,7 +12,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from contextvars import ContextVar
-from typing import NotRequired, Required, TypedDict, Unpack
+from typing import Required, TypedDict, Unpack
 
 
 class CacheDefaults(TypedDict, total=False):
