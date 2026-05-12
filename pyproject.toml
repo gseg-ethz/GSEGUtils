@@ -12,7 +12,7 @@ authors = [
 maintainers = [
     {name = "Nicholas Meyer", email = "meyernic@ethz.ch"},
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 keywords = ["ONE", "TWO"]
 license = {file = "LICENSE"}
 classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#classifiers
@@ -34,7 +34,7 @@ dynamic = ["version", "readme"]
 
 dependencies = [ # https://packaging.python.org/en/latest/specifications/dependency-specifiers/#dependency-specifiers
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
-    "numpy ~= 2.0",
+    "numpy >= 2.0, < 2.4",
     "pydantic ~= 2.11",
     "numpydantic ~= 1.6"
 ]
