@@ -47,8 +47,14 @@ repos:
     hooks:
       - id: pyright-informational
         name: pyright (informational, never blocks)
+        # language: python + additional_dependencies so the hook works in CI
+        # (lint job installs only `pre-commit` — no system pyright). The pip
+        # `pyright` package fetches its Node binary at install time. Local dev
+        # already has pyright via `pip install -e .[dev]`, so this is a no-op
+        # there. The `|| true` keeps the hook non-blocking regardless.
         entry: bash -c 'pyright "$@" || true' --
-        language: system
+        language: python
+        additional_dependencies: ["pyright~=1.1"]
         types: [python]
         require_serial: true
         pass_filenames: false
