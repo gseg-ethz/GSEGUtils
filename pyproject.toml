@@ -85,7 +85,7 @@ Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 doc = [
-    "sphinx @ git+https://github.com/sphinx-doc/sphinx.git@9a08711e0e18c63c609070aa0a79019b4db45a78",
+    "sphinx ~= 8.2",
     "sphinx_rtd_theme"
 ]
 dev = [
