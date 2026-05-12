@@ -59,7 +59,7 @@ def _const_tuple2(node: ast.AST) -> tuple[str, str] | None:
 
 
 def _update_lazy_map_from_dict(dst: dict[str, str | tuple[str, str]], dict_node: ast.Dict) -> None:
-    for k, v in zip(dict_node.keys, dict_node.values):
+    for k, v in zip(dict_node.keys, dict_node.values, strict=True):
         ks = _const_str(k)
         if ks is None:
             continue
@@ -83,7 +83,7 @@ def _extend_exports_from_seq(dst: list[str], seq: ast.AST) -> None:
 # ----------------- Parsing -----------------
 
 
-def parse_ast(
+def parse_ast(  # noqa: C901  # AST visitor — branching density is intrinsic; refactor deferred to Phase 6 tech-debt sweep.
     init_py: Path,
 ) -> tuple[dict[str, str | tuple[str, str]], list[str], dict[str, bool]]:
     src = init_py.read_text(encoding="utf-8")
@@ -151,7 +151,7 @@ def parse_ast(
 # ----------------- Stub generation -----------------
 
 
-def build_stub_text(
+def build_stub_text(  # noqa: C901  # Stub template assembly — branching density tracks stub layout; refactor deferred to Phase 6.
     lazy_map: dict[str, str | tuple[str, str]],
     exports: Iterable[str],
     dunders: dict[str, bool],

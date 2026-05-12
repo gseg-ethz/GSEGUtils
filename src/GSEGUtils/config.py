@@ -21,7 +21,11 @@ class CacheDefaults(TypedDict, total=False):
 
 _DEFAULTS: ContextVar[CacheDefaults] = ContextVar(
     "_DEFAULTS",
-    default=CacheDefaults(preset_automatic_offloading=True),
+    # NOTE: a TypedDict is structurally a dict (mutable); B039 warns this can leak
+    # across contexts.  The `configure` / `get_defaults` API explicitly copies-on-write
+    # via `.get()` → `.set()`, so the shared default object is read-only in practice.
+    # Hardening (frozen-dict default) is queued under FRAG (Phase 4).
+    default=CacheDefaults(preset_automatic_offloading=True),  # noqa: B039
 )
 
 

@@ -376,10 +376,10 @@ class LazyDiskCache(ABC):
         ...
 
     # Optional hooks subclasses can override
-    def on_offload(self) -> None:
+    def on_offload(self) -> None:  # noqa: B027  # Optional override hook — intentionally no-op default; not abstract.
         """Hook called after offloading to disk. Use to prune resources."""
         pass
 
-    def on_load(self) -> None:
+    def on_load(self) -> None:  # noqa: B027  # Optional override hook — intentionally no-op default; not abstract.
         """Hook called after loading into memory. Use to cleanup or reinitialize."""
         pass

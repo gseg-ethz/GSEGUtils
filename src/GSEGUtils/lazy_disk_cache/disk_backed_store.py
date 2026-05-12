@@ -69,7 +69,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     def __init__(
         self,
         *,
-        config: LazyDiskCacheConfig = LazyDiskCacheConfig(),
+        config: LazyDiskCacheConfig = LazyDiskCacheConfig(),  # noqa: B008  # LazyDiskCacheConfig is a frozen pydantic dataclass — safe as default.
         factory: Factory[T],
         value_type: Optional[type[T] | tuple[type[T], ...]] = None,
         validator: Optional[Validator[T]] = None,

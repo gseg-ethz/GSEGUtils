@@ -178,7 +178,9 @@ class DtypeDict(TypedDict):
 
 
 # ======================= Array =======================
-ArrayT: TypeAlias = NDArray[Shape["*, ..."], ArrayDtypes]
+# numpydantic Shape strings (`"*, ..."`) are valid forward-annotation syntax for the
+# numpydantic schema validator; ruff's standard PEP 563 parser flags them as F722.
+ArrayT: TypeAlias = NDArray[Shape["*, ..."], ArrayDtypes]  # noqa: F722
 """
 Generic |NDArray| type (supports all shapes)
 

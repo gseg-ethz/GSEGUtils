@@ -42,7 +42,7 @@ class AngleUnit(StrEnum):
     GON = "gon"
 
 
-def convert_angles(
+def convert_angles(  # noqa: C901  # Pair-wise unit conversion dispatch — branching tracks the 3x3 unit matrix; refactor deferred to Phase 6.
     values: Array_Float_T,
     source_unit: AngleUnit,
     target_unit: AngleUnit,
