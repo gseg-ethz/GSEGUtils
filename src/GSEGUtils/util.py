@@ -11,9 +11,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""GSEGUtils.util
-This module provides utility functions and constants for angle conversion and numerical operations,
-along with an enumeration for specifying angle units.
+"""Angle-conversion helpers and fast-path NumPy utilities.
+
+Provides :class:`AngleUnit` (rad / deg / gon enum), :func:`convert_angles` for
+pair-wise unit conversion, the underscore-prefixed in-place conversion aliases
+(scheduled for promotion to public names in Plan 01-04), and
+:func:`unique_rows_fast` (a faster alternative to ``numpy.unique(..., axis=0)``
+for integer row de-duplication).
 """
 
 import logging
@@ -48,8 +52,7 @@ def convert_angles(  # noqa: C901  # Pair-wise unit conversion dispatch — bran
     target_unit: AngleUnit,
     out: Optional[Array_Float_T] = None,
 ) -> Array_Float_T | None:
-    """
-    Converts an array of angles from one unit to another
+    """Convert an array of angles from one unit to another.
 
     Parameters
     ----------
@@ -226,9 +229,11 @@ def _gon2deg(values: Array_Float_T | float, out: Optional[Array_Float_T] = None)
 
 
 def unique_rows_fast(bin_idx: Array_Int32_T) -> tuple[ArrayT, Array_Int32_T]:
-    """Determine unique rows in a 2D array of integers.
-    Returns `(unique_rows, inverse_indices)` exactly like `np.unique(bin_idx, axis=0, return_inverse=True)`
-    but ~5–10× faster for large N.
+    """Determine unique rows in a 2-D integer array.
+
+    Returns ``(unique_rows, inverse_indices)`` exactly like
+    :func:`numpy.unique` with ``axis=0, return_inverse=True`` but ~5–10× faster
+    for large ``N``.
 
     Parameters
     ----------

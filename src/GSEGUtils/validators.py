@@ -11,6 +11,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Input-validation helpers for spherical / Cartesian arrays and unsigned-integer normalization.
+
+Provides validators for spherical-coordinate arrays, axis/range checks for angle
+columns, transposition helpers for ``Nx2`` / ``Nx3`` arrays, slice-to-integer
+conversion, and ``normalize_uint*`` saturation routines.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -99,7 +106,7 @@ def validate_radius(array: Array_Float_T) -> Array_Float_T:
 
 
 def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if azimuths in range of [0, 2π]
+    """Check that azimuth angles lie in ``[0, 2π]``.
 
     Parameters
     ----------
@@ -132,7 +139,7 @@ def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
 
 
 def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if azimuths in range of [-π, +π]
+    """Check that horizontal angles lie in ``[-π, +π]``.
 
     Parameters
     ----------
@@ -165,7 +172,7 @@ def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
 
 
 def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if zenith angles in range of [0, +π]
+    """Check that zenith angles lie in ``[0, +π]``.
 
     Parameters
     ----------
@@ -195,7 +202,7 @@ def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
 
 
 def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if inclination angles in range of [-π/2, +π/2]
+    """Check that inclination angles lie in ``[-π/2, +π/2]``.
 
     Parameters
     ----------
@@ -244,7 +251,7 @@ def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
 
 
 def coerce_wrapped_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
-    """Coerce horizontal angles to range [-π, π)
+    """Coerce horizontal angles to the half-open range ``[-π, π)``.
 
     Parameters
     ----------
@@ -498,7 +505,7 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
 
 
 def normalize_self(array: ArrayT) -> ArrayT:
-    """Normalizes an input array to the limits expected by the array's dtype.
+    """Normalize an input array to the limits expected by its own dtype.
 
     For floating point values, this is `[0, 1]` and for integer values, it is the min and max defined by `np.iinfo`.
 
@@ -521,7 +528,7 @@ def normalize_self(array: ArrayT) -> ArrayT:
 
 
 def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
-    """Helper function for normalizing input array values to target_dtype limits.
+    """Normalize ``array`` to the limits of ``target_dtype``.
 
     First, normalizes to [0,1] using the array.min() and array.max() values.
     Then scales to dtype `np.iinfo(target_dtype)` min and mix.
@@ -568,7 +575,7 @@ def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
 
 
 def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
-    """Normalize to UInt8
+    """Normalize ``array`` into the ``uint8`` range.
 
     Parameters
     ----------
@@ -582,7 +589,7 @@ def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
 
 
 def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
-    """Normalize to UInt16
+    """Normalize ``array`` into the ``uint16`` range.
 
     Parameters
     ----------
@@ -596,7 +603,7 @@ def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
 
 
 def normalize_int8(array: ArrayT) -> Array_Int8_T:
-    """Normalize to Int8
+    """Normalize ``array`` into the ``int8`` range.
 
     Parameters
     ----------
@@ -610,7 +617,7 @@ def normalize_int8(array: ArrayT) -> Array_Int8_T:
 
 
 def normalize_int16(array: ArrayT) -> Array_Int16_T:
-    """Normalize to Int16
+    """Normalize ``array`` into the ``int16`` range.
 
     Parameters
     ----------
@@ -624,7 +631,7 @@ def normalize_int16(array: ArrayT) -> Array_Int16_T:
 
 
 def normalize_int32(array: ArrayT) -> Array_Int32_T:
-    """Normalize to Int32
+    """Normalize ``array`` into the ``int32`` range.
 
     Parameters
     ----------
@@ -638,7 +645,7 @@ def normalize_int32(array: ArrayT) -> Array_Int32_T:
 
 
 def normalize_int64(array: ArrayT) -> Array_Int64_T:
-    """Normalize to Int64
+    """Normalize ``array`` into the ``int64`` range.
 
     Parameters
     ----------
