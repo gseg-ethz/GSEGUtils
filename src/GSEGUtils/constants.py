@@ -11,6 +11,14 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Numeric constants and shared Pydantic ``ConfigDict`` / validator factories.
+
+Exposes :data:`EPS`, :data:`PI`, :data:`HALF_PI`, :data:`TWO_PI` plus the canonical
+:data:`DEFAULT_CONFIG` / :data:`VALIDATE_RETURN_CONFIG` Pydantic configurations and
+the :func:`validate_variables` decorator that wraps :func:`pydantic.validate_call`
+with the validate-return variant.
+"""
+
 from numpy import finfo, float32, pi
 from pydantic import ConfigDict, validate_call
 

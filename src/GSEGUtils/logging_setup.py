@@ -11,6 +11,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Coloured-console + rotating-file logging configuration helpers."""
+
 import logging
 import logging.config
 import tempfile
@@ -25,6 +27,23 @@ def setup_logging(
     console_level: LOGGING_LEVELS = "WARNING",
     file_level: LOGGING_LEVELS = "DEBUG",
 ) -> Path:
+    """Install a coloured-console + file logging configuration via :func:`logging.config.dictConfig`.
+
+    Parameters
+    ----------
+    logfile_path : pathlib.Path or str, optional
+        Destination file for the file handler. When ``None`` a fresh temporary
+        directory is created and ``debug.log`` inside it is used.
+    console_level : LOGGING_LEVELS, optional
+        Threshold for the stdout handler. Default is ``"WARNING"``.
+    file_level : LOGGING_LEVELS, optional
+        Threshold for the file handler. Default is ``"DEBUG"``.
+
+    Returns
+    -------
+    pathlib.Path
+        The resolved log-file path actually configured.
+    """
     if logfile_path is None:
         logfile_path = Path(tempfile.mkdtemp()) / "debug.log"
     elif isinstance(logfile_path, str):

@@ -11,6 +11,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Lazy disk-backed cache primitives.
+
+Exposes :class:`LazyDiskCache` (per-array offload-to-disk wrapper),
+:class:`LazyDiskCacheConfig` / :class:`LazyDiskCacheKw` (configuration helpers),
+:class:`DiskBackedNDArray` (single-pickle-file ndarray proxy), and
+:class:`DiskBackedStore` (collection of named :class:`LazyDiskCache` entries
+sharing a cache directory).
+"""
+
 __all__ = [
     "LazyDiskCache",
     "LazyDiskCacheKw",
