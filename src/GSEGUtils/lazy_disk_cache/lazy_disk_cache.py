@@ -41,6 +41,14 @@ from pydantic.dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Phase 4 PERF-04 D-04: optional psutil for RAM-aware chunk sizing; ImportError fallback.
+try:
+    import psutil  # noqa: F401
+except ImportError:  # pragma: no cover
+    psutil = None  # type: ignore[assignment]
+
+_MEMMAP_FALLBACK_CHUNK_BYTES = 64 * 1024**2  # 64 MB (D-04 default)
+
 
 def _purge_cache_pair(cache_path: Path) -> None:
     """Unlink ``cache_path`` and its paired ``.meta.json`` sidecar (FRAG-03 / W-1).
@@ -204,15 +212,30 @@ class LazyDiskCache(ABC):
     def _convert_to_memmap(self) -> None:
         """Allocate (or reopen) the persistent memmap and adopt it as the live buffer.
 
-        The previous in-memory array is fully faulted into RAM and copied into
-        the memmap before the subclass buffer pointer is swapped over. The old
-        array is not flushed or freed by this method.
+        Notes
+        -----
+        Phase 4 PERF-04 D-04 / D-06: small arrays use the fast in-RAM copy path
+        (today's behaviour); arrays exceeding the per-host chunk budget
+        (~10% of ``psutil.virtual_memory().available``, or
+        ``_MEMMAP_FALLBACK_CHUNK_BYTES`` when psutil is unavailable) are
+        streamed in row-chunks. The new code never materialises a full-RAM
+        copy of the source array on the streaming path.
         """
         with self._lock:
             shape, dtype, array = self._describe_buffer()
-            array = np.array(array, dtype=dtype, copy=True)  # fully fault into RAM
 
-            # 1) allocate or reopen the mmap file
+            # D-04 chunk budget: RAM-fraction if psutil is available, else fixed-bytes.
+            item_size_per_row = array.itemsize * (
+                int(np.prod(array.shape[1:])) if array.ndim > 1 else 1
+            )
+            chunk_bytes = (
+                int(psutil.virtual_memory().available * 0.10)
+                if psutil is not None
+                else _MEMMAP_FALLBACK_CHUNK_BYTES
+            )
+            chunk_rows = max(1, chunk_bytes // max(1, item_size_per_row))
+
+            # 1) allocate or reopen the mmap file (unchanged from pre-rewrite)
             if self._mmap is None:
                 self._cache_path.parent.mkdir(parents=True, exist_ok=True)
                 mode: Literal["w+", "r+"] = "w+" if not self._cache_path.exists() else "r+"
@@ -220,7 +243,14 @@ class LazyDiskCache(ABC):
             elif self._mmap.mode != "r+":
                 self._mmap = np.memmap(self._cache_path, dtype=dtype, mode="r+", shape=shape)
 
-            self._mmap[:] = array
+            # D-06 fast path: small arrays use today's one-shot copy semantics.
+            if array.nbytes < chunk_bytes:
+                array_copy = np.array(array, dtype=dtype, copy=True)
+                self._mmap[:] = array_copy
+            else:
+                # D-06 streaming path: chunked slice-write, no full-RAM copy.
+                for start in range(0, shape[0], chunk_rows):
+                    self._mmap[start:start + chunk_rows] = array[start:start + chunk_rows]
 
             # 2) hand the memmap off to your subclass as the live buffer
             self._set_buffer(self._mmap)
