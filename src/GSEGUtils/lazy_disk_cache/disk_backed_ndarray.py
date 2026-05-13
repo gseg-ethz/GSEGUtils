@@ -152,7 +152,16 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
         return self._shape, self._dtype, self._data
 
     def _drop_buffer(self) -> None:
-        self._data = None  # type: ignore
+        """Delete the in-memory buffer; direct ``_data`` reads then raise ``AttributeError`` (BUG-02 fix).
+
+        The :meth:`__array__` and :meth:`__getitem__` `@LazyDiskCache.ensure_loaded`
+        decorators and the :attr:`data` property's ``offloaded``-check
+        re-materialise the buffer on the next public access. Only callers that
+        bypass those paths (and reach for ``self._data`` directly) will see the
+        ``AttributeError`` — which is the intended contract.
+        """
+        if hasattr(self, "_data"):
+            del self._data
 
     def _describe_shape_dtype(self) -> tuple[tuple[int, ...], DTypeLike]:
         return self._shape, self._dtype
