@@ -443,11 +443,23 @@ def normalize_min_max(
     return np.clip(array, lower, upper).astype(target_dtype)
 
 
-def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
+def linear_map_dtype(
+    array: ArrayT,
+    target_dtype: npt.DtypeLike,
+    *,
+    source_range: tuple[float, float] = (0.0, 1.0),
+) -> ArrayT:
     """Linearly map the array values to the target dtype.
 
     This function maps the input array values based on the current datatype's minimum
     and maximum supported values to those of the target datatype.
+
+    Float-input path: clip to ``source_range`` then linearly map to the
+    target dtype's :func:`numpy.iinfo` range (clip-and-saturate, Phase 4
+    D-12 / D-16). NaN / +Inf / -Inf input raises ``ValueError`` (D-14).
+    Integer-input path: passes through ``normalize_min_max`` against the
+    source dtype's :func:`numpy.iinfo`; ``source_range`` is silently
+    ignored when ``array.dtype.kind in ('u', 'i')`` (D-15).
 
     Examples
     --------
@@ -465,6 +477,10 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
         Input array
     target_dtype :  npt.DtypeLike
         Target dtype (64-bit types not supported)
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive range of the float input that maps onto the target dtype's
+        full ``iinfo`` extent. Values outside the range are clipped before
+        scaling (D-12). Silently ignored for integer input (D-15).
 
     Returns
     -------
@@ -473,40 +489,61 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
     Raises
     ------
     ValueError
-        Dtype is 64-bit (e.g., np.float64, np.int64, np.uint64).
+        Dtype is 64-bit (e.g., np.float64, np.int64, np.uint64); or the
+        float input contains NaN / +Inf / -Inf (D-14); or ``source_range``
+        bounds are non-finite or not strictly increasing.
     TypeError
         Non-floating or integer object type passed
+
+    Notes
+    -----
+    Phase 4 D-12 / D-16: the clip-and-saturate policy replaces the prior
+    pass-through behaviour for unbounded floats. Callers that relied on the
+    default ``[0, 1]`` source range continue to work unchanged; callers
+    that fed signed-float input ``[-1, 1]`` must pass
+    ``source_range=(-1.0, 1.0)`` explicitly.
     """
+    lower, upper = source_range
+    if not (np.isfinite(lower) and np.isfinite(upper) and lower < upper):
+        raise ValueError(f"source_range must be finite and lower<upper; got ({lower}, {upper})")
+
     array = np.asarray(array)
 
     if target_dtype in (np.float64, np.int64, np.uint64):
         raise ValueError("Target type cannot be 64bit")
 
-    def get_dtype_min_max(dt: npt.DtypeLike) -> tuple[float, float]:
-        if np.issubdtype(dt, np.integer):
-            return np.iinfo(dt).min, np.iinfo(dt).max
-        elif np.issubdtype(dt, np.floating):
-            # TODO add check here for values outside of range
-            return 0.0, 1.0
-        else:
-            raise TypeError(f"Invalid dtype detected: {dt}")
-
     # Types match, exit
     if array.dtype == target_dtype:
         return array
 
-    # Get the corresponding min and max from the type info
-    origin_min, origin_max = get_dtype_min_max(array.dtype)
-    target_min, target_max = get_dtype_min_max(target_dtype)
+    # Compute source-domain (v_min, v_max) per dtype family.
+    if np.issubdtype(array.dtype, np.floating):
+        if not np.all(np.isfinite(array)):
+            raise ValueError(
+                f"linear_map_dtype: input contains NaN/Inf (target_dtype={np.dtype(target_dtype).name})"
+            )
+        array = np.clip(array, lower, upper)
+        v_min, v_max = float(lower), float(upper)
+    elif np.issubdtype(array.dtype, np.integer):
+        # D-15: integer-input path ignores source_range.
+        v_min = float(np.iinfo(array.dtype).min)
+        v_max = float(np.iinfo(array.dtype).max)
+    else:
+        raise TypeError(f"Invalid source dtype detected: {array.dtype}")
 
-    return normalize_min_max(
-        array=array,
-        lower=target_min,
-        upper=target_max,
-        target_dtype=target_dtype,
-        v_min=origin_min,
-        v_max=origin_max,
-    )
+    # Dispatch on target dtype family.
+    if np.issubdtype(target_dtype, np.floating):
+        return normalize_min_max(array, 0.0, 1.0, target_dtype, v_min, v_max)
+    if np.issubdtype(target_dtype, np.integer):
+        return normalize_min_max(
+            array,
+            np.iinfo(target_dtype).min,
+            np.iinfo(target_dtype).max,
+            target_dtype,
+            v_min,
+            v_max,
+        )
+    raise TypeError(f"Invalid target dtype detected: {target_dtype}")
 
 
 def normalize_self(array: ArrayT) -> ArrayT:
@@ -532,79 +569,137 @@ def normalize_self(array: ArrayT) -> ArrayT:
     return normalize_min_max(array, lower, upper, array.dtype)
 
 
-def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
+def _normalize_base(
+    array: ArrayT,
+    target_dtype: npt.DtypeLike,
+    *,
+    source_range: tuple[float, float] = (0.0, 1.0),
+) -> ArrayT:
     """Normalize ``array`` to the limits of ``target_dtype``.
 
-    First, normalizes to [0,1] using the array.min() and array.max() values.
-    Then scales to dtype `np.iinfo(target_dtype)` min and mix.
+    Float-input path: clip to ``source_range``, then linearly scale to the
+    target dtype's range (``[0.0, 1.0]`` for float targets,
+    :func:`numpy.iinfo` extremes for integer targets). NaN / +Inf / -Inf
+    raises ``ValueError``.
+
+    Integer-input path: passes through :func:`normalize_min_max` against
+    the target dtype's extremes. ``source_range`` is silently ignored for
+    integer inputs.
 
     Parameters
     ----------
     array : ArrayT
-        The input array to be normalized
+        The input array to be normalized.
     target_dtype : npt.DtypeLike
-        Tar
+        The target numpy dtype. Float and integer dtypes are supported.
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive ``(lower, upper)`` interval of the float input that maps
+        onto the target dtype's full range. Values outside ``source_range``
+        are clipped before scaling (Phase 4 D-12). The bounds must be
+        finite and strictly increasing — misuse raises ``ValueError``.
 
     Returns
     -------
     ArrayT
+
+    Raises
+    ------
+    ValueError
+        If ``source_range`` bounds are non-finite or not strictly
+        increasing, or if a float input contains NaN / +Inf / -Inf
+        (Phase 4 D-14).
+
+    Notes
+    -----
+    Phase 4 D-12 / D-16: the clip-and-saturate policy replaces the prior
+    auto-detect branching on ``[0, 1]`` / ``[-1, 1]`` / min-max-rescale.
+    Callers that relied on the auto-detect behaviour (e.g. signed-float
+    input ``[-1, 1]``) must pass ``source_range=(-1.0, 1.0)`` explicitly.
+    Integer-input semantics are unchanged; ``source_range`` is silently
+    ignored when ``array.dtype.kind in ('u', 'i')`` (Phase 4 D-15).
     """
+    lower, upper = source_range
+    if not (np.isfinite(lower) and np.isfinite(upper) and lower < upper):
+        raise ValueError(f"source_range must be finite and lower<upper; got ({lower}, {upper})")
+
     array = np.asarray(array)
 
     if array.dtype != target_dtype:
+        if np.issubdtype(array.dtype, np.floating):
+            if not np.all(np.isfinite(array)):
+                raise ValueError(
+                    f"_normalize_base: input contains NaN/Inf (target_dtype={np.dtype(target_dtype).name})"
+                )
+            array = np.clip(array, lower, upper)
+            if np.issubdtype(target_dtype, np.floating):
+                # float -> float: linear remap [lower, upper] -> [0, 1]
+                return normalize_min_max(array, 0.0, 1.0, target_dtype, lower, upper)
+            return normalize_min_max(
+                array,
+                np.iinfo(target_dtype).min,
+                np.iinfo(target_dtype).max,
+                target_dtype,
+                lower,
+                upper,
+            )
+
+        # Integer-input path: unchanged from prior implementation
+        # (source_range silently ignored per D-15)
         if np.issubdtype(target_dtype, np.floating):
-            return normalize_min_max(array, 0, 1, target_dtype)
-
-        if 0 <= array.min() <= array.max() <= 1:
-            return normalize_min_max(
-                array,
-                np.iinfo(target_dtype).min,
-                np.iinfo(target_dtype).max,
-                target_dtype,
-                0,
-                1,
-            )
-
-        elif -1 <= array.min() <= array.max() <= 1:
-            return normalize_min_max(
-                array,
-                np.iinfo(target_dtype).min,
-                np.iinfo(target_dtype).max,
-                target_dtype,
-                -1,
-                1,
-            )
-
-        return normalize_min_max(array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype)
+            return normalize_min_max(array, 0.0, 1.0, target_dtype)
+        return normalize_min_max(
+            array,
+            np.iinfo(target_dtype).min,
+            np.iinfo(target_dtype).max,
+            target_dtype,
+        )
     return array
 
 
-def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
+def normalize_uint8(array: ArrayT, *, source_range: tuple[float, float] = (0.0, 1.0)) -> Array_Uint8_T:
     """Normalize ``array`` into the ``uint8`` range.
+
+    Float-input path: clip to ``source_range`` then linearly scale to
+    ``[0, 255]`` (clip-and-saturate, Phase 4 D-12). NaN / +Inf / -Inf
+    raises ``ValueError`` (D-14). Integer-input path: ``source_range`` is
+    silently ignored (D-15).
 
     Parameters
     ----------
     array : ArrayT
+        Input array (float or integer dtype).
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive interval of the float input that maps onto ``[0, 255]``.
+        See :func:`_normalize_base` for full semantics.
 
     Returns
     -------
     Array_Uint8_T
     """
-    return _normalize_base(array, np.uint8)
+    return _normalize_base(array, np.uint8, source_range=source_range)
 
 
-def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
+def normalize_uint16(array: ArrayT, *, source_range: tuple[float, float] = (0.0, 1.0)) -> Array_Uint16_T:
     """Normalize ``array`` into the ``uint16`` range.
+
+    Float-input path: clip to ``source_range`` then linearly scale to
+    ``[0, 65535]`` (clip-and-saturate, Phase 4 D-12). NaN / +Inf / -Inf
+    raises ``ValueError`` (D-14). Integer-input path: ``source_range`` is
+    silently ignored (D-15).
 
     Parameters
     ----------
     array : ArrayT
+        Input array (float or integer dtype).
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive interval of the float input that maps onto ``[0, 65535]``.
+        See :func:`_normalize_base` for full semantics.
 
     Returns
     -------
     Array_Uint16_T
     """
-    return _normalize_base(array, np.uint16)
+    return _normalize_base(array, np.uint16, source_range=source_range)
 
 
 def normalize_int8(array: ArrayT) -> Array_Int8_T:
