@@ -34,7 +34,8 @@ dependencies = [ # https://packaging.python.org/en/latest/specifications/depende
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
     "numpy >= 2.0, < 2.4",
     "pydantic ~= 2.11",
-    "numpydantic ~= 1.6"
+    "numpydantic ~= 1.6",
+    "psutil ~= 7.0",  # Phase 4 PERF-04 D-05 — RAM-aware streaming chunk size
 ]
 
 [tool.setuptools.dynamic]
@@ -94,4 +95,10 @@ dev = [
     "pytest~=8.4",            # test framework
     "pytest-cov~=5.0",        # pytest coverage plugin
     "coverage~=7.0",          # coverage reporting
+    "pytest-benchmark ~= 5.2",  # Phase 4 D-30 — opt-in microbenchmark plugin (excluded from CI)
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: opt-in microbenchmark (excluded from CI via `-m \"not benchmark\"`)",
 ]
