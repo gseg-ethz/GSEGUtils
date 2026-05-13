@@ -403,6 +403,86 @@ def test_normalize_to_dedicated_int_dtype_funcs(func, dtype: np.dtype):
     assert np.allclose(computed, values)
 
 
+# ---------------------------------------------------------------------------
+# COUPLE-05 (Phase 4 D-12 / D-13 / D-14 / D-15 / D-16) regression suite.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("func", "dtype"),
+    (
+        (normalize_uint8, np.uint8),
+        (normalize_uint16, np.uint16),
+        (lambda a, **kw: linear_map_dtype(a, np.uint8, **kw), np.uint8),
+        (lambda a, **kw: linear_map_dtype(a, np.uint16, **kw), np.uint16),
+    ),
+)
+def test_normalize_uint_clip_and_saturate(func, dtype):
+    """COUPLE-05 D-12 / D-18 #1: default source_range=(0.0, 1.0) clips."""
+    out = func(np.array([-0.1, 0.5, 1.2], dtype=np.float64))
+    assert out.dtype == dtype
+    assert out[0] == np.iinfo(dtype).min  # clipped below default lower (0.0)
+    assert out[-1] == np.iinfo(dtype).max  # clipped above default upper (1.0)
+
+
+@pytest.mark.parametrize(
+    ("func", "dtype"),
+    (
+        (normalize_uint8, np.uint8),
+        (normalize_uint16, np.uint16),
+        (lambda a, **kw: linear_map_dtype(a, np.uint8, **kw), np.uint8),
+        (lambda a, **kw: linear_map_dtype(a, np.uint16, **kw), np.uint16),
+    ),
+)
+def test_normalize_uint_custom_source_range(func, dtype):
+    """COUPLE-05 D-13 / D-18 #2: caller-supplied source_range remaps endpoints."""
+    out = func(np.array([-0.5, 0.0, 0.5], dtype=np.float64), source_range=(-0.5, 0.5))
+    assert out.dtype == dtype
+    assert out[0] == np.iinfo(dtype).min
+    assert out[-1] == np.iinfo(dtype).max
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_normalize_uint_nan_inf_raises(bad):
+    """COUPLE-05 D-14 / D-18 #3: NaN / +Inf / -Inf in float input raises ValueError."""
+    with pytest.raises(ValueError, match=r"NaN/Inf"):
+        normalize_uint8(np.array([0.5, bad, 0.8], dtype=np.float64))
+
+
+def test_normalize_uint_integer_input_bypass():
+    """COUPLE-05 D-15 / D-18 #4: source_range silently ignored for integer input.
+
+    Integer-input path is preserved byte-for-byte; the kwarg is documented as
+    float-source-only. Confirms that passing a wildly-incorrect source_range
+    against an integer-dtype array produces identical output to omitting it.
+    """
+    arr = np.array([0, 128, 255], dtype=np.uint16)
+    with_kw = normalize_uint8(arr, source_range=(-100.0, 100.0))
+    without_kw = normalize_uint8(arr)
+    assert np.array_equal(with_kw, without_kw)
+    assert with_kw.dtype == np.uint8
+
+
+@pytest.mark.parametrize(
+    "bad_range",
+    [
+        (1.0, 0.0),  # lower > upper
+        (0.5, 0.5),  # lower == upper
+        (np.nan, 1.0),  # non-finite lower
+        (0.0, np.inf),  # non-finite upper
+        (-np.inf, 0.0),  # non-finite lower
+    ],
+)
+def test_normalize_uint_invalid_source_range_raises(bad_range):
+    """COUPLE-05 Claude's-Discretion / D-18 #5: bad source_range raises ValueError.
+
+    `lower < upper` and both bounds finite is validated inline by
+    `_normalize_base` (researcher discretion per CONTEXT D-13).
+    """
+    with pytest.raises(ValueError, match=r"source_range"):
+        normalize_uint8(np.array([0.5], dtype=np.float64), source_range=bad_range)
+
+
 def test_normalize_min_max_basic_types():
     # Test case 1: Float to uint8
     float_array = np.array([0.0, 0.5, 1.0])
