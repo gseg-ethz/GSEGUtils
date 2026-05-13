@@ -26,8 +26,6 @@ classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyprojec
     "Framework :: Pydantic",
 
     "License :: OSI Approved :: BSD License",
-
-    "Private :: Do Not Upload", # REMOVE BEFORE FLIGHT -- PyPI will always reject packages with classifiers beginning with Private ::
 ]
 
 dynamic = ["version", "readme"]
