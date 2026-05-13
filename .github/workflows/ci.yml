@@ -83,7 +83,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run tests
-        run: pytest --cov=GSEGUtils --cov-report=xml
+        run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml
 
       - name: Upload coverage to Codecov
         if: success()
