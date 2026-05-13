@@ -813,15 +813,30 @@ def test_normalize_base_invalid_inputs():
 
 
 def test_normalize_base_special_values():
-    """Test handling of special floating point values"""
+    """Test handling of special floating point values.
+
+    Phase 4 D-14: NaN / +Inf / -Inf in float input raises ValueError.
+    Previously this test asserted graceful handling — that behaviour was a
+    data-quality bug (NaN/Inf silently propagated as nonsense uint values).
+    """
     array = np.array([np.inf, -np.inf, np.nan, 1.0, 0.0], dtype=np.float64)
 
-    # To float
-    result_float = _normalize_base(array, np.float32)
-    assert result_float.dtype == np.float32
-    assert np.all(np.isfinite(result_float[~np.isnan(result_float)]))
+    # To float — NaN/Inf must raise
+    with pytest.raises(ValueError, match=r"NaN/Inf"):
+        _normalize_base(array, np.float32)
 
-    # To int
-    result_int = _normalize_base(array, np.uint8)
-    assert result_int.dtype == np.uint8
-    assert np.all((result_int >= 0) & (result_int <= 255))
+    # To int — NaN/Inf must raise
+    with pytest.raises(ValueError, match=r"NaN/Inf"):
+        _normalize_base(array, np.uint8)
+
+
+def test_normalize_base_clip_and_saturate_canary():
+    """Phase 4 D-12 / D-16 canary: float input outside default source_range clips.
+
+    Pre-fix behaviour rescaled by (array.min, array.max). Post-fix clips to
+    source_range=(0.0, 1.0) by default and saturates to target iinfo extremes.
+    """
+    out = _normalize_base(np.array([-0.1, 0.5, 1.2], dtype=np.float64), np.uint8)
+    assert out.dtype == np.uint8
+    assert out[0] == 0  # clipped below default lower (0.0)
+    assert out[-1] == 255  # clipped above default upper (1.0)
