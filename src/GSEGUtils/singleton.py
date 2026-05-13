@@ -37,7 +37,23 @@ class SingletonMeta(type):
     _lock: ClassVar[threading.RLock] = threading.RLock()
 
     def __call__(cls, *args, **kwargs):
-        """Return the singleton instance for ``cls``, constructing it on first call.
+        r"""Return the singleton instance for ``cls``, constructing it on first call.
+
+        Notes
+        -----
+        The fast path (post-first-init) is lock-free: a single ``dict.get`` on
+        ``cls._instances`` under CPython's GIL is atomic, so the common case
+        returns the cached instance without acquiring ``cls._lock``. The slow
+        path -- taken on the first call and on any race window before the
+        first construction completes -- acquires ``cls._lock``, re-checks the
+        registry (the double-check), and only then runs ``super().__call__``.
+
+        Under free-threaded Python (PEP 703 / 3.13t) the GIL is removed and
+        the fast-path read of ``cls._instances`` becomes a data race; the
+        slow-path lock alone is no longer sufficient. PROJECT.md pins Python
+        3.12 only, so this is forward-looking documentation rather than a
+        runtime concern. Revisit this pattern if 3.13t is ever added as a
+        supported runtime.
 
         Parameters
         ----------
@@ -51,7 +67,12 @@ class SingletonMeta(type):
         object
             The single live instance of ``cls``.
         """
+        instance = cls._instances.get(cls)
+        if instance is not None:
+            return instance
         with cls._lock:
-            if cls not in cls._instances:
-                cls._instances[cls] = super().__call__(*args, **kwargs)
-            return cls._instances[cls]
+            instance = cls._instances.get(cls)
+            if instance is None:
+                instance = super().__call__(*args, **kwargs)
+                cls._instances[cls] = instance
+            return instance
