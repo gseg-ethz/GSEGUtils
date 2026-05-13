@@ -96,8 +96,45 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
         return arr.astype(dtype, copy=True) if dtype else arr.copy()
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        """Reject ufunc participation; tracked as BUG-01 (see CONCERNS.md)."""
-        raise NotImplementedError("Not implemented.")
+        """Participate in NumPy ufunc dispatch (BUG-01 fix; see CONCERNS.md).
+
+        Substitutes any :class:`DiskBackedNDArray` inputs (or ``out=`` targets)
+        with their underlying ``_data`` ndarray (loading from disk if offloaded),
+        then delegates to ``getattr(ufunc, method)(*inputs, **kwargs)``. Returns
+        the raw ndarray result — does NOT re-wrap into a new
+        :class:`DiskBackedNDArray`.
+
+        Parameters
+        ----------
+        ufunc : numpy.ufunc
+            The ufunc being applied.
+        method : str
+            One of ``"__call__"``, ``"reduce"``, ``"reduceat"``, ``"accumulate"``,
+            ``"outer"``, ``"inner"``.
+        *inputs
+            The positional inputs to the ufunc, which may include
+            :class:`DiskBackedNDArray` instances.
+        **kwargs
+            Keyword arguments forwarded to the ufunc. ``out`` is unwrapped
+            specially.
+
+        Returns
+        -------
+        numpy.ndarray
+            The plain ndarray ufunc result.
+        """
+        def _unwrap(x):
+            if isinstance(x, DiskBackedNDArray):
+                if x.offloaded:
+                    x.load()
+                return x._data
+            return x
+
+        inputs_unwrapped = tuple(_unwrap(x) for x in inputs)
+        if "out" in kwargs:
+            kwargs["out"] = tuple(_unwrap(x) for x in kwargs["out"])
+
+        return getattr(ufunc, method)(*inputs_unwrapped, **kwargs)
 
     @LazyDiskCache.ensure_loaded
     def __getitem__(self, key):
