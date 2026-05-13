@@ -578,3 +578,51 @@ def test_atomic_offload_tmp_cleanup_after_any_failure(tmp_cache_dir: Path, monke
     assert not (tmp_cache_dir / "kc.meta.json").exists(), (
         "no final .meta.json should exist when failure precedes the meta rename"
     )
+
+
+# ---------------------------------------------------------------------------
+# Plan 03-01 / BUG-01 + BUG-02 regression tests.
+# ---------------------------------------------------------------------------
+#
+# BUG-01: DiskBackedNDArray.__array_ufunc__ used to unconditionally raise
+# NotImplementedError, so `disk_backed + 1` and every other numpy ufunc
+# operation failed. The fix delegates to the NDArrayOperatorsMixin canonical
+# recipe (unwrap DiskBackedNDArray inputs and forward to the ufunc) so
+# arithmetic returns a plain ndarray.
+#
+# BUG-02: DiskBackedNDArray._drop_buffer used to set `self._data = None`,
+# meaning a direct read of `bd._data` after `offload()` silently returned
+# None instead of failing loudly. The fix `del`s the attribute instead, so
+# direct reads raise AttributeError while the public `.data` property
+# transparently re-materialises the buffer via `load()`.
+
+
+def test_disk_backed_ndarray_ufunc_after_offload(tmp_path):
+    """BUG-01 positive: ``disk_backed + 1`` works even after offload, returning a plain ndarray."""
+    arr = np.arange(12).reshape(4, 3).astype(np.float64)
+    bd = DiskBackedNDArray(
+        arr.copy(),
+        enable_caching=True,
+        cache_path=tmp_path / "ent.dat",
+        automatic_offloading=False,
+    )
+    bd.offload()
+    result = bd + 1.0
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, arr + 1.0)
+
+
+def test_disk_backed_ndarray_direct_data_after_offload(tmp_path):
+    """BUG-02 negative: direct ``_data`` access after offload raises AttributeError; ``.data`` re-loads."""
+    arr = np.arange(12).reshape(4, 3).astype(np.float64)
+    bd = DiskBackedNDArray(
+        arr.copy(),
+        enable_caching=True,
+        cache_path=tmp_path / "ent.dat",
+        automatic_offloading=False,
+    )
+    bd.offload()
+    with pytest.raises(AttributeError):
+        _ = bd._data
+    # Public `.data` property re-materialises:
+    np.testing.assert_array_equal(bd.data, arr)
