@@ -7,14 +7,17 @@ Plan 02-05 extends with atomicity regression tests.
 """
 
 import gc
+import importlib
 import json
 import os
 import pickle
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from GSEGUtils.lazy_disk_cache import lazy_disk_cache as ldc_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import (
     _LAZY_DISK_CACHE_CLASS_REGISTRY,
@@ -626,3 +629,109 @@ def test_disk_backed_ndarray_direct_data_after_offload(tmp_path):
         _ = bd._data
     # Public `.data` property re-materialises:
     np.testing.assert_array_equal(bd.data, arr)
+
+
+# ---------------------------------------------------------------------------
+# Plan 04-04 / PERF-04 — D-07 unit tests for the chunked-streaming rewrite
+# ---------------------------------------------------------------------------
+
+
+def test_convert_to_memmap_fast_path(tmp_path):
+    """D-07 #1: small array (nbytes < chunk_bytes) uses the one-shot fast path.
+
+    With the default ~10% of available RAM chunk budget (or the 64 MB fallback
+    when psutil is None), a 40-byte float32 array is always smaller than
+    ``chunk_bytes`` so the fast path runs. Asserts the memmap contents are
+    byte-identical to the source — i.e. no behavioural change for small arrays
+    under the PERF-04 rewrite (D-06 contract).
+    """
+    arr = np.arange(10, dtype=np.float32)
+    cache_path = tmp_path / "fast.dat"
+    bd = DiskBackedNDArray(
+        arr.copy(),
+        enable_caching=True,
+        cache_path=cache_path,
+        purge_disk_on_gc=False,
+        automatic_offloading=False,
+    )
+    assert bd._mmap is not None
+    np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
+    np.testing.assert_array_equal(np.asarray(bd), arr)
+
+
+def test_convert_to_memmap_streaming_path(tmp_path, monkeypatch):
+    """D-07 #2: monkeypatch the chunk-budget constant low + psutil=None to force the streaming path.
+
+    With ``_MEMMAP_FALLBACK_CHUNK_BYTES = 1024`` and ``psutil = None`` the
+    chunk budget is 1024 bytes; a 100 KB float32 array (102_400 bytes) exceeds
+    that threshold so the streaming loop runs. Asserts byte-identical output
+    to the source — the streaming path must not corrupt content vs the fast
+    path (D-06 invariant).
+    """
+    # Force psutil=None so chunk_bytes = _MEMMAP_FALLBACK_CHUNK_BYTES (1024).
+    monkeypatch.setattr(ldc_mod, "psutil", None, raising=True)
+    monkeypatch.setattr(ldc_mod, "_MEMMAP_FALLBACK_CHUNK_BYTES", 1024, raising=True)
+
+    # 25_600 float32 = 102_400 bytes >> 1024-byte budget, so streaming triggers.
+    rng = np.random.default_rng(0)
+    arr = rng.standard_normal(25_600, dtype=np.float32)
+    cache_path = tmp_path / "streaming.dat"
+    bd = DiskBackedNDArray(
+        arr.copy(),
+        enable_caching=True,
+        cache_path=cache_path,
+        purge_disk_on_gc=False,
+        automatic_offloading=False,
+    )
+    assert bd._mmap is not None
+    np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
+    np.testing.assert_array_equal(np.asarray(bd), arr)
+
+
+def test_convert_to_memmap_import_error_fallback(tmp_path, monkeypatch):
+    """D-07 #3: psutil ImportError fallback uses the fixed-bytes chunk constant.
+
+    Simulates the restricted-runtime case (containers without /proc) by
+    setting ``sys.modules['psutil'] = None`` and reloading the module so the
+    module-top ``try: import psutil except ImportError: psutil = None`` block
+    re-executes and binds ``psutil = None``. Asserts:
+
+    1. After reload, ``ldc_mod.psutil is None`` (the ImportError-fallback
+       state, not the import-succeeded state) — T-04-P4-2 mitigation present.
+    2. ``_convert_to_memmap`` still produces correct memmap contents (the
+       fixed-bytes fallback path stays functionally equivalent).
+
+    Pattern: ``monkeypatch.setitem(sys.modules, 'psutil', None)`` followed by
+    ``importlib.reload(ldc_mod)`` re-evaluates the try-import as if psutil
+    were not installed. The monkeypatch fixture restores ``sys.modules`` at
+    teardown, so a fresh reload at the bottom of the test puts the real
+    psutil binding back for downstream tests.
+    """
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    try:
+        importlib.reload(ldc_mod)
+        assert ldc_mod.psutil is None
+        # Re-import DiskBackedNDArray bound to the reloaded LazyDiskCache.
+        from GSEGUtils.lazy_disk_cache import disk_backed_ndarray as dbna_mod
+
+        importlib.reload(dbna_mod)
+
+        arr = np.arange(64, dtype=np.float32)
+        cache_path = tmp_path / "fallback.dat"
+        bd = dbna_mod.DiskBackedNDArray(
+            arr.copy(),
+            enable_caching=True,
+            cache_path=cache_path,
+            purge_disk_on_gc=False,
+            automatic_offloading=False,
+        )
+        assert bd._mmap is not None
+        np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
+    finally:
+        # Restore the real psutil binding for subsequent tests, regardless of
+        # whether monkeypatch cleanup has run yet.
+        sys.modules.pop("psutil", None)
+        importlib.reload(ldc_mod)
+        from GSEGUtils.lazy_disk_cache import disk_backed_ndarray as dbna_mod
+
+        importlib.reload(dbna_mod)
