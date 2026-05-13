@@ -8,6 +8,7 @@ Plan 02-05 extends with atomicity regression tests.
 
 import gc
 import json
+import os
 import pickle
 from pathlib import Path
 
@@ -395,3 +396,185 @@ def test_finalizer_unlinks_both_npy_and_meta_after_unpickle(tmp_path: Path) -> N
     # W-1 success: both files unlinked through the .npy branch of the helper.
     assert not npy2.exists(), "W-1 regressed: .npy persisted after GC of instance with .npy cache_path"
     assert not meta2.exists(), "W-1 regressed: .meta.json sidecar persisted after GC"
+
+
+# ---------------------------------------------------------------------------
+# Plan 02-05 / FRAG-04 atomicity regression tests (D-09 a/b/c).
+# ---------------------------------------------------------------------------
+#
+# These tests verify the Plan-02-01 codec's atomicity contract at the
+# ``DiskBackedStore._store_entry`` write boundary. The write order is:
+#
+#   1. open ``<key>.npy.tmp``,  ``np.save(allow_pickle=False)``, flush, fsync
+#   2. open ``<key>.meta.json.tmp``, ``json.dump``,                 flush, fsync
+#   3. ``os.replace(<key>.npy.tmp,       <key>.npy)``
+#   4. ``os.replace(<key>.meta.json.tmp, <key>.meta.json)``
+#   5. (POSIX) dir-fsync
+#   * on any exception: best-effort unlink of both ``.tmp`` files, re-raise.
+#
+# We probe three failure points:
+#   (a) ``ENOSPC`` at step 3 (the first ``os.replace`` of the ``.npy.tmp``)
+#       — verifies no torn final files, no ``.tmp`` leftovers, reader sees
+#         KeyError on a fresh load.
+#   (b) ``EIO`` at step 4 (process-kill simulated between the ``.npy`` rename
+#       and the ``.meta.json`` rename) — verifies the half-state
+#       (``.npy`` present, ``.meta.json`` absent) is treated as a cache miss
+#       and ``.tmp`` files are cleaned up.
+#   (c) ``EIO`` at the second fsync (step 2's ``os.fsync`` on the
+#       ``.meta.json.tmp``) — verifies ``.tmp`` cleanup runs before either
+#       rename, no final files appear.
+#
+# All three use pytest's built-in ``monkeypatch`` for failure injection —
+# no Hypothesis, no ``python-atomicwrites``, no other deps (per D-13).
+
+
+def test_atomic_offload_disk_full_at_npy_replace_leaves_no_torn_state(
+    tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 02-05 / FRAG-04 / D-09(a).
+
+    Simulate ``ENOSPC`` at the first ``os.replace(.npy.tmp -> .npy)`` call.
+
+    After the failure: no final ``.npy`` or ``.meta.json`` exists (no torn
+    read possible), the ``.tmp`` cleanup branch removed both temp files,
+    and a fresh ``__getitem__`` (with the in-memory entry cleared to mimic
+    a cross-process reader) raises ``KeyError`` via ``_load_entry``.
+    """
+    store = _make_store(tmp_cache_dir, enable_caching=True)
+    arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    store.add_data_to_store("ka", arr)
+    # Note: ``DiskBackedNDArray.__init__`` (via ``LazyDiskCache._init_from_config``)
+    # may eagerly materialise a ``ka.dat`` memmap in the cache dir; that file
+    # is a per-LazyDiskCache concern and is not produced by ``_store_entry``.
+    # We do NOT assert an empty cache dir here — we only assert on the
+    # ``.npy`` / ``.meta.json`` / ``.tmp`` files that ``_store_entry`` owns.
+
+    real_replace = os.replace
+
+    def fail_on_npy_replace(src: str, dst: str) -> None:
+        if str(src).endswith(".npy.tmp"):
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_on_npy_replace)
+    with pytest.raises(OSError, match="No space left"):
+        store.offload(pickle_container=True)
+
+    # Post-failure invariants:
+    # 1. No final .npy / .meta.json (write never completed past step 3).
+    assert not (tmp_cache_dir / "ka.npy").exists(), "torn write: final .npy materialised despite ENOSPC at rename"
+    assert not (tmp_cache_dir / "ka.meta.json").exists(), (
+        "torn write: final .meta.json materialised despite ENOSPC at rename"
+    )
+    # 2. No .tmp files (cleanup branch ran).
+    leftover = list(tmp_cache_dir.iterdir())
+    assert not any(p.name.endswith(".tmp") for p in leftover), (
+        f"FRAG-04 regressed: .tmp file(s) remain after ENOSPC failure: {leftover}"
+    )
+    # 3. Reader sees KeyError, not a half-state load. Restore os.replace
+    # explicitly (belt-and-suspenders; monkeypatch teardown does this too)
+    # and clear the in-memory entry to simulate a fresh-process reader
+    # that finds only the on-disk state.
+    monkeypatch.setattr(os, "replace", real_replace)
+    store._store["ka"] = None
+    with pytest.raises(KeyError):
+        _ = store["ka"]
+
+
+def test_atomic_offload_half_rename_treated_as_cache_miss(tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan 02-05 / FRAG-04 / D-09(b).
+
+    Simulate a process kill between the ``.npy`` rename and the
+    ``.meta.json`` rename (``EIO`` on the second ``os.replace``). The next
+    ``__getitem__`` MUST treat the half-written entry as a cache miss
+    (``KeyError``), never as a loadable half-state.
+
+    After Plan 02-01's codec, ``_load_entry`` checks
+    ``if not (npy_path.exists() and json_path.exists()): raise KeyError(key)``
+    so a final ``.npy`` without a paired ``.meta.json`` is rejected.
+    """
+    store = _make_store(tmp_cache_dir, enable_caching=True)
+    arr = np.array([[4.0, 5.0, 6.0]], dtype=np.float32)
+    store.add_data_to_store("kb", arr)
+    # The per-LazyDiskCache ``kb.dat`` memmap may exist here; the assertions
+    # below only check ``_store_entry``-owned paths (.npy / .meta.json / .tmp).
+
+    real_replace = os.replace
+
+    def fail_on_meta_json_replace(src: str, dst: str) -> None:
+        if str(src).endswith(".meta.json.tmp"):
+            raise OSError(5, "I/O error")  # simulated mid-rename kill
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_on_meta_json_replace)
+    with pytest.raises(OSError, match="I/O error"):
+        store.offload(pickle_container=True)
+
+    # The .npy rename succeeded; the .meta.json rename did not. The exception
+    # handler unlinks both .tmp paths (.npy.tmp is already gone after the
+    # first os.replace; .meta.json.tmp is unlinked here). The half-state on
+    # disk is: final .npy present, NO final .meta.json, NO .tmp leftovers.
+    assert (tmp_cache_dir / "kb.npy").exists(), (
+        "half-rename test premise: the first os.replace should have succeeded before the second one failed"
+    )
+    assert not (tmp_cache_dir / "kb.meta.json").exists(), (
+        "half-rename test premise: the second os.replace was injected to fail, so the final .meta.json must NOT exist"
+    )
+    leftover = list(tmp_cache_dir.iterdir())
+    assert not any(p.name.endswith(".tmp") for p in leftover), (
+        f"FRAG-04 regressed: .tmp file(s) remain after half-rename failure: {leftover}"
+    )
+
+    # KEY invariant: the reader sees a cache miss, not a half-state load.
+    monkeypatch.setattr(os, "replace", real_replace)
+    store._store["kb"] = None
+    with pytest.raises(KeyError):
+        _ = store["kb"]
+
+
+def test_atomic_offload_tmp_cleanup_after_any_failure(tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan 02-05 / FRAG-04 / D-09(c).
+
+    Inject ``EIO`` on the second ``os.fsync`` call (the ``.meta.json.tmp``
+    fsync, which runs BEFORE either ``os.replace``). At failure time both
+    ``.tmp`` files exist on disk and neither rename has run. The exception
+    handler must unlink both ``.tmp`` files, leaving the cache dir empty.
+
+    The exact failure site is incidental — what matters is the post-failure
+    invariant: zero ``.tmp`` files remain, and no final files were created
+    because the renames never ran.
+    """
+    store = _make_store(tmp_cache_dir, enable_caching=True)
+    arr = np.array([[7.0, 8.0, 9.0]], dtype=np.float32)
+    store.add_data_to_store("kc", arr)
+    # The per-LazyDiskCache ``kc.dat`` memmap may exist here; the assertions
+    # below only check ``_store_entry``-owned paths (.npy / .meta.json / .tmp).
+
+    real_fsync = os.fsync
+    seen_calls = {"count": 0}
+
+    def fail_on_second_fsync(fd: int) -> None:
+        # First fsync = .npy.tmp data flush; second fsync = .meta.json.tmp.
+        # Fail on the second so the .npy.tmp exists at failure time (the
+        # cleanup branch must remove BOTH .tmp files, not just the most
+        # recently opened one).
+        seen_calls["count"] += 1
+        if seen_calls["count"] == 2:
+            raise OSError(5, "fsync failed mid-write")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_on_second_fsync)
+    with pytest.raises(OSError, match="fsync failed"):
+        store.offload(pickle_container=True)
+
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    # Both .tmp files are cleaned up; no final files were created because
+    # neither rename ran (failure happened before step 3).
+    leftover = list(tmp_cache_dir.iterdir())
+    assert not any(p.name.endswith(".tmp") for p in leftover), (
+        f"FRAG-04 regressed: .tmp file(s) remain after fsync failure: {leftover}"
+    )
+    assert not (tmp_cache_dir / "kc.npy").exists(), "no final .npy should exist when failure precedes the npy rename"
+    assert not (tmp_cache_dir / "kc.meta.json").exists(), (
+        "no final .meta.json should exist when failure precedes the meta rename"
+    )
