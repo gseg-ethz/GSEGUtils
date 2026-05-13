@@ -42,6 +42,23 @@ from pydantic.dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def _purge_cache_pair(cache_path: Path) -> None:
+    """Unlink ``cache_path`` and its paired ``.meta.json`` sidecar (FRAG-03 / W-1).
+
+    The Plan-02-01 codec writes each entry as a ``<key>.npy + <key>.meta.json``
+    pair. The finalizer must unlink both files; otherwise the sidecar leaks
+    across the GC of the owning :class:`LazyDiskCache` instance.
+
+    Safe to call with a path whose suffix is not ``.npy`` — only the primary
+    ``cache_path`` is unlinked in that case (backwards-compatible with the
+    canonical ``_MEMMAP_SUFFIX`` (``.dat``) memmap path produced by
+    :meth:`LazyDiskCache._init_from_config`).
+    """
+    cache_path.unlink(missing_ok=True)
+    if cache_path.suffix == ".npy":
+        cache_path.with_suffix(".meta.json").unlink(missing_ok=True)
+
+
 class LazyDiskCacheKw(TypedDict, total=False):
     """Keyword-argument TypedDict for :class:`LazyDiskCache` constructors.
 
@@ -182,7 +199,7 @@ class LazyDiskCache(ABC):
         if config.automatic_offloading:
             self.offload()
         if self._cache_path and self._purge_disk_on_gc:
-            self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))  # type: ignore
+            self._finalizer = weakref.finalize(self, _purge_cache_pair, self._cache_path)
 
     def _convert_to_memmap(self) -> None:
         """Allocate (or reopen) the persistent memmap and adopt it as the live buffer.
@@ -323,8 +340,10 @@ class LazyDiskCache(ABC):
                 # already enabled
                 self._purge_disk_on_gc = True
                 return
-            # register a new finalizer
-            self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
+            # register a new finalizer (FRAG-03 / W-1: unlinks both <key>.npy + sidecar
+            # when the path uses the .npy convention; falls through to single-file
+            # unlink for the canonical ``.dat`` memmap path).
+            self._finalizer = weakref.finalize(self, _purge_cache_pair, self._cache_path)
             self._purge_disk_on_gc = True
             logger.debug(f"Enabled purge for {self._cache_path}")
 
@@ -421,23 +440,52 @@ class LazyDiskCache(ABC):
     #     }
 
     def __getstate__(self):
-        """Detach the finalizer, offload to disk, and return a pickle-safe ``__dict__``."""
-        # if hasattr(self, "_finalizer"):
-        #     self._finalizer.detach()
+        """Snapshot purge intent, detach the finalizer, offload, and return a pickle-safe ``__dict__``.
+
+        :class:`weakref.finalize` objects are not safely pickle-able (RESEARCH
+        Pitfall 5: unpickled finalizers are technically present but
+        ``alive=False`` — the callback never fires). We therefore detach the
+        finalizer via :meth:`disable_purge` (which also flips
+        ``_purge_disk_on_gc`` to ``False``), then *override* the dumped flag
+        with the user's original intent so :meth:`__setstate__` can re-register
+        via :meth:`enable_purge` (D-19 single source of truth).
+        """
+        # FRAG-03 / D-18: snapshot user's original intent BEFORE disable_purge()
+        # mutates self._purge_disk_on_gc to False.
+        original_purge_intent = self._purge_disk_on_gc
         self.disable_purge()
 
         if self.cache_enabled:
             self.offload()
         state = self.__dict__.copy()
         state.pop("_lock", None)
+        # Restore the user's original purge intent into the dumped state so
+        # __setstate__ can route through enable_purge() (D-19).
+        state["_purge_disk_on_gc"] = original_purge_intent
+        # The pickled `_finalizer` (if present) is dead-on-arrival per Pitfall 5;
+        # drop it from the state so __setstate__ doesn't carry over a corpse.
+        state.pop("_finalizer", None)
         return state
 
     def __setstate__(self, state):
-        """Restore state from a pickle and re-create the thread lock."""
+        """Restore state, re-create the lock, and re-register the finalizer (FRAG-03 / D-18 + D-19).
+
+        After ``__dict__.update(state)`` the loaded ``_purge_disk_on_gc`` flag
+        reflects the user's *original* intent (preserved by
+        :meth:`__getstate__`'s snapshot). If ``True``, route re-registration
+        through :meth:`enable_purge` so the canonical
+        :func:`weakref.finalize` registration path is the single source of
+        truth (D-19).
+        """
         self.__dict__.update(state)
         self._lock = threading.RLock()
-        # if self._cache_path and self._purge_disk_on_gc:
-        #     self._finalizer = weakref.finalize(self, lambda p=self._cache_path: p.unlink(missing_ok=True))
+        if self._cache_path and self._purge_disk_on_gc:
+            # Flip _purge_disk_on_gc to False first so enable_purge()'s
+            # alive-check passes through to the registration branch — the
+            # pickled state may not contain a live _finalizer (Pitfall 5).
+            # enable_purge() will then re-register and flip the flag back.
+            self._purge_disk_on_gc = False
+            self.enable_purge()
 
     @abstractmethod
     def _describe_buffer(self) -> tuple[tuple[int, ...], DTypeLike, NDArray]:
