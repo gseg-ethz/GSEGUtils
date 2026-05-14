@@ -688,6 +688,152 @@ def test_convert_to_memmap_streaming_path(tmp_path, monkeypatch):
     np.testing.assert_array_equal(np.asarray(bd), arr)
 
 
+# ---------------------------------------------------------------------------
+# Plan 06-01 / TEST-04 — finalizer + pickle round-trip ordering tests.
+# ---------------------------------------------------------------------------
+#
+# Phase 2 (FRAG-03) already established the broad pickle round-trip
+# invariants (see ``test_finalizer_re_registered_on_unpickle`` above). Phase 6
+# TEST-04 deepens that coverage with three additional assertions targeting
+# the explicit ordering / "snapshot-before-mutate" contract introduced by
+# Phase 2 D-18:
+#   #1  ``test_finalizer_reregister_through_pickle_round_trip_ordering`` —
+#       beyond the Phase 2 happy path, assert the revived ``_finalizer``
+#       tracks the new instance (``detach is not None``) and the original
+#       file survives the ORIGINAL's GC (proves ``__getstate__`` detached
+#       the original's finalizer BEFORE pickling).
+#   #2  ``test_purge_disk_on_gc_post_unpickle_no_leak`` — end-to-end GC of
+#       the unpickled instance unlinks the cache file (no resource leak in
+#       cross-process / multi-revive scenarios).
+#   #3  ``test_snapshot_before_mutate_ordering`` — monkeypatch-spy on
+#       ``LazyDiskCache.disable_purge`` proves the snapshot of
+#       ``_purge_disk_on_gc`` happens BEFORE the in-place mutation.
+
+
+def test_finalizer_reregister_through_pickle_round_trip_ordering(tmp_cache_dir: Path) -> None:
+    """TEST-04 #1 / D-07: finalizer re-registration tracks the revived instance, not the dead original.
+
+    Extends the Phase 2 ``test_finalizer_re_registered_on_unpickle`` happy
+    path with two additional ordering assertions:
+      * The original ``.dat`` file survives the original's ``del`` + ``gc.collect()``
+        — proves ``__getstate__`` detached the original's finalizer BEFORE
+        pickle (otherwise the file would be unlinked on original GC).
+      * The revived ``_finalizer`` is alive AND its ``detach`` callable is
+        bound (``revived._finalizer.detach is not None``) — proves the
+        ``weakref.finalize`` registration targets the REVIVED instance, not
+        a stale weakref to the dead original.
+    """
+    arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    obj = DiskBackedNDArray(
+        arr,
+        enable_caching=True,
+        cache_path=tmp_cache_dir / "k",
+        purge_disk_on_gc=True,
+    )
+    dat_path = tmp_cache_dir / "k.dat"
+    obj.offload()
+    assert dat_path.exists()
+    assert hasattr(obj, "_finalizer") and obj._finalizer.alive
+
+    blob = pickle.dumps(obj)
+    del obj
+    gc.collect()
+    # __getstate__'s disable_purge() detached the original's finalizer, so
+    # the .dat file MUST survive the original's collection.
+    assert dat_path.exists(), (
+        "TEST-04 #1 regressed: __getstate__'s disable_purge() did not detach the"
+        " original's finalizer before pickling; original GC unlinked the file."
+    )
+
+    revived = pickle.loads(blob)
+    # Positive assertions: the revived instance carries a live finalizer that
+    # tracks IT (not the dead original).
+    assert hasattr(revived, "_finalizer"), "TEST-04 #1 regressed: _finalizer attribute missing after unpickle"
+    assert revived._finalizer.alive is True, "TEST-04 #1 regressed: revived _finalizer is not alive"
+    assert revived._purge_disk_on_gc is True, (
+        "TEST-04 #1 regressed: _purge_disk_on_gc was not preserved through pickle"
+    )
+    assert revived.cache_path == dat_path
+    # Ordering assertion: the finalizer exposes a `detach` callable bound to
+    # the revived instance's weakref machinery (not the dead original's).
+    assert revived._finalizer.detach is not None, (
+        "TEST-04 #1 regressed: revived _finalizer.detach is None — the weakref"
+        " finalize tracks a dead reference rather than the revived instance."
+    )
+
+
+def test_purge_disk_on_gc_post_unpickle_no_leak(tmp_cache_dir: Path) -> None:
+    """TEST-04 #2 / D-07: GC of the unpickled instance honours ``purge_disk_on_gc=True``.
+
+    End-to-end purge-on-GC check after unpickle. After the original is
+    collected, the unpickled instance is the SOLE remaining owner of the
+    cache file; collecting it must unlink the file (no leak).
+    """
+    arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    obj = DiskBackedNDArray(
+        arr,
+        enable_caching=True,
+        cache_path=tmp_cache_dir / "k_post",
+        purge_disk_on_gc=True,
+    )
+    obj.offload()
+    blob = pickle.dumps(obj)
+    del obj
+    gc.collect()
+
+    revived = pickle.loads(blob)
+    revived_cache_path = revived.cache_path
+    assert revived_cache_path is not None and revived_cache_path.exists(), (
+        "TEST-04 #2 premise: revived instance's cache file should exist before its own GC"
+    )
+    del revived
+    gc.collect()
+    assert not revived_cache_path.exists(), (
+        "TEST-04 #2 regressed: unpickled instance with purge_disk_on_gc=True leaked"
+        f" its cache file ({revived_cache_path}) on collection."
+    )
+
+
+def test_snapshot_before_mutate_ordering(tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TEST-04 #3 / D-07: ``__getstate__`` snapshots ``_purge_disk_on_gc`` BEFORE ``disable_purge`` mutates it.
+
+    Monkeypatch-spy pattern from RESEARCH §"Open Questions" #2 (verbatim).
+    Spies ``LazyDiskCache.disable_purge`` to capture ``self._purge_disk_on_gc``
+    at entry; if the snapshot is taken AFTER the mutation, the captured value
+    would be ``False`` (post-mutation state) and the assertion would fail.
+    """
+    from GSEGUtils.lazy_disk_cache.lazy_disk_cache import LazyDiskCache
+
+    captured: list[bool] = []
+    original_disable = LazyDiskCache.disable_purge
+
+    def spy_disable_purge(self: LazyDiskCache) -> None:
+        # Snapshot the flag at entry (i.e. BEFORE the original's in-place mutation).
+        captured.append(self._purge_disk_on_gc)
+        original_disable(self)
+
+    monkeypatch.setattr(LazyDiskCache, "disable_purge", spy_disable_purge)
+
+    obj = DiskBackedNDArray(
+        np.array([[1.0, 2.0, 3.0]], dtype=np.float32),
+        enable_caching=True,
+        cache_path=tmp_cache_dir / "k_spy",
+        purge_disk_on_gc=True,
+    )
+    obj.offload()
+    state = obj.__getstate__()
+
+    assert captured == [True], (
+        "TEST-04 #3 regressed: snapshot ordering violated — disable_purge was called when"
+        f" _purge_disk_on_gc was already {captured!r} (expected [True])."
+        " __getstate__ must snapshot the user's original intent BEFORE disable_purge mutates state."
+    )
+    assert state["_purge_disk_on_gc"] is True, (
+        "TEST-04 #3 regressed: __getstate__ returned a state dict whose"
+        " _purge_disk_on_gc reflects the post-mutation value rather than the snapshot."
+    )
+
+
 def test_convert_to_memmap_import_error_fallback(tmp_path, monkeypatch):
     """D-07 #3: psutil ImportError fallback uses the fixed-bytes chunk constant.
 
