@@ -234,11 +234,6 @@ class TestBaseArray:
             # noinspection PyTypeChecker
             self.cls(arr=["a", "23"])
 
-    #
-    # def test_freeze(self) -> None:
-    #     warnings.warn("This method is deprecated", DeprecationWarning)
-    #     assert True
-
     def test_array_interface(self) -> None:
         # The array interface should be identical to the input if it is not a copy
         value = self.cls(arr=(a := self.rand_32()))
