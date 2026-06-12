@@ -225,13 +225,9 @@ class LazyDiskCache(ABC):
             shape, dtype, array = self._describe_buffer()
 
             # D-04 chunk budget: RAM-fraction if psutil is available, else fixed-bytes.
-            item_size_per_row = array.itemsize * (
-                int(np.prod(array.shape[1:])) if array.ndim > 1 else 1
-            )
+            item_size_per_row = array.itemsize * (int(np.prod(array.shape[1:])) if array.ndim > 1 else 1)
             chunk_bytes = (
-                int(psutil.virtual_memory().available * 0.10)
-                if psutil is not None
-                else _MEMMAP_FALLBACK_CHUNK_BYTES
+                int(psutil.virtual_memory().available * 0.10) if psutil is not None else _MEMMAP_FALLBACK_CHUNK_BYTES
             )
             chunk_rows = max(1, chunk_bytes // max(1, item_size_per_row))
 
@@ -250,7 +246,7 @@ class LazyDiskCache(ABC):
             else:
                 # D-06 streaming path: chunked slice-write, no full-RAM copy.
                 for start in range(0, shape[0], chunk_rows):
-                    self._mmap[start:start + chunk_rows] = array[start:start + chunk_rows]
+                    self._mmap[start : start + chunk_rows] = array[start : start + chunk_rows]
 
             # 2) hand the memmap off to your subclass as the live buffer
             self._set_buffer(self._mmap)

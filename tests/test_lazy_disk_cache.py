@@ -750,9 +750,7 @@ def test_finalizer_reregister_through_pickle_round_trip_ordering(tmp_cache_dir: 
     # tracks IT (not the dead original).
     assert hasattr(revived, "_finalizer"), "TEST-04 #1 regressed: _finalizer attribute missing after unpickle"
     assert revived._finalizer.alive is True, "TEST-04 #1 regressed: revived _finalizer is not alive"
-    assert revived._purge_disk_on_gc is True, (
-        "TEST-04 #1 regressed: _purge_disk_on_gc was not preserved through pickle"
-    )
+    assert revived._purge_disk_on_gc is True, "TEST-04 #1 regressed: _purge_disk_on_gc was not preserved through pickle"
     assert revived.cache_path == dat_path
     # Ordering assertion: the finalizer exposes a `detach` callable bound to
     # the revived instance's weakref machinery (not the dead original's).

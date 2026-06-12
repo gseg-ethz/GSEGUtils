@@ -72,8 +72,7 @@ def test_generator_string_only_lazy_map(tmp_path: Path) -> None:
     emitted = pyi_path.read_text(encoding="utf-8")
     # The string-only branch emits a single grouped import from the backing module.
     assert "from .submod import FooClass, bar_fn" in emitted, (
-        "Generator did not emit the grouped string-form import for FooClass + bar_fn.\n"
-        f"Emitted:\n{emitted}"
+        f"Generator did not emit the grouped string-form import for FooClass + bar_fn.\nEmitted:\n{emitted}"
     )
     # Both names land in __all__.
     assert "'FooClass'" in emitted and "'bar_fn'" in emitted, (
@@ -101,7 +100,7 @@ def test_generator_tuple_form_lazy_map(tmp_path: Path) -> None:
     (fixture_dir / "__init__.py").write_text(
         '"""Fixture package (tuple-form _lazy_map)."""\n'
         "__all__ = []\n"
-        '_lazy_map: dict[str, str | tuple[str, str]] = {\n'
+        "_lazy_map: dict[str, str | tuple[str, str]] = {\n"
         '    "Csv": ("csv", "CsvHandler"),\n'
         '    "find_pcd": "core",\n'
         "}\n"
@@ -119,12 +118,10 @@ def test_generator_tuple_form_lazy_map(tmp_path: Path) -> None:
 
     emitted = pyi_path.read_text(encoding="utf-8")
     assert "from .csv import CsvHandler as Csv" in emitted, (
-        "Generator did not emit the tuple-form alias 'CsvHandler as Csv'.\n"
-        f"Emitted:\n{emitted}"
+        f"Generator did not emit the tuple-form alias 'CsvHandler as Csv'.\nEmitted:\n{emitted}"
     )
     assert "from .core import find_pcd" in emitted, (
-        "Generator did not emit the string-form passthrough 'find_pcd'.\n"
-        f"Emitted:\n{emitted}"
+        f"Generator did not emit the string-form passthrough 'find_pcd'.\nEmitted:\n{emitted}"
     )
     # Both public names land in __all__.
     assert "'Csv'" in emitted and "'find_pcd'" in emitted
@@ -143,9 +140,7 @@ def test_generator_empty_eager_init(tmp_path: Path) -> None:
     fixture_dir = tmp_path / "fix"
     fixture_dir.mkdir()
     (fixture_dir / "__init__.py").write_text(
-        '"""Fixture package (empty-eager)."""\n'
-        '__all__ = ["sub"]\n'
-        "from . import sub\n",
+        '"""Fixture package (empty-eager)."""\n__all__ = ["sub"]\nfrom . import sub\n',
         encoding="utf-8",
     )
     (fixture_dir / "sub.py").write_text("", encoding="utf-8")
@@ -184,7 +179,7 @@ def test_generator_pep526_annotated_consistency(tmp_path: Path) -> None:
     (fixture_dir / "__init__.py").write_text(
         '"""Fixture package (PEP 526 annotated, mixed schemas)."""\n'
         "__all__ = []\n"
-        '_lazy_map: dict[str, str | tuple[str, str]] = {\n'
+        "_lazy_map: dict[str, str | tuple[str, str]] = {\n"
         '    "A": "mod",\n'
         '    "B": ("mod", "RealB"),\n'
         "}\n"
@@ -210,6 +205,4 @@ def test_generator_pep526_annotated_consistency(tmp_path: Path) -> None:
     assert "from .mod import RealB as B" in emitted, (
         f"Generator did not emit the tuple-form rename 'RealB as B'. Emitted:\n{emitted}"
     )
-    assert "'A'" in emitted and "'B'" in emitted, (
-        f"Generator omitted 'A' or 'B' from __all__. Emitted:\n{emitted}"
-    )
+    assert "'A'" in emitted and "'B'" in emitted, f"Generator omitted 'A' or 'B' from __all__. Emitted:\n{emitted}"

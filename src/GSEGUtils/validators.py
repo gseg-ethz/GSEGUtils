@@ -519,9 +519,7 @@ def linear_map_dtype(
     # Compute source-domain (v_min, v_max) per dtype family.
     if np.issubdtype(array.dtype, np.floating):
         if not np.all(np.isfinite(array)):
-            raise ValueError(
-                f"linear_map_dtype: input contains NaN/Inf (target_dtype={np.dtype(target_dtype).name})"
-            )
+            raise ValueError(f"linear_map_dtype: input contains NaN/Inf (target_dtype={np.dtype(target_dtype).name})")
         array = np.clip(array, lower, upper)
         v_min, v_max = float(lower), float(upper)
     elif np.issubdtype(array.dtype, np.integer):

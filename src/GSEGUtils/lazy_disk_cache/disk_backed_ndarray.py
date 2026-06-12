@@ -123,6 +123,7 @@ class DiskBackedNDArray(LazyDiskCache, NDArrayOperatorsMixin):
         numpy.ndarray
             The plain ndarray ufunc result.
         """
+
         def _unwrap(x):
             if isinstance(x, DiskBackedNDArray):
                 if x.offloaded:
