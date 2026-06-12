@@ -75,4 +75,4 @@ jobs:
       - name: Build docs (warnings-as-errors)
         run: |
           pip install .[doc]
-          sphinx-build -W -b html docs/source docs/_build
+          sphinx-build -W --keep-going -b html docs/source docs/_build
