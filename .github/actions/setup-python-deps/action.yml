@@ -1,0 +1,27 @@
+name: Setup Python + deps (GSEGUtils)
+description: >
+  Checkout, set up Python 3.12, restore pip cache, and install GSEGUtils[dev].
+  Intentionally asymmetric with the pchandler variant — omits the deploy-key
+  SSH step (no cross-repo git+ssh dep). See pchandler workspace Phase 8
+  CONTEXT.md Claude's Discretion §Composite action scope.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+      with:
+        ref: ${{ github.event_name == 'pull_request' && github.head_ref || '' }}
+        token: ${{ github.token }}
+        fetch-depth: 0
+
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      with:
+        python-version: "3.12"
+
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
+
+    - shell: bash
+      run: pip install .[dev]
