@@ -111,4 +111,4 @@ markers = [
 # pytest-randomly schedules a sibling test that triggers a re-import of
 # GSEGUtils.lazy_disk_cache.disk_backed_ndarray before these two tests, pickle.dumps
 # fails with "not the same object". Phase 9 TEST-08 owns the fix.
-addopts = ["-p", "randomly", "--randomly-seed=0"]
+addopts = ["-p", "no:randomly"]
