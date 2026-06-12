@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.5.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.4...v0.5.0) (2026-06-12)
+
+
+### ✨ Features
+
+* **01-04:** promote private angle helpers to public + deprecation shims (D-16) ([495f8f7](https://github.com/gseg-ethz/GSEGUtils/commit/495f8f725527270ee7049becae146c28157a1024))
+* **02-01:** swap pickle codec for np.save/load + JSON sidecar in DiskBackedStore ([4ec69d2](https://github.com/gseg-ethz/GSEGUtils/commit/4ec69d256e43d2388b1177b9bd66bd2a4a7759f3))
+* **04-04:** stream _convert_to_memmap with chunked writes (PERF-04) ([235b4df](https://github.com/gseg-ethz/GSEGUtils/commit/235b4df3eb0c75fc366d454b7da15d4c78452c2e))
+* **04-05:** double-checked locking for SingletonMeta.__call__ (GREEN, PERF-05) ([bc3a544](https://github.com/gseg-ethz/GSEGUtils/commit/bc3a54488f4f11392aa50423f0928ecd8a8795e8))
+* **04-06a:** COUPLE-05 clip-and-saturate normalize_uint*/linear_map_dtype ([c5d7425](https://github.com/gseg-ethz/GSEGUtils/commit/c5d742563c37f849baf93681e020f743e2d90c3a))
+
+
+### 🐛 Bug Fixes
+
+* **01-ci:** unblock pre-commit lint job on CI ([4bfc919](https://github.com/gseg-ethz/GSEGUtils/commit/4bfc919d975069dc6e8fbdedd9f7ccb0b2570366))
+* **02-04:** re-register weakref finalizer in LazyDiskCache __setstate__ + extend to .meta.json sidecar ([0d03e71](https://github.com/gseg-ethz/GSEGUtils/commit/0d03e7165011028e7acccff5f7a805ab8709c78b))
+* **03-01:** drop _data attribute on offload instead of writing None (BUG-02) ([d4173e7](https://github.com/gseg-ethz/GSEGUtils/commit/d4173e787ace741362e537e45cf4c60b771b80fb))
+* **03-01:** honour NDArrayOperatorsMixin in DiskBackedNDArray (BUG-01) ([96f7c3e](https://github.com/gseg-ethz/GSEGUtils/commit/96f7c3ec61ee8bade7156d226d549d87d48d2ef9))
+
+
+### 📚 Documentation
+
+* **01-02a:** add NumPy-style docstrings for base_arrays ([df728a3](https://github.com/gseg-ethz/GSEGUtils/commit/df728a326608718beaf573adaef43d33915f0d89))
+* **01-02a:** add NumPy-style docstrings for base_types + generate_init_stubs ([dfa780a](https://github.com/gseg-ethz/GSEGUtils/commit/dfa780a2ceaa4c9d6c9494ca7f31cbec3c3acc65))
+* **01-02a:** add NumPy-style docstrings for lazy_disk_cache subpackage ([c36e314](https://github.com/gseg-ethz/GSEGUtils/commit/c36e314d84bbae5a507b64b674ccbfffd648a907))
+* **01-02a:** add NumPy-style docstrings for small modules + utility leaves ([a482697](https://github.com/gseg-ethz/GSEGUtils/commit/a482697f1c59a8a5d183ad663f80e414eee2c695))
+* **01-02a:** fix remaining D-rule violations in util + validators ([f10de42](https://github.com/gseg-ethz/GSEGUtils/commit/f10de420e2fd20d602977b279cc174130d27b418))
+* **01-04:** clarify BaseArray._coerce_array contract docstring (D-14) ([9ee480b](https://github.com/gseg-ethz/GSEGUtils/commit/9ee480bc46875483e541718d6b150b40536f1361))
+* **01-04:** clarify validate_in_range contract docstring (D-14) ([96dc8ed](https://github.com/gseg-ethz/GSEGUtils/commit/96dc8ed07ced69f94c1e888e6fab6eb88689ecb4))
+* **02-03:** remove Private classifier; document Publication Policy (SEC-03, GSEGUtils side) ([b6dc56c](https://github.com/gseg-ethz/GSEGUtils/commit/b6dc56c652905ea21e387edc11bbc3aadeef07ba))
+* **07-02:** author MIGRATION-v1.0.md for GSEGUtils v1.0 milestone ([5e0e95a](https://github.com/gseg-ethz/GSEGUtils/commit/5e0e95af0375e55a641e326219e184812d9fe242))
+
+
+### 🎨 Styles
+
+* **01-02a:** ruff check --fix + ruff format src/ tests/ ([7404d1c](https://github.com/gseg-ethz/GSEGUtils/commit/7404d1cbf23f058052cec149356d6986625019d0))
+* **01-03a:** rephrase ci.yml pyright comment to avoid literal continue-on-error duplication ([2c7ccc6](https://github.com/gseg-ethz/GSEGUtils/commit/2c7ccc6caddeadee15c4086e4fdca44959778b2f))
+* **lint:** reformat 5 files for ruff 0.15.12 (CI green-up) ([29383bb](https://github.com/gseg-ethz/GSEGUtils/commit/29383bb6019b5ca12fda1d5c5679e99fc29ca435))
+
+
+### 🧹 Miscellaneous Chores
+
+* **01-02a:** resolve non-D ruff findings in src/ ([25efc69](https://github.com/gseg-ethz/GSEGUtils/commit/25efc69e14735c49f046cb338196af7b9312601c))
+* **01-02a:** swap black/isort/flake8 for ruff (config + dev-dep + pre-commit) ([99fdc32](https://github.com/gseg-ethz/GSEGUtils/commit/99fdc328d08e9bd85ec44e654da913c2f4e6a5e2))
+* **01-03a:** add pyright~=1.1 dev dep + expand tests/** ruff per-file-ignores (D-12) ([39ac873](https://github.com/gseg-ethz/GSEGUtils/commit/39ac87324592703ddcae6f53cdd288cfd424463b))
+* **01-03a:** promote pyrightconfig.json to strict mode (D-12) ([f8c2572](https://github.com/gseg-ethz/GSEGUtils/commit/f8c257275bdb141bbb02502f4bdb9b023fddd033))
+* **01-03a:** re-add mypy pre-commit hook + add pyright warn-only pre-commit + CI hooks (D-12) ([60c5d21](https://github.com/gseg-ethz/GSEGUtils/commit/60c5d21cf6dc73e6883a3ffce25b8459e51539bc))
+* **01-03a:** unblock mypy — drop scripts/, drop dead self-ref, enable pydantic.mypy plugin (D-13, D-26) ([8fd3799](https://github.com/gseg-ethz/GSEGUtils/commit/8fd3799c4f87baee7204b94a6145071650ff82b6))
+* **01-05:** unpin sphinx from git commit, switch to ~= 8.2 (D-18, D-19) ([367aa73](https://github.com/gseg-ethz/GSEGUtils/commit/367aa73d9cb509003ebcb1997d533d891470aa08))
+* **04-04:** add psutil runtime dep, pytest-benchmark dev dep, pytest marker registration ([6e659a8](https://github.com/gseg-ethz/GSEGUtils/commit/6e659a85806675cd436c18986f2982a9eafb5a41))
+* **04-04:** exclude benchmark marker from CI pytest invocation ([5f63660](https://github.com/gseg-ethz/GSEGUtils/commit/5f63660c06cbbc6d5d9cdbc9a36305e39a423aa1))
+* **06-02:** DEBT-09 delete commented test_freeze scaffold (re-anchored) ([e413d2a](https://github.com/gseg-ethz/GSEGUtils/commit/e413d2ad8e8afc521ebefa87b18e569906cdc031))
+* **deps:** pin numpy &gt;= 2.0, &lt; 2.4 and tighten requires-python to &gt;=3.12,&lt;3.13 ([bc075ff](https://github.com/gseg-ethz/GSEGUtils/commit/bc075ffa08623bbe1a6e0da59dc8c24480d8f9f3))
+* signal release-please target for v0.5.0 ([501f225](https://github.com/gseg-ethz/GSEGUtils/commit/501f2251ea7a42eee58fc3d72ad563582c89eed7))
+
+
+### ✅ Tests
+
+* **01-04:** add GSEGUtils-only validator contract tests (D-15) ([017d996](https://github.com/gseg-ethz/GSEGUtils/commit/017d996c99cd3eced982f66c5dd440af8573392f))
+* **01-04:** assert DeprecationWarning for legacy angle helper aliases (D-16) ([87ff201](https://github.com/gseg-ethz/GSEGUtils/commit/87ff201b2932cd1db053068a7c0c5319e4170974))
+* **02-01:** add lazy_disk_cache regression tests (codec, legacy refusal, W-5) ([16ca149](https://github.com/gseg-ethz/GSEGUtils/commit/16ca1492417e7e63e5ca325eb4d50173bea7a01e))
+* **02-04:** add FRAG-03 finalizer re-registration regression tests + W-1 sidecar coverage ([86d62ec](https://github.com/gseg-ethz/GSEGUtils/commit/86d62ec2d747e056fc93305615c49c3fe70c2f85))
+* **02-05:** add FRAG-04 atomicity regression tests for DiskBackedStore codec ([c91033c](https://github.com/gseg-ethz/GSEGUtils/commit/c91033cb2e4a8fba9759f60fda66c7efa42f55ab))
+* **03-01:** add BUG-01 ufunc + BUG-02 drop_buffer regressions ([f623e7a](https://github.com/gseg-ethz/GSEGUtils/commit/f623e7ad1003b18df13e222c65cc1f906ff49ecf))
+* **04-04:** add PERF-04 unit tests + benchmark scaffolding + conftest fixtures ([957288c](https://github.com/gseg-ethz/GSEGUtils/commit/957288ce78a1bff1d8d6d41f4b570ca649ceeba4))
+* **04-05:** add PERF-05 microbenchmark + canonical benchmarks/ dir ([29f5b35](https://github.com/gseg-ethz/GSEGUtils/commit/29f5b3545cf0dd41ffb15831f0494d96b47207dd))
+* **04-05:** add PERF-05 SingletonMeta DCL test suite (RED) ([b0a13ec](https://github.com/gseg-ethz/GSEGUtils/commit/b0a13ecee9d66e8bde88ea65bb15a4a950e1aa8d))
+* **04-06a:** COUPLE-05 GSEGUtils-side regression suite ([84126c7](https://github.com/gseg-ethz/GSEGUtils/commit/84126c7d24c2a5f71e24c76f4162cc0bb8390754))
+* **04-06a:** RED — assert NaN/Inf raises + clip-and-saturate canary ([c9154c5](https://github.com/gseg-ethz/GSEGUtils/commit/c9154c5420f056ca008540dfe93cf6f5c84a1277))
+* **06-01:** TEST-04 expand lazy_disk_cache pickle/finalizer coverage ([34440b2](https://github.com/gseg-ethz/GSEGUtils/commit/34440b207d92fef89f0debfd9cb651ad0b850284))
+* **06-02:** TEST-06 add generate_init_stubs round-trip regression suite ([2bdac2f](https://github.com/gseg-ethz/GSEGUtils/commit/2bdac2fe9cdef3818128b3d9bb905bbc3f87e6ee))
+
+
+### 🤖 Continuous Integration
+
+* trigger workflow on push to refactor/gsd (in addition to main) ([0a54ffe](https://github.com/gseg-ethz/GSEGUtils/commit/0a54ffe4fc45c602d70277a1d2b6669e2e5fc647))
+
 ## [0.4.4](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.3...v0.4.4) (2026-01-14)
 
 
