@@ -77,6 +77,18 @@
 
 * trigger workflow on push to refactor/gsd (in addition to main) ([0a54ffe](https://github.com/gseg-ethz/GSEGUtils/commit/0a54ffe4fc45c602d70277a1d2b6669e2e5fc647))
 
+
+### 📝 Release Notes / Documentation Errata
+
+* **RTD version-label override:** `docs/source/conf.py` shipped with `version = "1.0.1"` at the
+  v0.5.0 release tag because `release-please-config.json` LACKED an `extra-files` entry
+  entirely (additive omission, not a path bug). The release-please bot therefore did not stamp
+  the file. The Read the Docs build for v0.5.0 displays "1.0.1" in the version selector
+  despite the release artifact being v0.5.0. The RTD admin UI version-label was hand-overridden
+  to `0.5.0` on `<DATE — fill post-RTD-override>`. The config is fixed in commit
+  `<REL-03 SHA — fill post-merge>` (additive `extra-files: ["docs/source/conf.py"]`); future
+  releases will stamp correctly.
+
 ## [0.4.4](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.3...v0.4.4) (2026-01-14)
 
 
