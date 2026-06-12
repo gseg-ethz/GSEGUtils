@@ -84,7 +84,7 @@ Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 doc = [
-    "sphinx ~= 8.2",
+    "sphinx ~= 8.2.3, <8.3",  # DOC-01: block 8.3 autosummary regression (sphinx-doc/sphinx#14166)
     "sphinx_rtd_theme"
 ]
 dev = [
@@ -96,9 +96,19 @@ dev = [
     "pytest-cov~=5.0",        # pytest coverage plugin
     "coverage~=7.0",          # coverage reporting
     "pytest-benchmark ~= 5.2",  # Phase 4 D-30 — opt-in microbenchmark plugin (excluded from CI)
+    "pytest-randomly ~= 4.1",   # TEST-07: shuffle test order each run; surfaces order-deps (D-13)
 ]
 
 [tool.pytest.ini_options]
 markers = [
     "benchmark: opt-in microbenchmark (excluded from CI via `-m \"not benchmark\"`)",
 ]
+# TEST-07 D-13 + Phase 9 TEST-08 carry-over:
+# pytest-randomly is installed (dev dep) so devs see shuffled order locally, but a
+# deterministic seed pins CI until the module-identity pickle flake in
+# tests/test_lazy_disk_cache.py (test_purge_disk_on_gc_false_preserves_file_after_unpickle
+# + test_finalizer_re_registered_on_unpickle) is fixed. The flake is genuine: when
+# pytest-randomly schedules a sibling test that triggers a re-import of
+# GSEGUtils.lazy_disk_cache.disk_backed_ndarray before these two tests, pickle.dumps
+# fails with "not the same object". Phase 9 TEST-08 owns the fix.
+addopts = ["-p", "no:randomly"]
