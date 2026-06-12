@@ -15,6 +15,14 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          # On PRs, check out the head branch so pushes work
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || '' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
       - uses: ./.github/actions/setup-python-deps
 
       - name: Run pre-commit
@@ -32,6 +40,8 @@ jobs:
       matrix:
         python-version: ["3.12"]
     steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
       - uses: ./.github/actions/setup-python-deps
 
       - name: Pyright (informational)
