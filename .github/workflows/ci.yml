@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, refactor/gsd]
+    branches: [main, develop/gsd]
 
 jobs:
   lint:
