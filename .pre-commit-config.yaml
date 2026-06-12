@@ -22,27 +22,40 @@ repos:
       - id: check-toml
       - id: check-added-large-files
 
-  - repo: https://github.com/psf/black
-    rev: 25.1.0
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
     hooks:
-      - id: black
-        files: '\.(py|pyi)$'
+      - id: ruff-check
+        args: ["--fix"]
+      - id: ruff-format
 
-  - repo: https://github.com/PyCQA/isort
-    rev: 6.0.1
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.17.1
     hooks:
-      - id: isort
-        args: ["--profile", "black"]
+      - id: mypy
+        args: ["--config-file", "mypy.ini"]
+        pass_filenames: false
+        # The pydantic.mypy plugin is loaded by mypy at startup (see mypy.ini
+        # `plugins = pydantic.mypy`). mirrors-mypy runs in an isolated venv,
+        # so plugin packages must be declared as additional_dependencies here.
+        additional_dependencies:
+          - "pydantic~=2.11"
+          - "numpy>=2.0,<2.4"
+          - "numpydantic~=1.6"
 
-  # - repo: https://github.com/PyCQA/flake8
-  #   rev: 7.3.0
-  #   hooks:
-  #     - id: flake8
-  #       args: ["--config=.flake8"]
-
-  # - repo: https://github.com/pre-commit/mirrors-mypy
-  #   rev: v1.17.1
-  #   hooks:
-  #     - id: mypy
-  #       args: ["--config-file", "mypy.ini"]
-  #       pass_filenames: false
+  - repo: local
+    hooks:
+      - id: pyright-informational
+        name: pyright (informational, never blocks)
+        # language: python + additional_dependencies so the hook works in CI
+        # (lint job installs only `pre-commit` — no system pyright). The pip
+        # `pyright` package fetches its Node binary at install time. Local dev
+        # already has pyright via `pip install -e .[dev]`, so this is a no-op
+        # there. The `|| true` keeps the hook non-blocking regardless.
+        entry: bash -c 'pyright "$@" || true' --
+        language: python
+        additional_dependencies: ["pyright~=1.1"]
+        types: [python]
+        require_serial: true
+        pass_filenames: false
+        verbose: true

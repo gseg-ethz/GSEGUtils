@@ -1,7 +1,25 @@
+import warnings
+
 import numpy as np
 import pytest
 
-from GSEGUtils.util import AngleUnit, convert_angles, unique_rows_fast
+from GSEGUtils.util import (
+    AngleUnit,
+    _deg2gon,
+    _deg2rad,
+    _gon2deg,
+    _gon2rad,
+    _rad2deg,
+    _rad2gon,
+    convert_angles,
+    deg2gon,
+    deg2rad,
+    gon2deg,
+    gon2rad,
+    rad2deg,
+    rad2gon,
+    unique_rows_fast,
+)
 
 
 class TestUtil:
@@ -20,50 +38,36 @@ class TestConvertAngle:
     def test_rad_to_deg(self):
         rad_values = np.array([np.pi, np.pi / 2, np.pi / 4])
         expected_deg = np.array([180, 90, 45])
-        np.testing.assert_array_almost_equal(
-            convert_angles(rad_values, AngleUnit.RAD, AngleUnit.DEGREE), expected_deg
-        )
+        np.testing.assert_array_almost_equal(convert_angles(rad_values, AngleUnit.RAD, AngleUnit.DEGREE), expected_deg)
 
     def test_deg_to_rad(self):
         deg_values = np.array([180, 90, 45])
         rad_values = np.array([np.pi, np.pi / 2, np.pi / 4])
-        np.testing.assert_array_almost_equal(
-            convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.RAD), rad_values
-        )
+        np.testing.assert_array_almost_equal(convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.RAD), rad_values)
 
     def test_deg_to_gon(self):
         deg_values = np.array([180, 90, 45])
         expected_gon = np.array([200, 100, 50])
-        np.testing.assert_array_almost_equal(
-            convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.GON), expected_gon
-        )
+        np.testing.assert_array_almost_equal(convert_angles(deg_values, AngleUnit.DEGREE, AngleUnit.GON), expected_gon)
 
     def test_gon_to_deg(self):
         gon_values = np.array([200, 100, 50])
         expected_deg = np.array([180, 90, 45])
-        np.testing.assert_array_almost_equal(
-            convert_angles(gon_values, AngleUnit.GON, AngleUnit.DEGREE), expected_deg
-        )
+        np.testing.assert_array_almost_equal(convert_angles(gon_values, AngleUnit.GON, AngleUnit.DEGREE), expected_deg)
 
     def test_gon_to_rad(self):
         gon_values = np.array([200, 100, 50])
         expected_rad = np.array([np.pi, np.pi / 2, np.pi / 4])
-        np.testing.assert_array_almost_equal(
-            convert_angles(gon_values, AngleUnit.GON, AngleUnit.RAD), expected_rad
-        )
+        np.testing.assert_array_almost_equal(convert_angles(gon_values, AngleUnit.GON, AngleUnit.RAD), expected_rad)
 
     def test_rad_to_gon(self):
         rad_values = np.array([np.pi, np.pi / 2, np.pi / 4])
         expected_gon = np.array([200, 100, 50])
-        np.testing.assert_array_almost_equal(
-            convert_angles(rad_values, AngleUnit.RAD, AngleUnit.GON), expected_gon
-        )
+        np.testing.assert_array_almost_equal(convert_angles(rad_values, AngleUnit.RAD, AngleUnit.GON), expected_gon)
 
     def test_same_unit_conversion(self):
         values = np.array([1, 2, 3])
-        np.testing.assert_array_equal(
-            convert_angles(values, AngleUnit.DEGREE, AngleUnit.DEGREE), values
-        )
+        np.testing.assert_array_equal(convert_angles(values, AngleUnit.DEGREE, AngleUnit.DEGREE), values)
 
     def test_array_sizes(self):
         large_array = np.linspace(0, 100, 500)
@@ -186,3 +190,36 @@ def test_unique_rows_fast_performance():
 
     # Verify performance improvement (should be 5-10x faster)
     assert fast_time * 2 < np_time  # At least 2x faster
+
+
+@pytest.mark.parametrize(
+    ("alias", "public"),
+    [
+        (_rad2deg, rad2deg),
+        (_rad2gon, rad2gon),
+        (_deg2rad, deg2rad),
+        (_deg2gon, deg2gon),
+        (_gon2rad, gon2rad),
+        (_gon2deg, gon2deg),
+    ],
+    ids=["rad2deg", "rad2gon", "deg2rad", "deg2gon", "gon2rad", "gon2deg"],
+)
+class TestAngleHelperDeprecation:
+    """Underscore aliases must emit ``DeprecationWarning``; public names must not."""
+
+    def test_alias_emits_deprecation_warning(self, alias, public) -> None:
+        """Calling the underscore alias raises a ``DeprecationWarning``."""
+        with pytest.warns(DeprecationWarning, match="deprecated; use"):
+            alias(1.0)
+
+    def test_public_name_emits_no_deprecation_warning(self, alias, public) -> None:
+        """Calling the public name does not emit any ``DeprecationWarning``."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            public(1.0)  # would raise if it emitted DeprecationWarning
+
+    def test_alias_and_public_return_same_value(self, alias, public) -> None:
+        """The underscore alias delegates to the public name (numeric equivalence)."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            np.testing.assert_allclose(alias(1.0), public(1.0))

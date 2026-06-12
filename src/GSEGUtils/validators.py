@@ -11,6 +11,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Input-validation helpers for spherical / Cartesian arrays and unsigned-integer normalization.
+
+Provides validators for spherical-coordinate arrays, axis/range checks for angle
+columns, transposition helpers for ``Nx2`` / ``Nx3`` arrays, slice-to-integer
+conversion, and ``normalize_uint*`` saturation routines.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -99,7 +106,7 @@ def validate_radius(array: Array_Float_T) -> Array_Float_T:
 
 
 def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if azimuths in range of [0, 2π]
+    """Check that azimuth angles lie in ``[0, 2π]``.
 
     Parameters
     ----------
@@ -128,13 +135,11 @@ def validate_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
         else:
             arr_min, arr_max = array.min(), array.max()
 
-        raise ValueError(
-            f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]"
-        )
+        raise ValueError(f"Azimuths must be between [0, 2*pi] not [{arr_min}, {arr_max}]")
 
 
 def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if azimuths in range of [-π, +π]
+    """Check that horizontal angles lie in ``[-π, +π]``.
 
     Parameters
     ----------
@@ -163,13 +168,11 @@ def validate_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
         else:
             arr_min, arr_max = array.min(), array.max()
 
-        raise ValueError(
-            f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]"
-        )
+        raise ValueError(f"Horizontal angles must be between [-pi, +pi] not [{arr_min}, {arr_max}]")
 
 
 def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if zenith angles in range of [0, +π]
+    """Check that zenith angles lie in ``[0, +π]``.
 
     Parameters
     ----------
@@ -195,13 +198,11 @@ def validate_zenith_angles(array: Array_Float_T) -> Array_Float_T:
     else:
         if -HALF_PI <= array.min() and array.max() <= HALF_PI:
             raise ValueError("Input Angles in [-pi/2, +pi/2] but should be [0, +pi]")
-        raise ValueError(
-            f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]"
-        )
+        raise ValueError(f"Zenith angles should be in [0, +pi] not [{array.min()}, {array.max()}]")
 
 
 def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
-    """Check if inclination angles in range of [-π/2, +π/2]
+    """Check that inclination angles lie in ``[-π/2, +π/2]``.
 
     Parameters
     ----------
@@ -229,9 +230,7 @@ def validate_inclination_angles(array: Array_Float_T) -> Array_Float_T:
             array_min, array_max = 0, PI
         else:
             array_min, array_max = array.min(), array.max()
-        raise ValueError(
-            f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]"
-        )
+        raise ValueError(f"Inclination angles should be between [-pi/2, +pi/2] not [{array_min}, {array_max}]")
 
 
 def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
@@ -252,7 +251,7 @@ def coerce_wrapped_azimuth_angles(array: Array_Float_T) -> Array_Float_T:
 
 
 def coerce_wrapped_horizontal_angles(array: Array_Float_T) -> Array_Float_T:
-    """Coerce horizontal angles to range [-π, π)
+    """Coerce horizontal angles to the half-open range ``[-π, π)``.
 
     Parameters
     ----------
@@ -300,9 +299,7 @@ def validate_transposed_2d_array(array: Array_NxM_T | VectorT, n: int) -> Array_
         if array.shape[0] != n:
             return array.reshape(-1, n)
 
-    raise ValueError(
-        f"Input array must be 2-dimensional of Mx{n} or {n}xM shape. Received: {array.shape}"
-    )
+    raise ValueError(f"Input array must be 2-dimensional of Mx{n} or {n}xM shape. Received: {array.shape}")
 
 
 def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integer_T:
@@ -348,31 +345,34 @@ def convert_slice_to_integer_range(selection: slice, length: int) -> Array_Integ
 
 
 def validate_in_range(value: ArrayT, target_min: float, target_max: float) -> None:
-    """Check if values are within the target range.
+    """Validate that all values in ``value`` lie within ``[target_min, target_max]``.
+
+    Contract independent of any specific caller library. Inclusive bounds on both
+    sides; the combined out-of-range case (both ``min < target_min`` AND
+    ``max > target_max``) raises a single combined-message ``ValueError`` distinct
+    from the single-side branches. This is intentional, not a redundant branch.
 
     Parameters
     ----------
     value : ArrayT
-        Input array
+        Input array. Coerced via ``np.asarray`` before reduction.
     target_min : float
-        Lower inclusive limit
+        Inclusive lower bound.
     target_max : float
-        Upper inclusive limit
+        Inclusive upper bound.
 
     Raises
     ------
     ValueError
-        Values outside of range
+        If any value lies outside ``[target_min, target_max]``. Three branches:
+        single-side-low, single-side-high, or combined dual-out-of-range.
     """
-    # TODO should be consistent - check usage in PCHandler
     value = np.asarray(value)
     val_min: float | int = value.min()
     val_max: float | int = value.max()
 
     if (val_min < target_min) and (val_max > target_max):
-        raise ValueError(
-            f"Min and max values [{val_min},{val_max}] exceeds bounds [{target_min},{target_max}]."
-        )
+        raise ValueError(f"Min and max values [{val_min},{val_max}] exceeds bounds [{target_min},{target_max}].")
 
     elif val_min < target_min:
         raise ValueError(f"Min value {val_min} exceeds lower limit {target_min}.")
@@ -443,11 +443,23 @@ def normalize_min_max(
     return np.clip(array, lower, upper).astype(target_dtype)
 
 
-def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
+def linear_map_dtype(
+    array: ArrayT,
+    target_dtype: npt.DtypeLike,
+    *,
+    source_range: tuple[float, float] = (0.0, 1.0),
+) -> ArrayT:
     """Linearly map the array values to the target dtype.
 
     This function maps the input array values based on the current datatype's minimum
     and maximum supported values to those of the target datatype.
+
+    Float-input path: clip to ``source_range`` then linearly map to the
+    target dtype's :func:`numpy.iinfo` range (clip-and-saturate, Phase 4
+    D-12 / D-16). NaN / +Inf / -Inf input raises ``ValueError`` (D-14).
+    Integer-input path: passes through ``normalize_min_max`` against the
+    source dtype's :func:`numpy.iinfo`; ``source_range`` is silently
+    ignored when ``array.dtype.kind in ('u', 'i')`` (D-15).
 
     Examples
     --------
@@ -465,6 +477,10 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
         Input array
     target_dtype :  npt.DtypeLike
         Target dtype (64-bit types not supported)
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive range of the float input that maps onto the target dtype's
+        full ``iinfo`` extent. Values outside the range are clipped before
+        scaling (D-12). Silently ignored for integer input (D-15).
 
     Returns
     -------
@@ -473,45 +489,63 @@ def linear_map_dtype(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
     Raises
     ------
     ValueError
-        Dtype is 64-bit (e.g., np.float64, np.int64, np.uint64).
+        Dtype is 64-bit (e.g., np.float64, np.int64, np.uint64); or the
+        float input contains NaN / +Inf / -Inf (D-14); or ``source_range``
+        bounds are non-finite or not strictly increasing.
     TypeError
         Non-floating or integer object type passed
+
+    Notes
+    -----
+    Phase 4 D-12 / D-16: the clip-and-saturate policy replaces the prior
+    pass-through behaviour for unbounded floats. Callers that relied on the
+    default ``[0, 1]`` source range continue to work unchanged; callers
+    that fed signed-float input ``[-1, 1]`` must pass
+    ``source_range=(-1.0, 1.0)`` explicitly.
     """
+    lower, upper = source_range
+    if not (np.isfinite(lower) and np.isfinite(upper) and lower < upper):
+        raise ValueError(f"source_range must be finite and lower<upper; got ({lower}, {upper})")
 
     array = np.asarray(array)
 
     if target_dtype in (np.float64, np.int64, np.uint64):
         raise ValueError("Target type cannot be 64bit")
 
-    def get_dtype_min_max(dt: npt.DtypeLike) -> tuple[float, float]:
-        if np.issubdtype(dt, np.integer):
-            return np.iinfo(dt).min, np.iinfo(dt).max
-        elif np.issubdtype(dt, np.floating):
-            # TODO add check here for values outside of range
-            return 0.0, 1.0
-        else:
-            raise TypeError(f"Invalid dtype detected: {dt}")
-
     # Types match, exit
     if array.dtype == target_dtype:
         return array
 
-    # Get the corresponding min and max from the type info
-    origin_min, origin_max = get_dtype_min_max(array.dtype)
-    target_min, target_max = get_dtype_min_max(target_dtype)
+    # Compute source-domain (v_min, v_max) per dtype family.
+    if np.issubdtype(array.dtype, np.floating):
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"linear_map_dtype: input contains NaN/Inf (target_dtype={np.dtype(target_dtype).name})")
+        array = np.clip(array, lower, upper)
+        v_min, v_max = float(lower), float(upper)
+    elif np.issubdtype(array.dtype, np.integer):
+        # D-15: integer-input path ignores source_range.
+        v_min = float(np.iinfo(array.dtype).min)
+        v_max = float(np.iinfo(array.dtype).max)
+    else:
+        raise TypeError(f"Invalid source dtype detected: {array.dtype}")
 
-    return normalize_min_max(
-        array=array,
-        lower=target_min,
-        upper=target_max,
-        target_dtype=target_dtype,
-        v_min=origin_min,
-        v_max=origin_max,
-    )
+    # Dispatch on target dtype family.
+    if np.issubdtype(target_dtype, np.floating):
+        return normalize_min_max(array, 0.0, 1.0, target_dtype, v_min, v_max)
+    if np.issubdtype(target_dtype, np.integer):
+        return normalize_min_max(
+            array,
+            np.iinfo(target_dtype).min,
+            np.iinfo(target_dtype).max,
+            target_dtype,
+            v_min,
+            v_max,
+        )
+    raise TypeError(f"Invalid target dtype detected: {target_dtype}")
 
 
 def normalize_self(array: ArrayT) -> ArrayT:
-    """Normalizes an input array to the limits expected by the array's dtype.
+    """Normalize an input array to the limits expected by its own dtype.
 
     For floating point values, this is `[0, 1]` and for integer values, it is the min and max defined by `np.iinfo`.
 
@@ -525,7 +559,7 @@ def normalize_self(array: ArrayT) -> ArrayT:
     ArrayT
     """
     if np.dtype(array.dtype).kind not in ["u", "i"]:
-        logger.debug(f"Scalar field is floating. Converting to [0.0, 1.0].")
+        logger.debug("Scalar field is floating. Converting to [0.0, 1.0].")
         lower, upper = 0, 1
     else:
         lower, upper = np.iinfo(array.dtype).min, np.iinfo(array.dtype).max
@@ -533,85 +567,141 @@ def normalize_self(array: ArrayT) -> ArrayT:
     return normalize_min_max(array, lower, upper, array.dtype)
 
 
-def _normalize_base(array: ArrayT, target_dtype: npt.DtypeLike) -> ArrayT:
-    """Helper function for normalizing input array values to target_dtype limits.
+def _normalize_base(
+    array: ArrayT,
+    target_dtype: npt.DtypeLike,
+    *,
+    source_range: tuple[float, float] = (0.0, 1.0),
+) -> ArrayT:
+    """Normalize ``array`` to the limits of ``target_dtype``.
 
-    First, normalizes to [0,1] using the array.min() and array.max() values.
-    Then scales to dtype `np.iinfo(target_dtype)` min and mix.
+    Float-input path: clip to ``source_range``, then linearly scale to the
+    target dtype's range (``[0.0, 1.0]`` for float targets,
+    :func:`numpy.iinfo` extremes for integer targets). NaN / +Inf / -Inf
+    raises ``ValueError``.
+
+    Integer-input path: passes through :func:`normalize_min_max` against
+    the target dtype's extremes. ``source_range`` is silently ignored for
+    integer inputs.
 
     Parameters
     ----------
     array : ArrayT
-        The input array to be normalized
+        The input array to be normalized.
     target_dtype : npt.DtypeLike
-        Tar
+        The target numpy dtype. Float and integer dtypes are supported.
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive ``(lower, upper)`` interval of the float input that maps
+        onto the target dtype's full range. Values outside ``source_range``
+        are clipped before scaling (Phase 4 D-12). The bounds must be
+        finite and strictly increasing — misuse raises ``ValueError``.
 
     Returns
     -------
     ArrayT
+
+    Raises
+    ------
+    ValueError
+        If ``source_range`` bounds are non-finite or not strictly
+        increasing, or if a float input contains NaN / +Inf / -Inf
+        (Phase 4 D-14).
+
+    Notes
+    -----
+    Phase 4 D-12 / D-16: the clip-and-saturate policy replaces the prior
+    auto-detect branching on ``[0, 1]`` / ``[-1, 1]`` / min-max-rescale.
+    Callers that relied on the auto-detect behaviour (e.g. signed-float
+    input ``[-1, 1]``) must pass ``source_range=(-1.0, 1.0)`` explicitly.
+    Integer-input semantics are unchanged; ``source_range`` is silently
+    ignored when ``array.dtype.kind in ('u', 'i')`` (Phase 4 D-15).
     """
+    lower, upper = source_range
+    if not (np.isfinite(lower) and np.isfinite(upper) and lower < upper):
+        raise ValueError(f"source_range must be finite and lower<upper; got ({lower}, {upper})")
+
     array = np.asarray(array)
 
     if array.dtype != target_dtype:
+        if np.issubdtype(array.dtype, np.floating):
+            if not np.all(np.isfinite(array)):
+                raise ValueError(
+                    f"_normalize_base: input contains NaN/Inf (target_dtype={np.dtype(target_dtype).name})"
+                )
+            array = np.clip(array, lower, upper)
+            if np.issubdtype(target_dtype, np.floating):
+                # float -> float: linear remap [lower, upper] -> [0, 1]
+                return normalize_min_max(array, 0.0, 1.0, target_dtype, lower, upper)
+            return normalize_min_max(
+                array,
+                np.iinfo(target_dtype).min,
+                np.iinfo(target_dtype).max,
+                target_dtype,
+                lower,
+                upper,
+            )
+
+        # Integer-input path: unchanged from prior implementation
+        # (source_range silently ignored per D-15)
         if np.issubdtype(target_dtype, np.floating):
-            return normalize_min_max(array, 0, 1, target_dtype)
-
-        if 0 <= array.min() <= array.max() <= 1:
-            return normalize_min_max(
-                array,
-                np.iinfo(target_dtype).min,
-                np.iinfo(target_dtype).max,
-                target_dtype,
-                0,
-                1,
-            )
-
-        elif -1 <= array.min() <= array.max() <= 1:
-            return normalize_min_max(
-                array,
-                np.iinfo(target_dtype).min,
-                np.iinfo(target_dtype).max,
-                target_dtype,
-                -1,
-                1,
-            )
-
+            return normalize_min_max(array, 0.0, 1.0, target_dtype)
         return normalize_min_max(
-            array, np.iinfo(target_dtype).min, np.iinfo(target_dtype).max, target_dtype
+            array,
+            np.iinfo(target_dtype).min,
+            np.iinfo(target_dtype).max,
+            target_dtype,
         )
     return array
 
 
-def normalize_uint8(array: ArrayT) -> Array_Uint8_T:
-    """Normalize to UInt8
+def normalize_uint8(array: ArrayT, *, source_range: tuple[float, float] = (0.0, 1.0)) -> Array_Uint8_T:
+    """Normalize ``array`` into the ``uint8`` range.
+
+    Float-input path: clip to ``source_range`` then linearly scale to
+    ``[0, 255]`` (clip-and-saturate, Phase 4 D-12). NaN / +Inf / -Inf
+    raises ``ValueError`` (D-14). Integer-input path: ``source_range`` is
+    silently ignored (D-15).
 
     Parameters
     ----------
     array : ArrayT
+        Input array (float or integer dtype).
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive interval of the float input that maps onto ``[0, 255]``.
+        See :func:`_normalize_base` for full semantics.
 
     Returns
     -------
     Array_Uint8_T
     """
-    return _normalize_base(array, np.uint8)
+    return _normalize_base(array, np.uint8, source_range=source_range)
 
 
-def normalize_uint16(array: ArrayT) -> Array_Uint16_T:
-    """Normalize to UInt16
+def normalize_uint16(array: ArrayT, *, source_range: tuple[float, float] = (0.0, 1.0)) -> Array_Uint16_T:
+    """Normalize ``array`` into the ``uint16`` range.
+
+    Float-input path: clip to ``source_range`` then linearly scale to
+    ``[0, 65535]`` (clip-and-saturate, Phase 4 D-12). NaN / +Inf / -Inf
+    raises ``ValueError`` (D-14). Integer-input path: ``source_range`` is
+    silently ignored (D-15).
 
     Parameters
     ----------
     array : ArrayT
+        Input array (float or integer dtype).
+    source_range : tuple[float, float], keyword-only, default (0.0, 1.0)
+        Inclusive interval of the float input that maps onto ``[0, 65535]``.
+        See :func:`_normalize_base` for full semantics.
 
     Returns
     -------
     Array_Uint16_T
     """
-    return _normalize_base(array, np.uint16)
+    return _normalize_base(array, np.uint16, source_range=source_range)
 
 
 def normalize_int8(array: ArrayT) -> Array_Int8_T:
-    """Normalize to Int8
+    """Normalize ``array`` into the ``int8`` range.
 
     Parameters
     ----------
@@ -625,7 +715,7 @@ def normalize_int8(array: ArrayT) -> Array_Int8_T:
 
 
 def normalize_int16(array: ArrayT) -> Array_Int16_T:
-    """Normalize to Int16
+    """Normalize ``array`` into the ``int16`` range.
 
     Parameters
     ----------
@@ -639,7 +729,7 @@ def normalize_int16(array: ArrayT) -> Array_Int16_T:
 
 
 def normalize_int32(array: ArrayT) -> Array_Int32_T:
-    """Normalize to Int32
+    """Normalize ``array`` into the ``int32`` range.
 
     Parameters
     ----------
@@ -653,7 +743,7 @@ def normalize_int32(array: ArrayT) -> Array_Int32_T:
 
 
 def normalize_int64(array: ArrayT) -> Array_Int64_T:
-    """Normalize to Int64
+    """Normalize ``array`` into the ``int64`` range.
 
     Parameters
     ----------

@@ -58,7 +58,7 @@ class TestPydantic:
         assert hasattr(pydantic_copy, "name")
         assert "abcdef" == pydantic_copy.name
         assert hasattr(base_array_copy, "name")
-        assert getattr(base_array_copy, "name") is None
+        assert base_array_copy.name is None
 
     def test_exclude_on_model_copy(self):
         class A(BaseModel):
@@ -145,9 +145,7 @@ class TestPydantic:
         b_dumped = b.model_dump()
 
         # Show that the cached properties are dumped not passed onto the copy
-        assert (
-            "my_prop" in a_copy.__dict__.keys()
-        )  # my_prop is still in the dict when using model_copy
+        assert "my_prop" in a_copy.__dict__.keys()  # my_prop is still in the dict when using model_copy
         assert "my_prop" not in a_dumped.keys()
         assert hasattr(a, "my_prop")
         assert hasattr(a_copy, "my_prop")

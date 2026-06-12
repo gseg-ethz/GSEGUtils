@@ -12,7 +12,7 @@ authors = [
 maintainers = [
     {name = "Nicholas Meyer", email = "meyernic@ethz.ch"},
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 keywords = ["ONE", "TWO"]
 license = {file = "LICENSE"}
 classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#classifiers
@@ -26,17 +26,16 @@ classifiers = [ # https://packaging.python.org/en/latest/guides/writing-pyprojec
     "Framework :: Pydantic",
 
     "License :: OSI Approved :: BSD License",
-
-    "Private :: Do Not Upload", # REMOVE BEFORE FLIGHT -- PyPI will always reject packages with classifiers beginning with Private ::
 ]
 
 dynamic = ["version", "readme"]
 
 dependencies = [ # https://packaging.python.org/en/latest/specifications/dependency-specifiers/#dependency-specifiers
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
-    "numpy ~= 2.0",
+    "numpy >= 2.0, < 2.4",
     "pydantic ~= 2.11",
-    "numpydantic ~= 1.6"
+    "numpydantic ~= 1.6",
+    "psutil ~= 7.0",  # Phase 4 PERF-04 D-05 — RAM-aware streaming chunk size
 ]
 
 [tool.setuptools.dynamic]
@@ -49,6 +48,33 @@ version_scheme = "post-release"
 tag_regex = '^v?(?P<version>\d+\.\d+\.\d+)$'
 git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*.[0-9]*.[0-9]*"]
 
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "C90", "D"]
+ignore = ["E203"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# tests/**: relax docstring + minor-lint rules surfaced for the first time when
+# Plan 01-03a removed the `--no-verify` mask. D100..D103 + D106 are the standard
+# "test files don't need docstrings on every module/class/function" pattern;
+# D200/D400/D414 cover pre-existing doc-format quirks in long-standing tests;
+# E712 is the assert-style true/false comparison idiom test files commonly use;
+# B024 abstract-base-class-without-abstract-methods is a test-fixture pattern;
+# F841 is one pre-existing unused-variable case in test_validators.py:321.
+# Source-side D-rules remain fully gating per D-08; this relaxation is scoped
+# strictly to tests/**.
+"tests/**" = [
+    "D100", "D101", "D102", "D103", "D106", "D200", "D400", "D414",
+    "E712", "B024", "F841",
+]
+"docs/source/conf.py" = ["D100", "D103"]
+
 [project.urls]
 #Homepage = "https://example.com"
 Documentation = "https://gsegutils.readthedocs.io/en/stable/"
@@ -58,18 +84,21 @@ Changelog = "https://github.com/gseg-ethz/GSEGUtils/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 doc = [
-    "sphinx @ git+https://github.com/sphinx-doc/sphinx.git@9a08711e0e18c63c609070aa0a79019b4db45a78",
+    "sphinx ~= 8.2",
     "sphinx_rtd_theme"
 ]
 dev = [
-    "black~=25.1",            # formatter
-    "isort~=6.0",             # import sorter
-    "flake8~=7.3",            # style linter
-    "flake8-bugbear",         # best-practice checks
-    "flake8-docstrings",      # docstring checks
+    "ruff~=0.15",             # lint + format
     "mypy~=1.17",             # static typing
+    "pyright~=1.1",           # informational type checker
     "pre-commit~=4.3",        # git hooks runner
     "pytest~=8.4",            # test framework
     "pytest-cov~=5.0",        # pytest coverage plugin
     "coverage~=7.0",          # coverage reporting
+    "pytest-benchmark ~= 5.2",  # Phase 4 D-30 — opt-in microbenchmark plugin (excluded from CI)
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: opt-in microbenchmark (excluded from CI via `-m \"not benchmark\"`)",
 ]

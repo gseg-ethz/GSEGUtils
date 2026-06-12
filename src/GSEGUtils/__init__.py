@@ -11,6 +11,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""GSEGUtils — general utility functions and classes for GSEG research projects.
+
+The package eagerly re-exports its submodules so that ``import GSEGUtils`` makes
+the full public surface available without further imports. Typed companion
+``__init__.pyi`` stubs are auto-generated via :mod:`GSEGUtils.generate_init_stubs`.
+"""
+
 __all__ = [
     "__author__",
     "__email__",

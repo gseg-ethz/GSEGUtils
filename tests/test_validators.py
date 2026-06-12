@@ -403,6 +403,86 @@ def test_normalize_to_dedicated_int_dtype_funcs(func, dtype: np.dtype):
     assert np.allclose(computed, values)
 
 
+# ---------------------------------------------------------------------------
+# COUPLE-05 (Phase 4 D-12 / D-13 / D-14 / D-15 / D-16) regression suite.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("func", "dtype"),
+    (
+        (normalize_uint8, np.uint8),
+        (normalize_uint16, np.uint16),
+        (lambda a, **kw: linear_map_dtype(a, np.uint8, **kw), np.uint8),
+        (lambda a, **kw: linear_map_dtype(a, np.uint16, **kw), np.uint16),
+    ),
+)
+def test_normalize_uint_clip_and_saturate(func, dtype):
+    """COUPLE-05 D-12 / D-18 #1: default source_range=(0.0, 1.0) clips."""
+    out = func(np.array([-0.1, 0.5, 1.2], dtype=np.float64))
+    assert out.dtype == dtype
+    assert out[0] == np.iinfo(dtype).min  # clipped below default lower (0.0)
+    assert out[-1] == np.iinfo(dtype).max  # clipped above default upper (1.0)
+
+
+@pytest.mark.parametrize(
+    ("func", "dtype"),
+    (
+        (normalize_uint8, np.uint8),
+        (normalize_uint16, np.uint16),
+        (lambda a, **kw: linear_map_dtype(a, np.uint8, **kw), np.uint8),
+        (lambda a, **kw: linear_map_dtype(a, np.uint16, **kw), np.uint16),
+    ),
+)
+def test_normalize_uint_custom_source_range(func, dtype):
+    """COUPLE-05 D-13 / D-18 #2: caller-supplied source_range remaps endpoints."""
+    out = func(np.array([-0.5, 0.0, 0.5], dtype=np.float64), source_range=(-0.5, 0.5))
+    assert out.dtype == dtype
+    assert out[0] == np.iinfo(dtype).min
+    assert out[-1] == np.iinfo(dtype).max
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_normalize_uint_nan_inf_raises(bad):
+    """COUPLE-05 D-14 / D-18 #3: NaN / +Inf / -Inf in float input raises ValueError."""
+    with pytest.raises(ValueError, match=r"NaN/Inf"):
+        normalize_uint8(np.array([0.5, bad, 0.8], dtype=np.float64))
+
+
+def test_normalize_uint_integer_input_bypass():
+    """COUPLE-05 D-15 / D-18 #4: source_range silently ignored for integer input.
+
+    Integer-input path is preserved byte-for-byte; the kwarg is documented as
+    float-source-only. Confirms that passing a wildly-incorrect source_range
+    against an integer-dtype array produces identical output to omitting it.
+    """
+    arr = np.array([0, 128, 255], dtype=np.uint16)
+    with_kw = normalize_uint8(arr, source_range=(-100.0, 100.0))
+    without_kw = normalize_uint8(arr)
+    assert np.array_equal(with_kw, without_kw)
+    assert with_kw.dtype == np.uint8
+
+
+@pytest.mark.parametrize(
+    "bad_range",
+    [
+        (1.0, 0.0),  # lower > upper
+        (0.5, 0.5),  # lower == upper
+        (np.nan, 1.0),  # non-finite lower
+        (0.0, np.inf),  # non-finite upper
+        (-np.inf, 0.0),  # non-finite lower
+    ],
+)
+def test_normalize_uint_invalid_source_range_raises(bad_range):
+    """COUPLE-05 Claude's-Discretion / D-18 #5: bad source_range raises ValueError.
+
+    `lower < upper` and both bounds finite is validated inline by
+    `_normalize_base` (researcher discretion per CONTEXT D-13).
+    """
+    with pytest.raises(ValueError, match=r"source_range"):
+        normalize_uint8(np.array([0.5], dtype=np.float64), source_range=bad_range)
+
+
 def test_normalize_min_max_basic_types():
     # Test case 1: Float to uint8
     float_array = np.array([0.0, 0.5, 1.0])
@@ -576,17 +656,13 @@ def test_linear_map_dtype_integer_to_float():
     for int_type in int_types:
         for float_type in float_types:
             info = np.iinfo(int_type)
-            array = np.array(
-                [info.min, (info.max + info.min) / 2, info.max], dtype=int_type
-            )
+            array = np.array([info.min, (info.max + info.min) / 2, info.max], dtype=int_type)
 
             result = linear_map_dtype(array, float_type)
 
             assert result.dtype == float_type
             assert np.all((result >= 0.0) & (result <= 1.0))
-            assert np.allclose(
-                result[1], 0.5, atol=1 / (info.max - info.min)
-            )  # Middle value should be mapped to 0.5
+            assert np.allclose(result[1], 0.5, atol=1 / (info.max - info.min))  # Middle value should be mapped to 0.5
 
 
 def test_linear_map_dtype_float_to_integer():
@@ -708,9 +784,7 @@ def test_normalize_self_float_types():
             # Check if relative ordering and spacing is preserved
             min_val, max_val = array.min(), array.max()
             expected = (array - min_val) / (max_val - min_val)
-            np.testing.assert_allclose(
-                result, expected, rtol=1e-6 if dtype == np.float32 else 1e-15
-            )
+            np.testing.assert_allclose(result, expected, rtol=1e-6 if dtype == np.float32 else 1e-15)
 
 
 def test_normalize_self_multidimensional():
@@ -721,9 +795,7 @@ def test_normalize_self_multidimensional():
     assert result_2d.dtype == np.uint8
 
     # Test 3D float array
-    array_3d = np.array(
-        [[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]], dtype=np.float32
-    )
+    array_3d = np.array([[[0.1, 0.2], [0.3, 0.4]], [[0.5, 0.6], [0.7, 0.8]]], dtype=np.float32)
     result_3d = normalize_self(array_3d)
     assert result_3d.shape == array_3d.shape
     assert result_3d.dtype == np.float32
@@ -821,15 +893,30 @@ def test_normalize_base_invalid_inputs():
 
 
 def test_normalize_base_special_values():
-    """Test handling of special floating point values"""
+    """Test handling of special floating point values.
+
+    Phase 4 D-14: NaN / +Inf / -Inf in float input raises ValueError.
+    Previously this test asserted graceful handling — that behaviour was a
+    data-quality bug (NaN/Inf silently propagated as nonsense uint values).
+    """
     array = np.array([np.inf, -np.inf, np.nan, 1.0, 0.0], dtype=np.float64)
 
-    # To float
-    result_float = _normalize_base(array, np.float32)
-    assert result_float.dtype == np.float32
-    assert np.all(np.isfinite(result_float[~np.isnan(result_float)]))
+    # To float — NaN/Inf must raise
+    with pytest.raises(ValueError, match=r"NaN/Inf"):
+        _normalize_base(array, np.float32)
 
-    # To int
-    result_int = _normalize_base(array, np.uint8)
-    assert result_int.dtype == np.uint8
-    assert np.all((result_int >= 0) & (result_int <= 255))
+    # To int — NaN/Inf must raise
+    with pytest.raises(ValueError, match=r"NaN/Inf"):
+        _normalize_base(array, np.uint8)
+
+
+def test_normalize_base_clip_and_saturate_canary():
+    """Phase 4 D-12 / D-16 canary: float input outside default source_range clips.
+
+    Pre-fix behaviour rescaled by (array.min, array.max). Post-fix clips to
+    source_range=(0.0, 1.0) by default and saturates to target iinfo extremes.
+    """
+    out = _normalize_base(np.array([-0.1, 0.5, 1.2], dtype=np.float64), np.uint8)
+    assert out.dtype == np.uint8
+    assert out[0] == 0  # clipped below default lower (0.0)
+    assert out[-1] == 255  # clipped above default upper (1.0)
