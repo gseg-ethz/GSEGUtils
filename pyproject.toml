@@ -72,7 +72,6 @@ convention = "numpy"
 "tests/**" = [
     "D100", "D101", "D102", "D103", "D106", "D200", "D400", "D414",
     "E712", "B024", "F841",
-    "NPY002",  # TEMP — removed in 09-07's final task once GSEGUtils migration lands. See 09-04-PLAN.md must_haves.truths.
 ]
 "docs/source/conf.py" = ["D100", "D103"]
 
