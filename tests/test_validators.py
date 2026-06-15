@@ -296,7 +296,9 @@ def test_coerce_wrapped_horizontal_angles():
     assert np.allclose(coerced_original_coordinates, original)
 
 
-@pytest.mark.parametrize("array", (np.random.default_rng(17).random((3, 10)), np.random.default_rng(18).random((10, 3))))
+@pytest.mark.parametrize(
+    "array", (np.random.default_rng(17).random((3, 10)), np.random.default_rng(18).random((10, 3)))
+)
 def test_validate_Nx3_transposed(array):
     original = array.copy()
     if array.shape != (10, 3):
@@ -306,7 +308,9 @@ def test_validate_Nx3_transposed(array):
     assert np.allclose(array, original)
 
 
-@pytest.mark.parametrize("array", (np.random.default_rng(19).random((2, 10)), np.random.default_rng(20).random((10, 2))))
+@pytest.mark.parametrize(
+    "array", (np.random.default_rng(19).random((2, 10)), np.random.default_rng(20).random((10, 2)))
+)
 def test_validate_Nx2_transposed(array):
     original = array.copy()
     if array.shape != (10, 2):
