@@ -53,7 +53,7 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "I", "C90", "D"]
+select = ["E", "F", "W", "B", "I", "C90", "D", "NPY"]
 ignore = ["E203"]
 
 [tool.ruff.lint.pydocstyle]
@@ -103,12 +103,3 @@ dev = [
 markers = [
     "benchmark: opt-in microbenchmark (excluded from CI via `-m \"not benchmark\"`)",
 ]
-# TEST-07 D-13 + Phase 9 TEST-08 carry-over:
-# pytest-randomly is installed (dev dep) so devs see shuffled order locally, but a
-# deterministic seed pins CI until the module-identity pickle flake in
-# tests/test_lazy_disk_cache.py (test_purge_disk_on_gc_false_preserves_file_after_unpickle
-# + test_finalizer_re_registered_on_unpickle) is fixed. The flake is genuine: when
-# pytest-randomly schedules a sibling test that triggers a re-import of
-# GSEGUtils.lazy_disk_cache.disk_backed_ndarray before these two tests, pickle.dumps
-# fails with "not the same object". Phase 9 TEST-08 owns the fix.
-addopts = ["-p", "no:randomly"]

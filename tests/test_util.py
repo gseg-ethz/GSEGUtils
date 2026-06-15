@@ -150,7 +150,7 @@ def test_unique_rows_fast():
     assert np.array_equal(inverse, expected_inverse)
 
     # Test case 5: Compare with numpy's unique function
-    large_array = np.random.randint(0, 100, size=(1000, 4), dtype=np.int32)
+    large_array = np.random.default_rng(0).integers(0, 100, size=(1000, 4), dtype=np.int32)
     unique_fast, inverse_fast = unique_rows_fast(large_array)
     unique_np, inverse_np = np.unique(large_array, axis=0, return_inverse=True)
 
@@ -168,7 +168,7 @@ def test_unique_rows_fast_performance():
     # Test case 5: Performance test with large array
     n_rows = 1_000_000
     n_cols = 5
-    large_array = np.random.randint(0, 1000, size=(n_rows, n_cols), dtype=np.int32)
+    large_array = np.random.default_rng(1).integers(0, 1000, size=(n_rows, n_cols), dtype=np.int32)
 
     # Add some duplicates
     large_array[n_rows // 2 :] = large_array[: n_rows // 2]

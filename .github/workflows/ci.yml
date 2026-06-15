@@ -64,10 +64,21 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run tests
-        run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml
+        run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml:coverage-unit.xml
+
+      - name: Check for unseeded default_rng() (TEST-08 D-08)
+        shell: bash
+        run: |
+          if grep -rnE 'default_rng\(\s*\)' tests/ 2>/dev/null; then
+            echo "::error::Unseeded default_rng() detected in tests/ — every default_rng must take an explicit seed (TEST-08, see CONTRIBUTING.md)"
+            exit 1
+          fi
+          echo "TEST-08 OK: zero unseeded default_rng() calls in tests/"
 
       - name: Upload coverage to Codecov
         if: success()
         uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage-unit.xml
+          flags: unit

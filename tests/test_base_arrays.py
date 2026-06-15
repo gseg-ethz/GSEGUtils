@@ -58,25 +58,25 @@ class TestNpydanticType:
         float_64_validator = make_ndarray_type(None, dtype=np.float64)
 
         with pytest.raises(DtypeError):
-            float_64_validator(np.random.rand(10, 3).astype(np.float32))
+            float_64_validator(np.random.default_rng(2).random((10, 3)).astype(np.float32))
 
         # Test shape validation
         shape_10_3 = make_ndarray_type(10, 3)
         with pytest.raises(ShapeError):
-            shape_10_3(np.random.rand(10, 4))
+            shape_10_3(np.random.default_rng(3).random((10, 4)))
         with pytest.raises(ShapeError):
-            shape_10_3(np.random.rand(3, 3))
+            shape_10_3(np.random.default_rng(4).random((3, 3)))
 
 
 class TestBaseArray:
     cls = BaseArray
     base_shape: tuple[int, ...] = (10, 3)
 
-    def rand_32(self) -> npt.NDArray[np.float32]:
-        return np.random.rand(*self.base_shape).astype(np.float32)
+    def rand_32(self, seed: int = 0) -> npt.NDArray[np.float32]:
+        return np.random.default_rng(seed).random(self.base_shape).astype(np.float32)
 
-    def rand_64(self) -> npt.NDArray[np.float64]:
-        return np.random.rand(*self.base_shape).astype(np.float64)
+    def rand_64(self, seed: int = 1) -> npt.NDArray[np.float64]:
+        return np.random.default_rng(seed).random(self.base_shape).astype(np.float64)
 
     def test_initialisation(self) -> None:
         self.check_initialisation_options(self.rand_32())
@@ -318,14 +318,14 @@ class TestBaseArray:
         assert np.all(arr_2 == a)
 
         # Test on passing positional arguments
-        rand = np.random.rand(100, 4)
+        rand = np.random.default_rng(5).random((100, 4))
         arr_3 = a.copy(rand, deep=True)
         assert np.all(arr_3 == rand)
         assert arr_3 is not rand
         assert id(arr_3.arr) is not id(rand)
 
         # Test on passing of update argument
-        rand2 = np.random.rand(100, 4)
+        rand2 = np.random.default_rng(6).random((100, 4))
         arr_4 = a.copy(update={"arr": rand2}, deep=True)
         assert np.all(arr_4 == rand2)
         assert arr_4 is not rand2
@@ -531,7 +531,7 @@ class TestBaseArray:
         assert c.dtype == np.bool_
 
     def test_numeric_mixins(self) -> None:
-        a = self.cls(arr=np.random.rand(100, 100))
+        a = self.cls(arr=np.random.default_rng(7).random((100, 100)))
         # Base doesn't support math operators by default
         with pytest.raises(TypeError):
             a += 1
@@ -709,8 +709,8 @@ class TestNumpyMixins(TestBaseArray):
         assert np.all(abs(temp) <= 0.5)
 
     def test_mat_mul_mixins(self):
-        a_ = np.random.rand(5, 3)
-        b_ = np.random.rand(3, 2)
+        a_ = np.random.default_rng(8).random((5, 3))
+        b_ = np.random.default_rng(9).random((3, 2))
         c_expected = a_ @ b_
         c_expected_inv = b_.T @ a_.T
 
@@ -728,8 +728,8 @@ class TestNumpyMixins(TestBaseArray):
         assert np.all(c_inv == c_expected_inv)
         assert isinstance(c_inv, self.cls)
 
-        a_ = np.random.rand(5, 3)
-        b_ = np.random.rand(3, 3)
+        a_ = np.random.default_rng(10).random((5, 3))
+        b_ = np.random.default_rng(11).random((3, 3))
         c_expected = a_ @ b_
         a_ = self.cls(arr=a_)
         b_ = self.cls(arr=b_)
@@ -739,7 +739,7 @@ class TestNumpyMixins(TestBaseArray):
         assert np.all(a_ == c_expected)
         assert isinstance(a_, self.cls)
 
-        b_ = np.random.rand(3, 2)
+        b_ = np.random.default_rng(12).random((3, 2))
         with pytest.raises(ValueError):
             a_ @= b_
 
@@ -808,7 +808,7 @@ class TestFixedLength(TestNumpyMixins):
 
     def test_create_mask_from_boolean(self) -> None:
         array_fl = self.cls(arr=self.rand_32())
-        vals = np.random.randint(0, 2, array_fl.shape[0], dtype=bool)
+        vals = np.random.default_rng(13).integers(0, 2, array_fl.shape[0], dtype=bool)
         mask = array_fl.create_mask(vals)
         assert id(mask) == id(vals)
         assert np.all(mask == vals)
@@ -816,7 +816,7 @@ class TestFixedLength(TestNumpyMixins):
 
         for i in (8, 50, 100):
             with pytest.raises(ValueError):
-                array_fl.create_mask(np.random.randint(0, 2, i, dtype=bool))
+                array_fl.create_mask(np.random.default_rng(14).integers(0, 2, i, dtype=bool))
 
     def test_create_mask_from_sequence(self) -> None:
         array_fl = self.cls(arr=self.rand_32())
@@ -851,7 +851,7 @@ class TestFixedLength(TestNumpyMixins):
         with pytest.raises(IndexError):
             array_fl.create_mask(np.array([0, 4, 15]))
 
-    @pytest.mark.parametrize("value", ("1 2 3", True, np.random.rand(10), {1: "1", 2: "2"}))
+    @pytest.mark.parametrize("value", ("1 2 3", True, np.random.default_rng(15).random(10), {1: "1", 2: "2"}))
     def test_invalid_create_mask_values(self, value: Any) -> None:
         array_fl = self.cls(arr=self.rand_32())
 
@@ -915,7 +915,7 @@ class TestBaseVector(TestFixedLength):
     base_shape = (10,)
 
     def test_initialisation(self) -> None:
-        data = np.random.rand(10)
+        data = np.random.default_rng(16).random(10)
         self.check_initialisation_options(data)
 
         vec = self.cls(arr=data)
@@ -941,7 +941,9 @@ class TestBaseVector(TestFixedLength):
         assert np.sum(vec) == 10
         assert vec.shape == (10,)
 
-    @pytest.mark.parametrize("value", (np.random.rand(10, 3), BaseArray(arr=np.random.rand(10, 2))))
+    @pytest.mark.parametrize(
+        "value", (np.random.default_rng(17).random((10, 3)), BaseArray(arr=np.random.default_rng(18).random((10, 2))))
+    )
     def test_vector_validation(self, value: npt.ArrayLike) -> None:
         with pytest.raises(ValidationError):
             self.cls(arr=value)
