@@ -137,4 +137,3 @@ Modules
    :maxdepth: 1
 
    GSEGUtils.base_arrays
-   GSEGUtils.base_types

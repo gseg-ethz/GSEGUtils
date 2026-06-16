@@ -75,6 +75,12 @@ jobs:
           fi
           echo "TEST-08 OK: zero unseeded default_rng() calls in tests/"
 
+      - name: Build docs (warnings as errors)
+        working-directory: .
+        run: |
+          pip install .[doc]
+          sphinx-build -W --keep-going -b html docs/source docs/_build/html
+
       - name: Upload coverage to Codecov
         if: success()
         uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
