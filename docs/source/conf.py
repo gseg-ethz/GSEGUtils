@@ -1,6 +1,12 @@
 import os
 import sys
 
+# Phase 09.1 Plan 01 residual warnings: 208
+# (after numpydantic fix; toc.not_included and PointCloudData/load_file duplicate-object
+# warnings not applicable to GSEGUtils; the 208 are all nitpicky-mode ref.class/ref.func/
+# ref.meth/ref.attr/ref.obj/ref.data surfaced cross-ref issues + some pre-existing
+# duplicate object descriptions in lazy_disk_cache; Plan 09.1-03 will add
+# nitpick_ignore_regex entries for genuinely unresolvable refs)
 from sphinx.util import logging
 
 logger = logging.getLogger(__name__)
