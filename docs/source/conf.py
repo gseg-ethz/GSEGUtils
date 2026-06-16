@@ -47,6 +47,11 @@ autodoc_mock_imports = []  # []
 autodoc_typehints = "description"  # 'signature', 'init, 'both', 'none'
 autodoc_typehints_description_target = "all"  # 'all', 'documented', 'documented_params'
 autodoc_type_aliases = {"LowerStr": "str"}  # {}
+
+# Phase 09.1 baseline: nitpicky mode so new self-inflicted broken refs fail the build.
+# nitpick_ignore_regex entries will be filled by Plan 09.1-03 after build-iterate.
+nitpicky = True
+nitpick_ignore_regex: list[tuple[str, str]] = []
 autodoc_typehints_format = "short"  # 'short'
 autodoc_preserve_defaults = True  # False
 autodoc_use_type_comments = True  # True
@@ -75,5 +80,5 @@ def setup(app):
 
 
 rst_epilog = """
-.. |NDArray| replace:: :external+numpydantic:py:class:`NDArray <numpydantic.NDArray>`
+.. |NDArray| replace:: :external+numpydantic:py:class:`NDArray <numpydantic.ndarray.NDArray>`
 """
