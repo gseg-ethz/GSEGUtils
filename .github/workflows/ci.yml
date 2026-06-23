@@ -43,22 +43,18 @@ jobs:
     name: Tests (pytest)
     needs: [lint]
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
 
       - name: Install dev deps
         run: pip install .[dev]
