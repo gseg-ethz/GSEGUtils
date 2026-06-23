@@ -5,6 +5,7 @@
 
 Called from the Lint (pre-commit) CI job. Exits 0 = clean; exits 1 = violation.
 """
+
 import pathlib
 import re
 import sys
@@ -35,9 +36,8 @@ def is_publish_step(step: dict[str, object]) -> bool:
     """Return True if the step contains a publish action or twine upload."""
     uses = step.get("uses", "") or ""
     run = step.get("run", "") or ""
-    return (
-        any(re.search(p, str(uses)) for p in PUBLISH_STEP_PATTERNS)
-        or any(re.search(p, str(run)) for p in PUBLISH_STEP_PATTERNS)
+    return any(re.search(p, str(uses)) for p in PUBLISH_STEP_PATTERNS) or any(
+        re.search(p, str(run)) for p in PUBLISH_STEP_PATTERNS
     )
 
 
@@ -58,9 +58,7 @@ for wf_path in sorted(workflows_dir.glob("*.yml")):
             if is_publish_step(step):
                 allowed_env = ALLOWED.get(wf_path.name)
                 if allowed_env is None:
-                    violations.append(
-                        f"{wf_path.name} job={job_id}: publish step found in non-allowed file"
-                    )
+                    violations.append(f"{wf_path.name} job={job_id}: publish step found in non-allowed file")
                 elif env_name != allowed_env:
                     violations.append(
                         f"{wf_path.name} job={job_id}: publish step requires"
