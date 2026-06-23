@@ -62,9 +62,12 @@ coords3d.arr = np.random.rand(100, 3)
 # Valid as the array is of shape Nx3
 ```
 
-## Publication Policy
+## Verifying Releases
 
-This package is internal to ETH Zurich's GSEG group and is not published to PyPI.
-The `release-please` workflow produces build artefacts attached to GitHub Releases;
-internal users install via `pip install <wheel-url>` from those releases. There is
-no PyPI publish step; introducing one requires explicit ADR-level review.
+Download a wheel from a release and verify its Sigstore provenance attestation:
+
+```bash
+gh attestation verify gsegutils-0.5.1-py3-none-any.whl --repo gseg-ethz/GSEGUtils
+```
+
+See [RELEASE.md](RELEASE.md) for claim fields, rollback procedure, and environment details.
