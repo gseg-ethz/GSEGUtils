@@ -73,6 +73,11 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     (r"py:.*", r"numpydantic\.vendor\..*"),
     (r"py:class", r"numpydantic\.NDArray"),
     (r"py:class", r"NDArray"),
+    # numpydantic 1.10 made NDArray a runtime Protocol; autodoc now renders the
+    # fully-parametrised numpydantic.ndarray.NDArray[...] form (submodule-qualified,
+    # expanded dtype tuple) for raw NDArray-typed members, which no inventory exports.
+    # Pre-1.10 rendered the shorter numpydantic.NDArray form covered above.
+    (r"py:class", r"numpydantic\.ndarray\.NDArray.*"),
     # ── numpy internal / private types ─────────────────────────────────────────
     # numpy._typing is not part of the public API and not in the numpy inventory.
     (r"py:class", r"numpy\._typing\..*"),
