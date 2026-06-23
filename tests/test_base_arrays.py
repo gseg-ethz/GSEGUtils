@@ -23,6 +23,17 @@ from GSEGUtils.base_arrays import (  # type: ignore[import-untyped]
 from GSEGUtils.base_types import make_ndarray_type  # type: ignore[import-untyped]
 
 
+def _ndarray_args(ndarray_type: Any) -> tuple[Any, ...]:
+    """Return the structural ``(Shape, dtype)`` args of a numpydantic ``NDArray`` alias.
+
+    numpydantic 1.10 made ``NDArray`` a runtime ``Protocol``, so two equivalently
+    parametrised aliases no longer compare equal with ``==`` (and ``str``/``repr``
+    collapse every alias to the same class name). Their ``__args__`` tuple is the
+    stable structural identity for shape + dtype, so the tests compare that instead.
+    """
+    return ndarray_type.__args__  # type: ignore[no-any-return]
+
+
 class TestNpydanticType:
     """
     Tests to support the make_ndarray_type function as a simple helper function
@@ -36,22 +47,26 @@ class TestNpydanticType:
         -------
 
         """
-        assert NDArray[Shape["*"], Any] == make_ndarray_type(None)
-        assert NDArray[Shape["*, *"], Any] == make_ndarray_type(None, None)
-        assert NDArray[Shape["*, *, *"], Any] == make_ndarray_type(None, None, None)
-        assert NDArray[Shape["8"], Any] == make_ndarray_type(8)
-        assert NDArray[Shape["8"], Any] == make_ndarray_type("8")
-        assert NDArray[Shape["2, 4, 7, 9"], Any] == make_ndarray_type(2, 4, 7, 9)
-        assert NDArray[Shape["*, ..."], Any] == make_ndarray_type()
+        assert _ndarray_args(NDArray[Shape["*"], Any]) == _ndarray_args(make_ndarray_type(None))
+        assert _ndarray_args(NDArray[Shape["*, *"], Any]) == _ndarray_args(make_ndarray_type(None, None))
+        assert _ndarray_args(NDArray[Shape["*, *, *"], Any]) == _ndarray_args(make_ndarray_type(None, None, None))
+        assert _ndarray_args(NDArray[Shape["8"], Any]) == _ndarray_args(make_ndarray_type(8))
+        assert _ndarray_args(NDArray[Shape["8"], Any]) == _ndarray_args(make_ndarray_type("8"))
+        assert _ndarray_args(NDArray[Shape["2, 4, 7, 9"], Any]) == _ndarray_args(make_ndarray_type(2, 4, 7, 9))
+        assert _ndarray_args(NDArray[Shape["*, ..."], Any]) == _ndarray_args(make_ndarray_type())
 
     def test_type_definitions(self) -> None:
-        assert NDArray[Shape["*"], np.float32] == make_ndarray_type(None, dtype=np.float32)
-        assert NDArray[Shape["*"], np.float64] == make_ndarray_type(None, dtype=np.float64)
-        assert NDArray[Shape["*"], np.uint8] == make_ndarray_type(None, dtype=np.uint8)
-        assert NDArray[Shape["*"], np.uint16] == make_ndarray_type(None, dtype=np.uint16)
-        assert NDArray[Shape["*"], np.int32] == make_ndarray_type(None, dtype=np.int32)
-        assert NDArray[Shape["*"], np.bool_] == make_ndarray_type(None, dtype=np.bool_)
-        assert NDArray[Shape["*, ..."], np.bool_] == make_ndarray_type(dtype=np.bool_)
+        assert _ndarray_args(NDArray[Shape["*"], np.float32]) == _ndarray_args(
+            make_ndarray_type(None, dtype=np.float32)
+        )
+        assert _ndarray_args(NDArray[Shape["*"], np.float64]) == _ndarray_args(
+            make_ndarray_type(None, dtype=np.float64)
+        )
+        assert _ndarray_args(NDArray[Shape["*"], np.uint8]) == _ndarray_args(make_ndarray_type(None, dtype=np.uint8))
+        assert _ndarray_args(NDArray[Shape["*"], np.uint16]) == _ndarray_args(make_ndarray_type(None, dtype=np.uint16))
+        assert _ndarray_args(NDArray[Shape["*"], np.int32]) == _ndarray_args(make_ndarray_type(None, dtype=np.int32))
+        assert _ndarray_args(NDArray[Shape["*"], np.bool_]) == _ndarray_args(make_ndarray_type(None, dtype=np.bool_))
+        assert _ndarray_args(NDArray[Shape["*, ..."], np.bool_]) == _ndarray_args(make_ndarray_type(dtype=np.bool_))
 
     def test_numpydantic_type_usage(self) -> None:
         # Test type validation
