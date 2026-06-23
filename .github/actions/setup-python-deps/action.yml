@@ -1,0 +1,23 @@
+name: Setup Python + deps (GSEGUtils)
+description: >
+  Set up Python 3.12, restore pip cache, and install GSEGUtils[dev]. The
+  caller MUST run `actions/checkout` BEFORE invoking this composite —
+  GitHub needs the repo on the runner filesystem to find this action.yml.
+  Intentionally asymmetric with the pchandler variant — omits the
+  deploy-key SSH step (no cross-repo git+ssh dep). See pchandler workspace
+  Phase 8 CONTEXT.md Claude's Discretion §Composite action scope.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+      with:
+        python-version: "3.12"
+
+    - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
+
+    - shell: bash
+      run: pip install .[dev]
