@@ -41,7 +41,7 @@ repos:
         additional_dependencies:
           - "pydantic~=2.11"
           - "numpy>=2.0,<2.4"
-          - "numpydantic~=1.6"
+          - "numpydantic~=1.10"
 
   - repo: local
     hooks:
