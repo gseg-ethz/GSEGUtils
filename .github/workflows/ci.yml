@@ -31,6 +31,10 @@ jobs:
           python -m pip install pre-commit
           pre-commit run --all-files
 
+      - name: Check publish gate (PYPI-01)
+        shell: bash
+        run: python .github/scripts/check_publish_gate.py
+
   tests:
     name: Tests (pytest)
     needs: [lint]

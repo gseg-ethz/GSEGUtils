@@ -34,12 +34,12 @@ dependencies = [ # https://packaging.python.org/en/latest/specifications/depende
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
     "numpy >= 2.0, < 2.4",
     "pydantic ~= 2.11",
-    "numpydantic ~= 1.6",
+    "numpydantic ~= 1.10",
     "psutil ~= 7.0",  # Phase 4 PERF-04 D-05 — RAM-aware streaming chunk size
 ]
 
 [tool.setuptools.dynamic]
-readme = {file = ["README.md"]}
+readme = {file = ["README.md"], content-type = "text/markdown"}
 
 [tool.setuptools_scm]
 write_to = "src/GSEGUtils/_version.py"
