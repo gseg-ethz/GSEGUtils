@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.1...v0.5.2) (2026-06-24)
+
+
+### 🐛 Bug Fixes
+
+* declare README long_description content-type as text/markdown ([#31](https://github.com/gseg-ethz/GSEGUtils/issues/31)) ([7343d2b](https://github.com/gseg-ethz/GSEGUtils/commit/7343d2b45c275eb78520ec6b5f4e8a4ab12c274b))
+
 ## [0.5.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.0...v0.5.1) (2026-06-23)
 
 
