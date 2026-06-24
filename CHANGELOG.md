@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.0...v0.5.1) (2026-06-23)
+
+
+### 🐛 Bug Fixes
+
+* **deps:** numpydantic ~=1.10 + register publish-testpypi.yml on main ([#27](https://github.com/gseg-ethz/GSEGUtils/issues/27)) ([3602cb5](https://github.com/gseg-ethz/GSEGUtils/commit/3602cb5f43c332f8c9f69e39068c8b5ce205b92f))
+
+
+### 🤖 Continuous Integration
+
+* **11-05:** promote App-token release-please.yml to main (REL-04) ([#30](https://github.com/gseg-ethz/GSEGUtils/issues/30)) ([6896382](https://github.com/gseg-ethz/GSEGUtils/commit/6896382cef437bd38288ac11f7510724042e1885))
+* **11-05:** register publish-pypi.yml on main (prod PyPI gate cleared) ([#29](https://github.com/gseg-ethz/GSEGUtils/issues/29)) ([522746b](https://github.com/gseg-ethz/GSEGUtils/commit/522746b993982efba7d38decc5abdc50aefc28c8))
+
 ## [0.5.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.4.4...v0.5.0) (2026-06-12)
 
 
