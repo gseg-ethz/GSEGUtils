@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, refactor/gsd]
+    branches: [main, develop/gsd]
 
 jobs:
   lint:
@@ -16,48 +16,33 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           # On PRs, check out the head branch so pushes work
           ref: ${{ github.event_name == 'pull_request' && github.head_ref || '' }}
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - uses: ./.github/actions/setup-python-deps
 
-      - name: Run pre-commit on PRs
-        if: github.event_name == 'pull_request'
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --all-files
+      - name: Run pre-commit
+        shell: bash
+        run: |
+          python -m pip install pre-commit
+          pre-commit run --all-files
 
-      - name: Run pre-commit on push
-        if: github.event_name == 'push'
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --all-files
+      - name: Check publish gate (PYPI-01)
+        shell: bash
+        run: python .github/scripts/check_publish_gate.py
 
   tests:
     name: Tests (pytest)
     needs: [lint]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-3.12-${{ hashFiles('pyproject.toml') }}
-
-      - name: Install dev deps
-        run: pip install .[dev]
+      - uses: ./.github/actions/setup-python-deps
 
       - name: Pyright (informational)
         id: pyright
@@ -72,17 +57,34 @@ jobs:
 
       - name: Upload pyright report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pyright-report-${{ github.run_id }}
           path: .pyright-report.json
           if-no-files-found: ignore
 
       - name: Run tests
-        run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml
+        run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml:coverage-unit.xml
+
+      - name: Check for unseeded default_rng() (TEST-08 D-08)
+        shell: bash
+        run: |
+          if grep -rnE 'default_rng\(\s*\)' tests/ 2>/dev/null; then
+            echo "::error::Unseeded default_rng() detected in tests/ — every default_rng must take an explicit seed (TEST-08, see CONTRIBUTING.md)"
+            exit 1
+          fi
+          echo "TEST-08 OK: zero unseeded default_rng() calls in tests/"
+
+      - name: Build docs (warnings as errors)
+        working-directory: .
+        run: |
+          pip install .[doc]
+          sphinx-build -W --keep-going -b html docs/source docs/_build/html
 
       - name: Upload coverage to Codecov
         if: success()
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage-unit.xml
+          flags: unit

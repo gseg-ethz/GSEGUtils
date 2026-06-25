@@ -50,5 +50,6 @@ Use as a callable validator::
    :members:
    :undoc-members:
    :show-inheritance:
+   :exclude-members: names, formats
 
 .. _Numpydantic: https://numpydantic.readthedocs.io/en/latest/index.html

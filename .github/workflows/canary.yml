@@ -1,0 +1,85 @@
+name: Actions Deprecation Canary
+
+# Forward-protection canary (CI-09): exercises the Node-pinned actions on
+# a weekly schedule, greps the run log for `deprecat|node20|node-20`, and
+# opens a GitHub issue labeled `ci, deprecation-canary` when found.
+#
+# Triggers MUST stay restricted to schedule + workflow_dispatch. Permissions
+# MUST stay scoped to contents:read + issues:write — never grant the OIDC
+# ID token write permission (canary does not publish).
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'   # Monday 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-python-deps
+
+      - name: Exercise upload-artifact (no-op smoke)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: canary-noop-${{ github.run_id }}
+          path: README.md
+          if-no-files-found: ignore
+
+      - name: Detect deprecation annotations
+        id: detect
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          WARNINGS=$(gh run view "${{ github.run_id }}" --log 2>/dev/null \
+            | grep -iE 'deprecat|node20|node-20' \
+            | head -50 \
+            || true)
+          if [ -n "$WARNINGS" ]; then
+            {
+              echo 'found=true'
+              echo 'WARNINGS<<__EOF__'
+              echo "$WARNINGS"
+              echo '__EOF__'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open deprecation issue
+        if: steps.detect.outputs.found == 'true'
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71  # v9.0.0
+        env:
+          WARNINGS: ${{ steps.detect.outputs.WARNINGS }}
+        with:
+          script: |
+            const warnings = process.env.WARNINGS || '(no body captured)';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Actions deprecation detected — canary alert',
+              body: [
+                'Weekly canary detected deprecation warnings in run ' +
+                `[${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`,
+                '',
+                'First 50 matching log lines:',
+                '',
+                '```',
+                warnings,
+                '```',
+                '',
+                'Triggered by `.github/workflows/canary.yml` (CI-09).',
+              ].join('\n'),
+              labels: ['ci', 'deprecation-canary'],
+            });

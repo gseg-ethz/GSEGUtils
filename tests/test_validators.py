@@ -173,7 +173,7 @@ class TestValidation(BaseAngleTestClass):
             "values, func",
             [
                 (np.array([0, 1.3, 200, 300000.21323]), main_test),
-                (np.random.rand(100, 100), main_test),
+                (np.random.default_rng(0).random((100, 100)), main_test),
                 (np.zeros((100, 100)), main_test),
             ],
         )
@@ -184,7 +184,7 @@ class TestValidation(BaseAngleTestClass):
             "values, func",
             [
                 (np.array([-1.3, -2, np.inf, -np.pi]), main_test),
-                (np.random.rand(100, 100) * -1, main_test),
+                (np.random.default_rng(1).random((100, 100)) * -1, main_test),
                 ([1.3, 2000, 23445.123], main_test),
                 ((1.3, 2000, 23445.123), main_test),
             ],
@@ -204,9 +204,9 @@ class TestValidation(BaseAngleTestClass):
                     np.array(
                         [
                             [
-                                np.random.rand(10) * 100,
-                                np.random.rand(10) * TWO_PI - PI,
-                                np.random.rand(10) * PI,
+                                np.random.default_rng(2).random(10) * 100,
+                                np.random.default_rng(3).random(10) * TWO_PI - PI,
+                                np.random.default_rng(4).random(10) * PI,
                             ]
                         ]
                     ),
@@ -223,9 +223,9 @@ class TestValidation(BaseAngleTestClass):
                 (
                     np.array(
                         [
-                            np.random.rand(10) * 100 - 50,
-                            np.random.rand(10) * TWO_PI - PI,
-                            np.random.rand(10) * PI,
+                            np.random.default_rng(5).random(10) * 100 - 50,
+                            np.random.default_rng(6).random(10) * TWO_PI - PI,
+                            np.random.default_rng(7).random(10) * PI,
                         ]
                     ),
                     main_test,
@@ -233,9 +233,9 @@ class TestValidation(BaseAngleTestClass):
                 (
                     np.array(
                         [
-                            np.random.rand(10) * 100,
-                            np.random.rand(10) * TWO_PI - PI,
-                            np.random.rand(10) * TWO_PI,
+                            np.random.default_rng(8).random(10) * 100,
+                            np.random.default_rng(9).random(10) * TWO_PI - PI,
+                            np.random.default_rng(10).random(10) * TWO_PI,
                         ]
                     ),
                     main_test,
@@ -243,9 +243,9 @@ class TestValidation(BaseAngleTestClass):
                 (
                     np.array(
                         [
-                            np.random.rand(10) * 100,
-                            np.random.rand(10) * TWO_PI,
-                            np.random.rand(10) * PI,
+                            np.random.default_rng(11).random(10) * 100,
+                            np.random.default_rng(12).random(10) * TWO_PI,
+                            np.random.default_rng(13).random(10) * PI,
                         ]
                     ),
                     main_test,
@@ -253,9 +253,9 @@ class TestValidation(BaseAngleTestClass):
                 (
                     np.array(
                         [
-                            np.random.rand(10) * 100,
-                            np.random.rand(10) * -TWO_PI,
-                            np.random.rand(10) * PI,
+                            np.random.default_rng(14).random(10) * 100,
+                            np.random.default_rng(15).random(10) * -TWO_PI,
+                            np.random.default_rng(16).random(10) * PI,
                         ]
                     ),
                     main_test,
@@ -296,7 +296,9 @@ def test_coerce_wrapped_horizontal_angles():
     assert np.allclose(coerced_original_coordinates, original)
 
 
-@pytest.mark.parametrize("array", (np.random.rand(3, 10), np.random.rand(10, 3)))
+@pytest.mark.parametrize(
+    "array", (np.random.default_rng(17).random((3, 10)), np.random.default_rng(18).random((10, 3)))
+)
 def test_validate_Nx3_transposed(array):
     original = array.copy()
     if array.shape != (10, 3):
@@ -306,7 +308,9 @@ def test_validate_Nx3_transposed(array):
     assert np.allclose(array, original)
 
 
-@pytest.mark.parametrize("array", (np.random.rand(2, 10), np.random.rand(10, 2)))
+@pytest.mark.parametrize(
+    "array", (np.random.default_rng(19).random((2, 10)), np.random.default_rng(20).random((10, 2)))
+)
 def test_validate_Nx2_transposed(array):
     original = array.copy()
     if array.shape != (10, 2):
@@ -317,8 +321,8 @@ def test_validate_Nx2_transposed(array):
 
 
 def test_invalid_transposed_2d():
-    a = np.random.rand(100, 100, 100)
-    b = np.random.rand(100, 100)
+    a = np.random.default_rng(21).random((100, 100, 100))
+    b = np.random.default_rng(22).random((100, 100))
     with pytest.raises(ValueError):
         validate_transposed_2d_array(a, n=3)
 
@@ -391,7 +395,7 @@ def test_validate_in_range_invalid():
     ),
 )
 def test_normalize_to_dedicated_int_dtype_funcs(func, dtype: np.dtype):
-    values = np.random.rand(100).astype(np.float64)
+    values = np.random.default_rng(23).random(100).astype(np.float64)
     lower = np.iinfo(dtype).min
     upper = np.iinfo(dtype).max
 
@@ -576,7 +580,7 @@ def test_normalize_min_max_multidimensional():
     assert result.dtype == np.uint8
 
     # Test with 3D array
-    array_3d = np.random.rand(3, 4, 5)
+    array_3d = np.random.default_rng(24).random((3, 4, 5))
     result = normalize_min_max(array_3d, -1, 1, np.float32)
     assert result.shape == array_3d.shape
     assert result.dtype == np.float32
@@ -730,7 +734,7 @@ def test_linear_map_dtype_multidimensional():
     assert np.all((result >= 0.0) & (result <= 1.0))
 
     # Test with 3D array
-    array_3d = np.random.randint(0, 255, size=(3, 4, 5), dtype=np.uint8)
+    array_3d = np.random.default_rng(25).integers(0, 255, size=(3, 4, 5), dtype=np.uint8)
     result = linear_map_dtype(array_3d, np.int16)
 
     assert result.shape == array_3d.shape
@@ -873,7 +877,7 @@ def test_normalize_base_multidimensional():
     assert np.all((result >= 0.0) & (result <= 1.0))
 
     # 3D array to int
-    array_3d = np.random.uniform(0, 1, size=(2, 3, 4)).astype(np.float32)
+    array_3d = np.random.default_rng(26).random((2, 3, 4)).astype(np.float32)
     result = _normalize_base(array_3d, np.uint8)
     assert result.shape == array_3d.shape
     assert result.dtype == np.uint8
