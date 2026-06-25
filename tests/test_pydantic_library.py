@@ -9,7 +9,7 @@ from GSEGUtils.base_arrays import BaseArray
 
 class TestPydantic:
     def test_initialisation_of_multiple_instances(self):
-        a = np.random.rand(10, 3)
+        a = np.random.default_rng(0).random((10, 3))
         b = a + 3
         c = b * 2
         d = c / 4.2
@@ -40,7 +40,7 @@ class TestPydantic:
             num: int = Field(default=1)
             name: str | None = Field(default=None, exclude=True)
 
-        a = A(arr=np.random.rand(10, 3), name="test")
+        a = A(arr=np.random.default_rng(1).random((10, 3)), name="test")
         assert "test" == a.name
         a.name = "abcdef"
 

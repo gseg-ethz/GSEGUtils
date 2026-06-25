@@ -7,11 +7,9 @@ Plan 02-05 extends with atomicity regression tests.
 """
 
 import gc
-import importlib
 import json
 import os
 import pickle
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -835,47 +833,26 @@ def test_snapshot_before_mutate_ordering(tmp_cache_dir: Path, monkeypatch: pytes
 def test_convert_to_memmap_import_error_fallback(tmp_path, monkeypatch):
     """D-07 #3: psutil ImportError fallback uses the fixed-bytes chunk constant.
 
-    Simulates the restricted-runtime case (containers without /proc) by
-    setting ``sys.modules['psutil'] = None`` and reloading the module so the
-    module-top ``try: import psutil except ImportError: psutil = None`` block
-    re-executes and binds ``psutil = None``. Asserts:
-
-    1. After reload, ``ldc_mod.psutil is None`` (the ImportError-fallback
-       state, not the import-succeeded state) — T-04-P4-2 mitigation present.
-    2. ``_convert_to_memmap`` still produces correct memmap contents (the
-       fixed-bytes fallback path stays functionally equivalent).
-
-    Pattern: ``monkeypatch.setitem(sys.modules, 'psutil', None)`` followed by
-    ``importlib.reload(ldc_mod)`` re-evaluates the try-import as if psutil
-    were not installed. The monkeypatch fixture restores ``sys.modules`` at
-    teardown, so a fresh reload at the bottom of the test puts the real
-    psutil binding back for downstream tests.
+    F2: replaces importlib.reload(ldc_mod) + importlib.reload(dbna_mod) — which
+    rebinds class objects in sys.modules and breaks pickle's class-identity check —
+    with monkeypatch.setattr, which patches the attribute without touching class
+    objects. Pickle stability preserved by construction (Phase 9 D-12 F2).
     """
-    monkeypatch.setitem(sys.modules, "psutil", None)
-    try:
-        importlib.reload(ldc_mod)
-        assert ldc_mod.psutil is None
-        # Re-import DiskBackedNDArray bound to the reloaded LazyDiskCache.
-        from GSEGUtils.lazy_disk_cache import disk_backed_ndarray as dbna_mod
+    import GSEGUtils.lazy_disk_cache.lazy_disk_cache as ldc_mod
+    from GSEGUtils.lazy_disk_cache import disk_backed_ndarray as dbna_mod
 
-        importlib.reload(dbna_mod)
+    monkeypatch.setattr(ldc_mod, "psutil", None)
+    assert ldc_mod.psutil is None
 
-        arr = np.arange(64, dtype=np.float32)
-        cache_path = tmp_path / "fallback.dat"
-        bd = dbna_mod.DiskBackedNDArray(
-            arr.copy(),
-            enable_caching=True,
-            cache_path=cache_path,
-            purge_disk_on_gc=False,
-            automatic_offloading=False,
-        )
-        assert bd._mmap is not None
-        np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
-    finally:
-        # Restore the real psutil binding for subsequent tests, regardless of
-        # whether monkeypatch cleanup has run yet.
-        sys.modules.pop("psutil", None)
-        importlib.reload(ldc_mod)
-        from GSEGUtils.lazy_disk_cache import disk_backed_ndarray as dbna_mod
-
-        importlib.reload(dbna_mod)
+    arr = np.arange(64, dtype=np.float32)
+    cache_path = tmp_path / "fallback.dat"
+    bd = dbna_mod.DiskBackedNDArray(
+        arr.copy(),
+        enable_caching=True,
+        cache_path=cache_path,
+        purge_disk_on_gc=False,
+        automatic_offloading=False,
+    )
+    assert bd._mmap is not None
+    np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
+    # No finally block needed — monkeypatch.setattr auto-restores on teardown.

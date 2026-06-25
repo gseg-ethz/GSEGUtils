@@ -110,6 +110,9 @@ ENV/
 [Ll]ib64
 [Ll]ocal
 [Ss]cripts
+# Explicitly un-ignore the CI helper scripts directory (.github/scripts/ was matched
+# by the [Ss]cripts virtualenv pattern above — this negation restores tracking).
+!.github/scripts/
 pyvenv.cfg
 .venv
 pip-selfcheck.json
