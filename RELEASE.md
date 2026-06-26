@@ -1,7 +1,7 @@
 # Release Process — GSEGUtils
 
 **Repository:** gseg-ethz/GSEGUtils
-**First published:** TBD (fill in after first production publish)
+**First published:** 0.5.2 on 2026-06-24
 **Publish workflow:** `.github/workflows/publish-pypi.yml`
 
 ---
