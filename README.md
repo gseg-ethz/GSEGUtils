@@ -67,7 +67,7 @@ coords3d.arr = np.random.rand(100, 3)
 Download a wheel from a release and verify its Sigstore provenance attestation:
 
 ```bash
-gh attestation verify gsegutils-0.5.1-py3-none-any.whl --repo gseg-ethz/GSEGUtils
+gh attestation verify gsegutils-0.5.2-py3-none-any.whl --repo gseg-ethz/GSEGUtils
 ```
 
 See [RELEASE.md](RELEASE.md) for claim fields, rollback procedure, and environment details.
