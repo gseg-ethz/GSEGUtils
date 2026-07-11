@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.2...v0.5.3) (2026-07-11)
+
+
+### ✨ Features
+
+* **lazy_disk_cache:** public register_lazy_disk_cache_class hook ([#38](https://github.com/gseg-ethz/GSEGUtils/issues/38)) ([2674f6f](https://github.com/gseg-ethz/GSEGUtils/commit/2674f6f4f5bcabcefe991b9f06a6d6269ef8fff2))
+
+
+### 📚 Documentation
+
+* fill v0.5.2 release info + tidy CITATION.cff ([#37](https://github.com/gseg-ethz/GSEGUtils/issues/37)) ([6595f6e](https://github.com/gseg-ethz/GSEGUtils/commit/6595f6efb056fc36de09ae9d98b4dc5857e024fd))
+
+
+### 🧹 Miscellaneous Chores
+
+* reconcile develop/gsd → main (close CI-09 + REL-03) ([#33](https://github.com/gseg-ethz/GSEGUtils/issues/33)) ([e78d842](https://github.com/gseg-ethz/GSEGUtils/commit/e78d842badbd6279208bbc667a34951f6d04e29e))
+
 ## [0.5.2](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.1...v0.5.2) (2026-06-24)
 
 
