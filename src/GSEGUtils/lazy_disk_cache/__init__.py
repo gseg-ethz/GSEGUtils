@@ -26,8 +26,9 @@ __all__ = [
     "LazyDiskCacheConfig",
     "DiskBackedNDArray",
     "DiskBackedStore",
+    "register_lazy_disk_cache_class",
 ]
 
 from .disk_backed_ndarray import DiskBackedNDArray
-from .disk_backed_store import DiskBackedStore
+from .disk_backed_store import DiskBackedStore, register_lazy_disk_cache_class
 from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw

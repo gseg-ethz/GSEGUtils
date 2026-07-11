@@ -21,6 +21,7 @@ from GSEGUtils.lazy_disk_cache.disk_backed_store import (
     _LAZY_DISK_CACHE_CLASS_REGISTRY,
     DiskBackedStore,
     _resolve_lazy_disk_cache_class,
+    register_lazy_disk_cache_class,
 )
 from GSEGUtils.lazy_disk_cache.lazy_disk_cache import LazyDiskCacheConfig, _purge_cache_pair
 
@@ -155,6 +156,79 @@ def test_unknown_lazy_disk_cache_class_rejected(tmp_cache_dir: Path) -> None:
     with pytest.raises(ValueError, match="Unknown lazy_disk_cache_class"):
         _resolve_lazy_disk_cache_class("EvilSubclass")
     assert "DiskBackedNDArray" in _LAZY_DISK_CACHE_CLASS_REGISTRY
+
+
+def test_register_lazy_disk_cache_class_enables_subclass_round_trip(tmp_cache_dir: Path) -> None:
+    """D-05 Option A: a registered ``LazyDiskCache`` subclass round-trips through the store.
+
+    Before registration the reload allow-list rejects the subclass name (the
+    D-02 closed-set behaviour). After calling the PUBLIC
+    :func:`register_lazy_disk_cache_class` hook, an offload → reload cycle for a
+    store holding instances of the subclass returns the correct array — proving
+    the allow-list is now an extension point, with NO ``importlib`` fallback.
+    """
+
+    class _RegistrableDBNDArray(DiskBackedNDArray):
+        """Throwaway subclass proving the allow-list is extensible via the hook."""
+
+    name = _RegistrableDBNDArray.__name__
+    try:
+        # Not registered yet: resolving the subclass name is refused.
+        assert name not in _LAZY_DISK_CACHE_CLASS_REGISTRY
+        with pytest.raises(ValueError, match="Unknown lazy_disk_cache_class"):
+            _resolve_lazy_disk_cache_class(name)
+
+        # The hook registers the class and returns it (usable as a decorator).
+        returned = register_lazy_disk_cache_class(_RegistrableDBNDArray)
+        assert returned is _RegistrableDBNDArray
+        assert _LAZY_DISK_CACHE_CLASS_REGISTRY[name] is _RegistrableDBNDArray
+        # Idempotent: re-registering the same class object does not raise.
+        register_lazy_disk_cache_class(_RegistrableDBNDArray)
+
+        # Offload → reload a store whose entries are the registered subclass.
+        expected = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+        cfg = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
+        store = DiskBackedStore[_RegistrableDBNDArray](config=cfg, factory=_RegistrableDBNDArray)
+        store.add_data_to_store("sub", expected)
+        store.offload(pickle_container=True)
+
+        # The sidecar records the subclass name; the in-memory ref was cleared.
+        meta = json.loads((tmp_cache_dir / "sub.meta.json").read_text())
+        assert meta["lazy_disk_cache_class"] == name
+        assert store._store["sub"] is None
+
+        # Reload resolves the registered subclass and round-trips losslessly.
+        loaded = store["sub"]
+        assert isinstance(loaded, _RegistrableDBNDArray)
+        np.testing.assert_array_equal(np.asarray(loaded), expected)
+    finally:
+        # Keep the module-global allow-list clean for the rest of the session.
+        _LAZY_DISK_CACHE_CLASS_REGISTRY.pop(name, None)
+
+
+def test_register_lazy_disk_cache_class_rejects_non_lazy_disk_cache() -> None:
+    """The hook keeps the allow-list closed to non-``LazyDiskCache`` inputs (D-02 posture)."""
+    with pytest.raises(TypeError, match="LazyDiskCache subclass"):
+        register_lazy_disk_cache_class(int)  # type: ignore[arg-type]
+    # A plain instance (not a class) is also rejected.
+    with pytest.raises(TypeError, match="LazyDiskCache subclass"):
+        register_lazy_disk_cache_class(object())  # type: ignore[arg-type]
+
+
+def test_register_lazy_disk_cache_class_rejects_name_collision() -> None:
+    """Registering a *different* class under a taken name raises (allow-list integrity).
+
+    Re-registering the same object is idempotent (covered above); shadowing an
+    existing allow-list entry — e.g. ``DiskBackedNDArray`` — with a different
+    class must be refused so a subclass cannot silently hijack the reload path.
+    """
+    # An impostor subclass whose __name__ collides with the built-in entry.
+    impostor = type("DiskBackedNDArray", (DiskBackedNDArray,), {})
+    assert impostor is not DiskBackedNDArray
+    with pytest.raises(ValueError, match="already registered"):
+        register_lazy_disk_cache_class(impostor)
+    # The original entry is untouched.
+    assert _LAZY_DISK_CACHE_CLASS_REGISTRY["DiskBackedNDArray"] is DiskBackedNDArray
 
 
 def test_schema_version_mismatch_rejected(tmp_cache_dir: Path) -> None:
