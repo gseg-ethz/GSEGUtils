@@ -79,6 +79,55 @@ def _resolve_lazy_disk_cache_class(name: str) -> type[LazyDiskCache]:
         ) from e
 
 
+def register_lazy_disk_cache_class(cls: type[LazyDiskCache]) -> type[LazyDiskCache]:
+    """Register a :class:`LazyDiskCache` subclass into the reload allow-list.
+
+    This is the PUBLIC extension point for :data:`_LAZY_DISK_CACHE_CLASS_REGISTRY`,
+    the allow-list :func:`_resolve_lazy_disk_cache_class` consults when
+    reloading offloaded entries. Downstream packages (e.g. a subclass such as
+    ``DiskBackedImageData``) call this once at import time so that a store
+    holding instances of ``cls`` can round-trip them through offload → reload.
+
+    The change preserves the D-02 security posture: resolution stays an
+    *explicit* allow-list with no ``importlib`` fallback. A hand-crafted
+    ``.meta.json`` still cannot coerce the loader into instantiating a class
+    that was never registered through this API — it only ADDS a supervised
+    registration surface, it does not open dynamic import.
+
+    Parameters
+    ----------
+    cls : type[LazyDiskCache]
+        A concrete ``LazyDiskCache`` subclass. It is registered under its
+        ``__name__``, which is the same key :meth:`DiskBackedStore._store_entry`
+        writes into the sidecar (``type(entry).__name__``).
+
+    Returns
+    -------
+    type[LazyDiskCache]
+        ``cls`` unchanged, so the function may also be used as a class decorator.
+
+    Raises
+    ------
+    TypeError
+        If ``cls`` is not a subclass of :class:`LazyDiskCache`.
+    ValueError
+        If a *different* class is already registered under ``cls.__name__``
+        (name collision). Re-registering the *same* class object is idempotent
+        and does not raise.
+    """
+    if not (isinstance(cls, type) and issubclass(cls, LazyDiskCache)):
+        raise TypeError(f"register_lazy_disk_cache_class expects a LazyDiskCache subclass; got {cls!r}")
+    name = cls.__name__
+    existing = _LAZY_DISK_CACHE_CLASS_REGISTRY.get(name)
+    if existing is not None and existing is not cls:
+        raise ValueError(
+            f"Cannot register {cls!r} under {name!r}: a different class "
+            f"({existing!r}) is already registered under that name."
+        )
+    _LAZY_DISK_CACHE_CLASS_REGISTRY[name] = cls
+    return cls
+
+
 # type Array = _NDArray[np.generic]
 
 # @runtime_checkable
