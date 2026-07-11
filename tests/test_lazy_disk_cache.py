@@ -231,6 +231,32 @@ def test_register_lazy_disk_cache_class_rejects_name_collision() -> None:
     assert _LAZY_DISK_CACHE_CLASS_REGISTRY["DiskBackedNDArray"] is DiskBackedNDArray
 
 
+def test_register_lazy_disk_cache_class_usable_as_decorator() -> None:
+    """The hook is usable as a class decorator (advertised in its docstring).
+
+    Applying ``@register_lazy_disk_cache_class`` at class-definition time must
+    both register the subclass into the reload allow-list AND bind the original
+    class object to the name (the decorator returns ``cls`` unchanged), so the
+    decorated symbol stays fully usable.
+    """
+    name = "_DecoratedDBNDArray"
+    try:
+
+        @register_lazy_disk_cache_class
+        class _DecoratedDBNDArray(DiskBackedNDArray):
+            """Throwaway subclass registered via decorator syntax."""
+
+        # The decorated name is bound to the real class (decorator returned cls).
+        assert _DecoratedDBNDArray.__name__ == name
+        assert isinstance(_DecoratedDBNDArray, type)
+        assert issubclass(_DecoratedDBNDArray, DiskBackedNDArray)
+        # ...and that same class is now in the reload allow-list.
+        assert _LAZY_DISK_CACHE_CLASS_REGISTRY[name] is _DecoratedDBNDArray
+    finally:
+        # Keep the module-global allow-list clean for the rest of the session.
+        _LAZY_DISK_CACHE_CLASS_REGISTRY.pop(name, None)
+
+
 def test_schema_version_mismatch_rejected(tmp_cache_dir: Path) -> None:
     """Plan 02-01 / D-03: a schema_version != 1 raises ValueError, no fallback / migration."""
     arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
