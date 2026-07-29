@@ -1,0 +1,93 @@
+name: Classify changed paths
+description: >
+  Decide whether this run may take the release-artifact fast path (CI-11). Emits
+  `release-artifacts-only` = 'true' ONLY when every changed path is in the
+  measured allowlist. FAILS SAFE — a non-pull-request event, a failed API call,
+  an empty or truncated file list, or any unrecognised path all yield 'false',
+  which means "run everything". The caller MUST run `actions/checkout` BEFORE
+  invoking this composite — GitHub needs the repo on the runner filesystem to
+  find this action.yml — and the caller MUST grant the job
+  `pull-requests: read`, which is the only permission the changed-path read
+  needs. Decided in the pchandler workspace
+  .planning/phases/13-release-flow-apply-both-repos-symmetric/13-CONTEXT.md
+  D-05 (fail-safe allowlist), D-06 (fast-path depth) and D-07 (why the
+  classification is a composite and not an upstream job feeding `needs:`).
+  This file is BYTE-IDENTICAL in the GSEGUtils and pchandler repositories by
+  design (D-04): a diff between the two copies is drift, not intent.
+
+outputs:
+  release-artifacts-only:
+    description: "'true' when every changed path is a release artifact; 'false' otherwise (run everything)."
+    value: ${{ steps.classify.outputs.release-artifacts-only }}
+
+runs:
+  using: composite
+  steps:
+    - id: classify
+      name: Classify changed paths (CI-11 D-05)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Deliberately NO errexit here, only nounset + pipefail: an abort would
+        # FAIL the job, but the fail-safe direction for a fast path is "run
+        # everything", not "break the build". Same shell options, chosen for the
+        # same reason, as canary.yml's detection step.
+        set -uo pipefail
+
+        # D-05 allowlist -- MEASURED, not assumed. `gh pr diff 34 --repo
+        # gseg-ethz/GSEGUtils --name-only` on 2026-07-29 returned exactly these
+        # three paths: the changelog, the release-please manifest, and the docs
+        # configuration module that release-please stamps via `extra-files`.
+        # This is the ONLY place the allowlist is written down. Assertion A4 in
+        # .github/scripts/check_ci_config.py pins it to release-please-config.json,
+        # so a fourth `extra-files` entry fails the build with a named reason
+        # instead of silently disabling this fast path.
+        ALLOW='CHANGELOG.md .release-please-manifest.json docs/source/conf.py'
+
+        # Every emission writes its reason to the log next to the value, so a run
+        # log answers "why did the fast path not engage" without a re-run.
+        emit() {
+          echo "release-artifacts-only=$1" >> "$GITHUB_OUTPUT"
+          echo "classify-changes: $1 — $2"
+        }
+
+        if [ "${{ github.event_name }}" != "pull_request" ]; then
+          emit false "event ${{ github.event_name }} is not pull_request — there is no PR to classify"
+          exit 0
+        fi
+
+        # Server-computed changed paths, NOT `git diff`: actions/checkout's default
+        # fetch depth is 1, and a shallow diff against a missing merge base emits a
+        # partial or empty diff SILENTLY. The REST endpoint has no fetch-depth
+        # coupling at all and reproduces exactly the measurement the allowlist
+        # above came from.
+        if ! FILES=$(gh api --paginate \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+              --jq '.[].filename' 2>/dev/null); then
+          emit false "the changed-path API call failed — the answer is unknown, so run everything"
+          exit 0
+        fi
+
+        if [ -z "$FILES" ]; then
+          emit false "the changed-path list came back empty — anomalous, not 'nothing changed'"
+          exit 0
+        fi
+
+        COUNT=$(printf '%s\n' "$FILES" | wc -l)
+        if [ "$COUNT" -ge 3000 ]; then
+          emit false "changed-path list reached the documented 3000-file API cap — untrustworthy"
+          exit 0
+        fi
+
+        # Membership is containment against the space-padded allowlist string, so
+        # the API's return order cannot change the verdict.
+        while IFS= read -r changed; do
+          [ -z "$changed" ] && continue
+          case " $ALLOW " in
+            *" $changed "*) ;;
+            *) emit false "changed path is not a release artifact: $changed"; exit 0 ;;
+          esac
+        done <<< "$FILES"
+
+        emit true "all $COUNT changed path(s) are release artifacts"
