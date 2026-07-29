@@ -236,10 +236,16 @@ def normalize(live: dict[str, Any], committed: dict[str, Any]) -> tuple[dict[str
         When the live payload carries no ``bypass_actors`` key.
     """
     if BYPASS_ACTORS_KEY not in live:
+        # The repo is named from the payload's own `source` field rather than from
+        # a third parameter, so the two-argument signature every caller shares is
+        # preserved. `source` is a live-only envelope key and survives the
+        # read-scoped read that triggers this guard -- verified 2026-07-29:
+        # `bypass_actors` is the ONLY key missing at administration:read.
+        repo = live.get("source") or "<unknown repo>"
         name = live.get("name") or committed.get("name") or "<unnamed>"
         ruleset_id = live.get("id", "<no id>")
         raise RulesetReadError(
-            f"ruleset `{name}` (id {ruleset_id}): the live payload has no `{BYPASS_ACTORS_KEY}` "
+            f"{repo} ruleset `{name}` (id {ruleset_id}): the live payload has no `{BYPASS_ACTORS_KEY}` "
             f"key — the reading token lacks write access to the ruleset, so this check CANNOT "
             f"see bypass actors and must not report clean. Never substitute an empty list. "
             f"Mint the reading token with `permission-administration: write` (Phase 13 D-16 iii)."
