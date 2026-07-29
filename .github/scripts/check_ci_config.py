@@ -81,9 +81,7 @@ RELEASE_PLEASE_MANIFEST_PATH = ".release-please-manifest.json"
 
 # Sub-keys of a triggering event that suppress a run. Presence of any of these
 # under an inspected event means some pushes/pull requests produce no run at all.
-FILTER_KEYS: frozenset[str] = frozenset(
-    {"paths", "paths-ignore", "branches", "branches-ignore", "tags", "tags-ignore"}
-)
+FILTER_KEYS: frozenset[str] = frozenset({"paths", "paths-ignore", "branches", "branches-ignore", "tags", "tags-ignore"})
 
 # The events A1 inspects: the pull-request event and its base-repo-context
 # sibling. See the module docstring for why `push`, `schedule` and
