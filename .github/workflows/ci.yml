@@ -95,13 +95,39 @@ jobs:
   tests:
     name: Tests (pytest)
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read   # the `classify` step below reads the PR file list (CI-11 D-05/D-07)
+
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
 
-      - uses: ./.github/actions/setup-python-deps
+      # CI-11's release-artifact fast path. MUST follow the checkout: a local
+      # composite is resolved from the runner filesystem, so it does not exist
+      # until the repository is on disk.
+      #
+      # COST, recorded rather than glossed (Phase 13 D-06): on a
+      # release-artifact-only pull request this REQUIRED context reports success
+      # having executed essentially nothing. That is the same silhouette as the
+      # unconditional status-shim job Phase 12 D-10 rejected, and the
+      # distinction is real but narrow — this skip is conditional on MEASURED
+      # content, it fails safe in five independent ways (see the composite), and
+      # any path outside the three-file allowlist runs everything. The guard is
+      # on STEPS, never on the job, so the conclusion is a genuine `success`
+      # rather than a `skipped` that merely counts as satisfying (A5).
+      - id: classify
+        uses: ./.github/actions/classify-changes
+
+      # D-06 puts the skip at the dependency install rather than at the test
+      # run: the install is the bulk of the wall clock, so skipping only pytest
+      # would buy almost nothing.
+      - if: steps.classify.outputs.release-artifacts-only != 'true'
+        uses: ./.github/actions/setup-python-deps
 
       - name: Pyright (informational)
         id: pyright
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         continue-on-error: true
         uses: jakebailey/pyright-action@v3
         with:
@@ -112,7 +138,7 @@ jobs:
           working-directory: .
 
       - name: Upload pyright report
-        if: always()
+        if: always() && steps.classify.outputs.release-artifacts-only != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pyright-report-${{ github.run_id }}
@@ -120,10 +146,11 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run tests
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml:coverage-unit.xml
 
       - name: Upload coverage to Codecov
-        if: success()
+        if: success() && steps.classify.outputs.release-artifacts-only != 'true'
         uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
