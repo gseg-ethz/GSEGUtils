@@ -1,9 +1,47 @@
 name: CI
 
+# Continuous integration (CI-10, CI-14, CI-16): produces the three named
+# required status checks — the lint gate, the test suite and the
+# warnings-as-errors docs build — on every pull request, on every push to the
+# integration branch, and nightly against the default branch (CI-13's heartbeat
+# IS this workflow, so there is no duplicated job definition to drift; Phase 13
+# D-08).
+#
+# The three job `name:` values below ARE ruleset required-status-check context
+# strings (`.github/rulesets/main.json`, `.github/rulesets/develop.json`). What
+# MUST stay true, and why:
+#
+#   - NO job here may carry a job-level `if:`, and NO filter key (`paths:`,
+#     `branches:`, ...) may appear under `pull_request:`. GitHub counts a
+#     `skipped` conclusion among the SATISFYING ones and a filtered-out run
+#     never reports at all, so either shape greens the gate having executed
+#     nothing. Conditionality belongs on STEPS. Assertions A1 and A5 in
+#     `.github/scripts/check_ci_config.py` fail the build if either returns.
+#   - NO required-context job may depend on another job (A6, and Phase 12 D-08 /
+#     DESIGN-DECISIONS entry 38): the old `needs: [lint]` edge was a pure
+#     fail-fast gate, never a data dependency, and dropping it removes the
+#     skip-propagation path structurally rather than guarding it.
+#   - RENAMING a job is a four-file coordinated change: the `name:` and BOTH
+#     ruleset payloads move in ONE commit, or the protected branch requires a
+#     context nothing produces and becomes unmergeable BY ANYONE under
+#     `bypass_actors: []` (CI-10, DESIGN-DECISIONS entry 37).
+#   - `push:` deliberately no longer lists the protected branch. The post-merge
+#     duplicate run is retired in favour of
+#     `strict_required_status_checks_policy: true`, and `release-please.yml`
+#     triggers on a push to the protected branch DIRECTLY. Those three changes
+#     ship in ONE commit or the release chain stops SILENTLY, with nothing red
+#     (DESIGN-DECISIONS entry 35 / Phase 12 D-05).
+#   - The lint job holds a READ content scope only (CI-16). Assertion A7 fails
+#     the build the moment a write scope is added back.
+#
+# Recorded 2026-07-29, Phase 13 plan 13-04.
+
 on:
   pull_request:
   push:
-    branches: [main, develop/gsd]
+    branches: [develop/gsd]
+  schedule:
+    - cron: '0 5 * * *'   # nightly 05:00 UTC — offset from the weekly canary (Mon 08:00) so the two never share a slot
 
 jobs:
   lint:
@@ -11,17 +49,19 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
 
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
-          # On PRs, check out the head branch so pushes work
-          ref: ${{ github.event_name == 'pull_request' && github.head_ref || '' }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
+          # NOTE: the `ref:` and `token:` inputs are intentionally ABSENT
+          # (CI-16). Nothing in this job pushes — it runs pre-commit and three
+          # read-only gate scripts — so the head-branch checkout bought nothing,
+          # and on a fork pull request it resolved to a branch name that does
+          # not exist in this repository. Removing it fixes that latent failure
+          # as a side effect of the least-privilege narrowing.
+          fetch-depth: 0   # setuptools_scm reads tags
 
       - uses: ./.github/actions/setup-python-deps
 
@@ -35,17 +75,61 @@ jobs:
         shell: bash
         run: python .github/scripts/check_publish_gate.py
 
+      - name: Check CI config (CI-12)
+        shell: bash
+        run: python .github/scripts/check_ci_config.py
+
+      - name: Run .github/scripts unit tests (CI-12)
+        shell: bash
+        run: pytest .github/scripts/ -q
+
+      - name: Check for unseeded default_rng() (TEST-08 D-08)
+        shell: bash
+        run: |
+          # NPY002 covers np.random.{rand,choice,randint,...} but NOT default_rng() without a seed argument.
+          # This grep is the TEST-08 exit criterion (see CONTRIBUTING.md / Phase 9 D-08).
+          if grep -rnE 'default_rng\(\s*\)' tests/ 2>/dev/null; then
+            echo "::error::Unseeded default_rng() detected in tests/ — every default_rng must take an explicit seed (TEST-08, see CONTRIBUTING.md)"
+            exit 1
+          fi
+          echo "TEST-08 OK: zero unseeded default_rng() calls in tests/"
+
   tests:
     name: Tests (pytest)
-    needs: [lint]
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read   # the `classify` step below reads the PR file list (CI-11 D-05/D-07)
+
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
 
-      - uses: ./.github/actions/setup-python-deps
+      # CI-11's release-artifact fast path. MUST follow the checkout: a local
+      # composite is resolved from the runner filesystem, so it does not exist
+      # until the repository is on disk.
+      #
+      # COST, recorded rather than glossed (Phase 13 D-06): on a
+      # release-artifact-only pull request this REQUIRED context reports success
+      # having executed essentially nothing. That is the same silhouette as the
+      # unconditional status-shim job Phase 12 D-10 rejected, and the
+      # distinction is real but narrow — this skip is conditional on MEASURED
+      # content, it fails safe in five independent ways (see the composite), and
+      # any path outside the three-file allowlist runs everything. The guard is
+      # on STEPS, never on the job, so the conclusion is a genuine `success`
+      # rather than a `skipped` that merely counts as satisfying (A5).
+      - id: classify
+        uses: ./.github/actions/classify-changes
+
+      # D-06 puts the skip at the dependency install rather than at the test
+      # run: the install is the bulk of the wall clock, so skipping only pytest
+      # would buy almost nothing.
+      - if: steps.classify.outputs.release-artifacts-only != 'true'
+        uses: ./.github/actions/setup-python-deps
 
       - name: Pyright (informational)
         id: pyright
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         continue-on-error: true
         uses: jakebailey/pyright-action@v3
         with:
@@ -56,7 +140,7 @@ jobs:
           working-directory: .
 
       - name: Upload pyright report
-        if: always()
+        if: always() && steps.classify.outputs.release-artifacts-only != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: pyright-report-${{ github.run_id }}
@@ -64,27 +148,32 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run tests
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         run: pytest -m "not benchmark" --cov=GSEGUtils --cov-report=xml:coverage-unit.xml
 
-      - name: Check for unseeded default_rng() (TEST-08 D-08)
-        shell: bash
-        run: |
-          if grep -rnE 'default_rng\(\s*\)' tests/ 2>/dev/null; then
-            echo "::error::Unseeded default_rng() detected in tests/ — every default_rng must take an explicit seed (TEST-08, see CONTRIBUTING.md)"
-            exit 1
-          fi
-          echo "TEST-08 OK: zero unseeded default_rng() calls in tests/"
+      - name: Upload coverage to Codecov
+        if: success() && steps.classify.outputs.release-artifacts-only != 'true'
+        uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage-unit.xml
+          flags: unit
+
+  docs:
+    name: Docs (sphinx -W)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      # This job builds its OWN environment on purpose. The Sphinx build below
+      # used to be the last-but-one step of `tests`, where `.[dev]` had already
+      # been installed by the shared composite — so extracting it is not a
+      # two-line cut-and-paste. Checkout + composite + the `doc` extra are all
+      # required here.
+      - uses: ./.github/actions/setup-python-deps
 
       - name: Build docs (warnings as errors)
         working-directory: .
         run: |
           pip install .[doc]
           sphinx-build -W --keep-going -b html docs/source docs/_build/html
-
-      - name: Upload coverage to Codecov
-        if: success()
-        uses: codecov/codecov-action@8cad3ba95e5920c42f44492e54bc9639cba47959  # v6.0.2
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage-unit.xml
-          flags: unit
