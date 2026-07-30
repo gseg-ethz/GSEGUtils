@@ -86,6 +86,8 @@ jobs:
       - name: Check for unseeded default_rng() (TEST-08 D-08)
         shell: bash
         run: |
+          # NPY002 covers np.random.{rand,choice,randint,...} but NOT default_rng() without a seed argument.
+          # This grep is the TEST-08 exit criterion (see CONTRIBUTING.md / Phase 9 D-08).
           if grep -rnE 'default_rng\(\s*\)' tests/ 2>/dev/null; then
             echo "::error::Unseeded default_rng() detected in tests/ — every default_rng must take an explicit seed (TEST-08, see CONTRIBUTING.md)"
             exit 1

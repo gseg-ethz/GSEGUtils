@@ -114,16 +114,15 @@ LINT_CONTEXT = "Lint (pre-commit)"
 # plan lands the narrowing. It is a narrowing with a stated reason, not a mute:
 # the capability it suppresses is pinned in both directions by
 # `test_check_ci_config.py`, which passes an empty register.
-A7_PENDING_NARROWINGS: dict[str, str] = {
-    LINT_CONTEXT: (
-        "CI-16 narrows this job to a read content scope. This self-test lands one wave BEFORE the "
-        "narrowing does (Phase 13 plan 13-03; the narrowing is plan 13-04 in GSEGUtils and 13-07 in "
-        "pchandler), so on today's tree A7 would report a finding the phase has already scheduled. "
-        "REMOVE THIS ENTRY once both repos are narrowed — this file is byte-identical across them, "
-        "so the removal is a paired change and cannot be made in one repo alone. Until it is "
-        "removed, every run logs a ::notice:: naming it the moment it stops being warranted."
-    ),
-}
+#
+# EMPTY, and that is the intended steady state — A7 now evaluates every
+# required-context lint job for real rather than skipping one. The single entry
+# this register ever held covered CI-16's narrowing while the self-test ran one
+# wave ahead of it (Phase 13 plan 13-03); it was deleted by plan 13-07 once BOTH
+# repos' lint jobs were narrowed (GSEGUtils by 13-04, pchandler by 13-07), in one
+# paired change. Adding an entry is likewise a paired cross-repo change: this
+# file is byte-identical across both repos by design (D-04).
+A7_PENDING_NARROWINGS: dict[str, str] = {}
 
 
 def load_workflows(root: pathlib.Path) -> list[tuple[pathlib.Path, dict[str, Any]]]:
