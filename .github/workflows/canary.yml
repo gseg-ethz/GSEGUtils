@@ -42,6 +42,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
+          # Fetch the current run log and grep for known deprecation strings.
+          # || true guards against grep's non-zero exit on no-match.
           WARNINGS=$(gh run view "${{ github.run_id }}" --log 2>/dev/null \
             | grep -iE 'deprecat|node20|node-20' \
             | head -50 \
