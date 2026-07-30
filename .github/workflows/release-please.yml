@@ -1,11 +1,22 @@
 name: release-please
+
+# Release automation (CI-14). Triggered DIRECTLY by a push to the protected
+# branch. The previous `workflow_run` indirection on the CI workflow, gated on
+# `conclusion == 'success'`, was removed in the SAME commit that dropped the
+# protected branch from `ci.yml`'s push trigger — the two changes ship together
+# or the release chain stops SILENTLY, with nothing red. That indirection also
+# carried its own failure: a CANCELLED CI run on the protected branch fired
+# `workflow_run` with `conclusion: cancelled`, the gate read false, and the
+# release simply never happened — and the two-rapid-pushes shape of a release
+# cycle is exactly what triggered it (DESIGN-DECISIONS entry 35 / Phase 12
+# D-05). The redundancy the old gate bought is now bought by
+# `strict_required_status_checks_policy: true` on the protected branch, which
+# forces a pull request up to date before merge so the merged tree is the tree
+# CI already tested. Recorded 2026-07-29, Phase 13 plan 13-04.
+
 on:
-  workflow_run:
-    workflows:
-      - CI
-    types: [completed]
-    branches:
-      - main
+  push:
+    branches: [main]
 
 permissions:
   contents: write
@@ -14,7 +25,6 @@ permissions:
 
 jobs:
   release-please:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - id: app-token
@@ -34,7 +44,6 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
-#          release-type: python
 
       - name: Tag major and minor versions
         if: ${{ steps.release.outputs.release_created == 'true' }}

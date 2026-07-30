@@ -1,0 +1,283 @@
+name: Ruleset Apply
+
+# Applies a committed .github/rulesets/ payload to this repository's live branch
+# protection (CI-10, PROT-02, PROT-03). The committed payloads are AUTHORITATIVE
+# and this workflow is the only path by which they reach live state — before it
+# existed rulesets were applied by hand and nothing reconciled committed against
+# live, which is the gap PROT-02 detects and Phase 13 D-01 closes.
+#
+# The trigger MUST stay manual dispatch only, and must NEVER gain a scheduled
+# one. An unattended job holding a protection-write credential is the
+# auto-reconcile this phase explicitly DEFERRED — it would turn detection into
+# self-healing at exactly the moment nobody is watching, and a silent self-heal
+# is indistinguishable from no drift ever having happened. Detection lives in
+# scheduled-health.yml, which holds no write. Never the base-repo-context
+# sibling of the pull-request trigger either, which runs with this repository's
+# secrets against a fork's code; that prohibition is enforced repo-wide by
+# assertion A2 in .github/scripts/check_ci_config.py, which is a raw-text scan
+# and would flag its own prohibition note, so the literal trigger name is
+# deliberately NOT written here. Do not "helpfully" restore it.
+#
+# Permissions MUST stay at contents:read. NOTE: the Administration capability
+# this workflow exercises is intentionally ABSENT from the permissions block —
+# not withheld by preference but unavailable in principle, because the workflow
+# permissions block carries no administration key to grant, on a public or a
+# private repository alike (13-CONTEXT.md PC-4). It comes instead from the
+# dedicated ruleset App token minted in the one step that needs it (D-02), which
+# is a different App from the release App precisely so that a compromise of the
+# release path cannot rewrite branch protection, and vice versa.
+#
+# Every apply is gated by the D-03 preflight, which cross-references the
+# payload's required contexts against the job names on the TARGET branch tip and
+# refuses in both directions before any write can happen, and every apply
+# verifies itself afterwards against the same committed file.
+#
+# This file is byte-identical across both repos by design (D-04): the repository
+# comes from the runner context, the ruleset id is resolved by NAME at runtime,
+# and the payload filenames are the same in both. A future diff between the two
+# copies is drift, not intent.
+# Recorded 2026-07-29, Phase 13 plan 13-06 (D-01/D-02/D-03/D-13).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ruleset:
+        description: "Which protected branch to apply"
+        required: true
+        type: choice
+        options: [main, develop]
+      payload:
+        description: >
+          Which committed payload. `normal` maps to that branch's own payload
+          file. `no-gpu` maps to the committed no-GPU variant, the D-13
+          lab-outage lever, which exists on pchandler's protected branch only.
+        required: true
+        default: normal
+        type: choice
+        options: [normal, no-gpu]
+      reason:
+        description: "Why this is being applied (recorded in the run log — D-13 requires a recorded reason)"
+        required: true
+        type: string
+
+jobs:
+  apply:
+    name: Apply committed ruleset payload (PROT-02 D-01)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # the checkout below reads only the committed payloads and the scripts directory
+    steps:
+      - name: Refuse a dispatch from any ref but the protected branch (D-03)
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -uo pipefail
+          PROTECTED_REF='refs/heads/main'
+          if [ "${DISPATCH_REF}" != "${PROTECTED_REF}" ]; then
+            echo "::error::refusing to apply: this run was dispatched from \`${DISPATCH_REF}\`, not \`${PROTECTED_REF}\`. The preflight reads the TARGET branch tip's workflows, but the payloads and the scripts come from the CHECKED-OUT ref — so a dispatch from a stale branch would cross-reference correct job names against a stale payload and pass."
+            exit 1
+          fi
+          echo "Dispatched from \`${DISPATCH_REF}\`, the protected branch — proceeding."
+
+      - name: Checkout the committed payloads and scripts (D-01)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        # Deliberately WITHOUT the App token: this checkout needs only committed
+        # files, so the ambient workflow credential is the correct, narrower one.
+        # The App token is minted later, in the single step that must write.
+
+      - name: Resolve the selected payload, target ref and ruleset name (D-13)
+        id: select
+        shell: bash
+        env:
+          RULESET_INPUT: ${{ inputs.ruleset }}
+          PAYLOAD_INPUT: ${{ inputs.payload }}
+          # Crosses as an environment variable, never interpolated into this
+          # script body: the reason is free text typed by the dispatcher.
+          REASON_INPUT: ${{ inputs.reason }}
+        run: |
+          set -uo pipefail
+
+          case "${RULESET_INPUT}" in
+            main)
+              BASE='main'
+              TARGET_REF='refs/heads/main'
+              RULESET_NAME='protect-main'
+              ;;
+            develop)
+              BASE='develop'
+              TARGET_REF='refs/heads/develop/gsd'
+              RULESET_NAME='protect-develop-gsd'
+              ;;
+            *)
+              echo "::error::unknown ruleset selection \`${RULESET_INPUT}\` — the dispatch input is a fixed choice and this value is not one of them."
+              exit 1
+              ;;
+          esac
+
+          if [ "${PAYLOAD_INPUT}" = 'no-gpu' ]; then
+            PAYLOAD_FILE=".github/rulesets/${BASE}.no-gpu.json"
+          else
+            PAYLOAD_FILE=".github/rulesets/${BASE}.json"
+          fi
+
+          # NO silent fallback to the normal payload. The override is a committed
+          # file and it exists in one repository only (D-13); a selection naming
+          # a file this repository does not carry is a dispatch error and has to
+          # read as one, because falling back would apply a payload nobody asked
+          # for while the run reported success.
+          if [ ! -f "${PAYLOAD_FILE}" ]; then
+            echo "::error::${GITHUB_REPOSITORY} carries no committed payload at \`${PAYLOAD_FILE}\` for the selection \`${RULESET_INPUT}\`/\`${PAYLOAD_INPUT}\`. Refusing rather than falling back to the normal payload."
+            exit 1
+          fi
+
+          echo "Repository:  ${GITHUB_REPOSITORY}"
+          echo "Payload:     ${PAYLOAD_FILE}"
+          echo "Ruleset:     ${RULESET_NAME}"
+          echo "Target ref:  ${TARGET_REF}"
+          # The recorded reason D-13 requires. It is in the run log, and the run
+          # log is what answers "why is this payload live" after the fact.
+          echo "Reason:      ${REASON_INPUT}"
+
+          {
+            echo "payload_file=${PAYLOAD_FILE}"
+            echo "target_ref=${TARGET_REF}"
+            echo "ruleset_name=${RULESET_NAME}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch the target branch tip's workflow files (D-03)
+        id: fetch
+        shell: bash
+        env:
+          # The ambient workflow token, which carries the contents read this
+          # step needs. The App token is not minted yet, deliberately: nothing
+          # before the preflight should hold a write-capable credential.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_REF: ${{ steps.select.outputs.target_ref }}
+        run: |
+          set -uo pipefail
+          WORKFLOW_DIR="${RUNNER_TEMP}/target-workflows"
+          mkdir -p "${WORKFLOW_DIR}"
+
+          # Read over the contents API AT THE TARGET REF rather than from the
+          # checkout. That is the whole point of this step: the checked-out ref
+          # may be ahead of, behind, or unrelated to the branch being protected,
+          # and a cross-reference against the wrong copy passes while the live
+          # gate breaks.
+          NAMES=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows?ref=${TARGET_REF}" \
+            --jq '.[] | select(.type == "file") | .name | select(endswith(".yml") or endswith(".yaml"))')
+          if [ -z "${NAMES}" ]; then
+            echo "::error::no workflow files found under .github/workflows at ${TARGET_REF} — the cross-reference would have nothing to check against, so this apply must not proceed."
+            exit 1
+          fi
+
+          while IFS= read -r NAME; do
+            gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/${NAME}?ref=${TARGET_REF}" \
+              -H 'Accept: application/vnd.github.raw' > "${WORKFLOW_DIR}/${NAME}" || exit 1
+            echo "fetched ${NAME} at ${TARGET_REF}"
+          done <<< "${NAMES}"
+
+          echo "workflow_dir=${WORKFLOW_DIR}" >> "${GITHUB_OUTPUT}"
+
+      - name: Preflight the payload against the target tip's job names (D-03)
+        shell: bash
+        env:
+          PAYLOAD_FILE: ${{ steps.select.outputs.payload_file }}
+          WORKFLOW_DIR: ${{ steps.fetch.outputs.workflow_dir }}
+        run: |
+          set -uo pipefail
+          # A non-zero exit here ends the job BEFORE any write-capable
+          # credential has been minted, and leaves no send payload behind for
+          # the send step to find. Both halves are the gate.
+          python3 .github/scripts/preflight_ruleset_apply.py \
+            "${PAYLOAD_FILE}" "${WORKFLOW_DIR}" "${RUNNER_TEMP}/send-payload.json"
+
+      - name: Mint ruleset App token (D-02, write scope)
+        id: ruleset-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RULESET_APP_ID }}
+          private-key: ${{ secrets.RULESET_APP_PRIVATE_KEY }}
+          # THE one place in this phase where a write scope is the correct
+          # answer rather than a concession: this job exists to rewrite branch
+          # protection, and the update endpoint is gated on Administration
+          # write. It is minted here, after the preflight has already passed,
+          # and the action revokes it in its post step, so it cannot be handed
+          # to another job. The nightly drift job also mints at write, but for a
+          # different reason (D-16 iii — a read-scoped mint loses `bypass_actors`
+          # entirely); do not read the two as the same decision.
+          permission-administration: write
+
+      - name: Apply the committed payload as a complete object (D-01)
+        id: apply
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.ruleset-token.outputs.token }}
+          RULESET_NAME: ${{ steps.select.outputs.ruleset_name }}
+        run: |
+          set -uo pipefail
+
+          # Resolved BY NAME from this repository's own list. Hardcoding an id
+          # would make this file repo-specific, and an id carried across repos
+          # yields a 404 that reads like a token problem and is not.
+          RULESET_ID=$(gh api "repos/${GITHUB_REPOSITORY}/rulesets" \
+            --jq ".[] | select(.name == \"${RULESET_NAME}\") | .id")
+          if [ -z "${RULESET_ID}" ]; then
+            echo "::error::no ruleset named \`${RULESET_NAME}\` on ${GITHUB_REPOSITORY} — resolution by name found nothing, so there is nothing to update."
+            exit 1
+          fi
+
+          # REVIEW CRITERION, not incidental. The body sent is the COMPLETE
+          # committed object, serialised from the committed file by the
+          # preflight. Never a partial body: the update endpoint declares no
+          # required fields and does not document whether an omitted one is
+          # preserved or reset, and sending everything sidesteps that
+          # unspecified behaviour entirely. Never a round-trip of a live read
+          # either: a live read carries `integration_id: 15368`, which would
+          # silently pin every context to the GitHub Actions app — arguably
+          # desirable, but not what the committed file says, and "committed is
+          # authoritative" has to be literally true or it is nothing.
+          # The write is status-checked EXPLICITLY, because a step's exit code is
+          # its LAST command's: without this the echo below would exit 0 and
+          # print "applied" after a 403, a 422 or a dropped connection. The
+          # verify step would still catch it, but it would report DRIFT — the
+          # signature of a hand-edit — when what happened was a failed write.
+          # `set -e` is deliberately NOT used anywhere in this file: several
+          # steps run a command and then check its OUTPUT (`NAMES` in the fetch
+          # step, `RULESET_ID` above), and aborting on the command's status would
+          # pre-empt those checks and lose their named error messages.
+          if ! gh api --method PUT "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}" \
+            --input "${RUNNER_TEMP}/send-payload.json" > /dev/null; then
+            echo "::error::the update request to ruleset \`${RULESET_NAME}\` (id ${RULESET_ID}) on ${GITHUB_REPOSITORY} FAILED. Live protection state was NOT changed by this run. This is a failed write, not drift — read the gh error above, not the drift comparator."
+            exit 1
+          fi
+
+          echo "applied to ruleset ${RULESET_NAME} (id ${RULESET_ID}) on ${GITHUB_REPOSITORY}"
+          echo "ruleset_id=${RULESET_ID}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify the applied state against the committed payload (PROT-02)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.ruleset-token.outputs.token }}
+          RULESET_NAME: ${{ steps.select.outputs.ruleset_name }}
+          RULESET_ID: ${{ steps.apply.outputs.ruleset_id }}
+          PAYLOAD_FILE: ${{ steps.select.outputs.payload_file }}
+        run: |
+          set -uo pipefail
+          # includes_parents=false: an inherited parent organisation ruleset is
+          # not drift in a committed file and would be reported as one.
+          # Status-checked for the same reason as the write above: an unchecked
+          # read would leave a truncated live.json for the comparator, which
+          # would then fail as malformed live state rather than as a failed read.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}?includes_parents=false" \
+            > "${RUNNER_TEMP}/live.json"; then
+            echo "::error::could not re-read ruleset ${RULESET_ID} on ${GITHUB_REPOSITORY} after the apply, so this apply is UNVERIFIED. The write itself succeeded; this is a failed read."
+            exit 1
+          fi
+
+          # An apply that returns 200 but does not verify clean is a FAILURE.
+          # This is also what makes a second identical dispatch provably a
+          # no-op: the same committed object goes out and the same empty
+          # normalised difference comes back.
+          python3 .github/scripts/check_ruleset_drift.py \
+            "${RULESET_NAME}:${RUNNER_TEMP}/live.json:${PAYLOAD_FILE}"
