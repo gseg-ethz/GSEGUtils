@@ -23,7 +23,7 @@
     {
       "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": false,
+        "strict_required_status_checks_policy": true,
         "required_status_checks": [
           {
             "context": "Lint (pre-commit)",
@@ -31,6 +31,10 @@
           },
           {
             "context": "Tests (pytest)",
+            "integration_id": null
+          },
+          {
+            "context": "Docs (sphinx -W)",
             "integration_id": null
           }
         ]
@@ -44,6 +48,18 @@
     },
     {
       "type": "required_linear_history"
+    },
+    {
+      "type": "workflows",
+      "parameters": {
+        "workflows": [
+          {
+            "path": ".github/workflows/ci.yml",
+            "ref": "refs/heads/main",
+            "repository_id": 1024825129
+          }
+        ]
+      }
     }
   ]
 }

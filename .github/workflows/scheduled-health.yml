@@ -1,0 +1,314 @@
+name: Scheduled Health
+
+# Nightly protection health check (PROT-02, REL-06). Two INDEPENDENT jobs:
+# `ruleset-drift` reads this repository's live rulesets and machine-compares
+# them against the payloads committed under .github/rulesets/; `ancestry`
+# asserts the protected branch is still an ancestor of the integration branch.
+# They carry no dependency edge, so a drift failure cannot mask an ancestry
+# failure and each alarm deduplicates on its own label.
+#
+# Triggers MUST stay restricted to schedule + workflow_dispatch — never the
+# base-repo-context sibling of the pull-request trigger, which runs with this
+# repository's secrets against a fork's code. That prohibition is enforced
+# repo-wide by assertion A2 in .github/scripts/check_ci_config.py, which is why
+# the literal trigger name is deliberately NOT written here: A2 is a raw-text
+# scan over this directory and would flag its own prohibition note. Do not
+# "helpfully" restore the literal.
+#
+# Permissions MUST stay scoped to contents:read + issues:write — contents:read
+# because BOTH jobs check out, issues:write because both alarms create or
+# comment. NOTE: the OIDC ID token write permission is intentionally ABSENT —
+# this workflow publishes nothing, so granting it would widen the secret
+# surface for no benefit.
+#
+# DELIBERATE DEPARTURE FROM canary.yml, which is otherwise this file's
+# template. The canary gates its issue step on a detection flag, leaves the run
+# GREEN, and does not deduplicate. This workflow FAILS the run as well as
+# opening the issue, and it deduplicates against the repository's own open
+# issues. Both differences follow from the same fact: drift is a PERSISTENT
+# condition — a bypass actor stays added until somebody removes it — checked
+# NIGHTLY rather than weekly. A green run would be a false all-clear on a
+# security floor, and an undeduped alarm would be one new issue every night
+# until someone acted. Phase 13 D-08 / D-10, DESIGN-DECISIONS entry 34.
+# Recorded 2026-07-29, Phase 13 plan 13-05.
+#
+# This file is byte-identical across both repos by design (D-04): ruleset ids
+# are resolved by NAME at runtime, the repository comes from the runner
+# context, and the branch names are the same in both. A future diff between the
+# two copies is drift, not intent.
+
+on:
+  schedule:
+    # Nightly 06:00 UTC. Deliberately offset on the WALL CLOCK from the CI
+    # workflow's 05:00 nightly and from the canary's Monday 08:00 (and, in the
+    # twin repo, from the monthly GPU image refresh, also 08:00), so no two
+    # scheduled workflows in this repository ever share a slot.
+    - cron: '0 6 * * *'
+  # NOT garnish. Scheduled triggers register ONLY from the default branch, so
+  # this file produces no scheduled run at all until it reaches `main` — under
+  # the corrected feat -> develop/gsd -> main flow that is a second hop away.
+  # The manual dispatch is how this workflow's LOGIC is proved before its
+  # SCHEDULE can be; registration is proved separately, after promotion, by a
+  # `gh run list --event schedule` reading.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  ruleset-drift:
+    name: Ruleset drift check (PROT-02)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (PROT-02)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      - name: Mint ruleset App token (PROT-02 D-09/D-16)
+        id: ruleset-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RULESET_APP_ID }}
+          private-key: ${{ secrets.RULESET_APP_PRIVATE_KEY }}
+          # D-16 (iii): `write`, NOT D-09's `read`. Measured, not assumed —
+          # plan 13-01 probed BOTH repos and a token minted at
+          # `administration: read` receives a ruleset payload with the
+          # `bypass_actors` key ABSENT, because GitHub returns that field only
+          # to a caller holding write access to the ruleset. At `read` this job
+          # would be blind to the single field PROT-02 exists to watch, which
+          # is precisely the fail-open shape PROT-02's own requirement text
+          # names. The trade is recorded rather than softened: the per-job
+          # downscope was defence in depth, the field's VISIBILITY is the
+          # requirement, and D-02's App separation — the compromise-isolation
+          # argument that keeps publish and protection behind different
+          # credentials — is untouched either way. Do NOT restore `read`
+          # without re-running the probe; see 13-01-SUMMARY.md.
+          permission-administration: write
+
+      - name: Compare live rulesets against committed payloads (PROT-02)
+        id: drift
+        shell: bash
+        env:
+          # The App token, and ONLY here. The issue step below authenticates
+          # with the ambient workflow token instead; the two credentials are
+          # minted for different purposes and are never crossed.
+          GH_TOKEN: ${{ steps.ruleset-token.outputs.token }}
+        run: |
+          set -uo pipefail
+
+          # Ruleset ids are resolved BY NAME from this repository's own list.
+          # Hardcoding an id would make this file repo-specific, and an id
+          # carried across repos yields a 404 that reads like a token problem
+          # and is not.
+          read_live () {
+            local id
+            id=$(gh api "repos/${GITHUB_REPOSITORY}/rulesets" --jq ".[] | select(.name == \"$1\") | .id")
+            if [ -z "${id}" ]; then
+              echo "::error::no ruleset named \`$1\` on ${GITHUB_REPOSITORY} — resolution by name found nothing, so drift CANNOT be assessed and this run must not report clean."
+              return 1
+            fi
+            # includes_parents=false: an inherited parent organisation ruleset
+            # is not drift in a committed file, and would be reported as one.
+            gh api "repos/${GITHUB_REPOSITORY}/rulesets/${id}?includes_parents=false" > "$2"
+          }
+
+          REPORT=$(
+            {
+              read_live 'protect-main' "${RUNNER_TEMP}/live-main.json" \
+                && read_live 'protect-develop-gsd' "${RUNNER_TEMP}/live-develop.json" \
+                && python3 .github/scripts/check_ruleset_drift.py \
+                  "protect-main:${RUNNER_TEMP}/live-main.json:.github/rulesets/main.json" \
+                  "protect-develop-gsd:${RUNNER_TEMP}/live-develop.json:.github/rulesets/develop.json"
+            } 2>&1
+          )
+          STATUS=$?
+
+          {
+            echo 'report<<__EOF__'
+            echo "${REPORT}"
+            echo '__EOF__'
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "${REPORT}"
+
+          # The comparator's OWN non-zero exit is what fails this run. It is
+          # captured above for the issue body, never swallowed: a monitoring
+          # job that records its finding into an output and then exits zero is
+          # a monitoring job that has failed.
+          exit "${STATUS}"
+
+      - name: Open or update ruleset-drift issue, deduped (PROT-02 D-10)
+        if: failure() && steps.drift.outcome == 'failure'
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71  # v9.0.0
+        env:
+          DRIFT_REPORT: ${{ steps.drift.outputs.report }}
+        with:
+          # No `github-token:` input: this action authenticates with the
+          # ambient workflow token by default, which is the credential the
+          # issue calls need. The App token is NOT passed here.
+          script: |
+            const LABELS = ['ci', 'ruleset-drift'];
+            const TITLE = 'Ruleset drift detected — live protection state does not match the committed payloads';
+            const report = process.env.DRIFT_REPORT || '(no report captured)';
+            const runUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            const body = [
+              `Nightly ruleset drift check failed in [run ${context.runId}](${runUrl}).`,
+              '',
+              '```',
+              report,
+              '```',
+              '',
+              'Remediate by re-applying the committed payload, or by committing the change if it was intended.',
+              'Triggered by `.github/workflows/scheduled-health.yml` (PROT-02).',
+            ].join('\n');
+
+            // Deduplication reads the repository's OWN issue table. The search
+            // endpoint is deliberately not used: its index lags issue creation
+            // by seconds to minutes, so a nightly job could create a duplicate
+            // on the very next run, and its qualifier semantics changed under
+            // existing callers at the advanced-search cutover. Its method name
+            // is left unwritten so that grepping for it stays a reliable check.
+            const { data: openItems } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: LABELS.join(','),
+              per_page: 100,
+            });
+            // A pull request is an issue in the REST model, so this listing
+            // returns both; exclude pull requests defensively.
+            const existing = openItems.find(i => !i.pull_request && i.title === TITLE);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Drift still present as of ${new Date().toISOString()}.\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: TITLE,
+                body,
+                labels: LABELS,
+              });
+            }
+
+  ancestry:
+    name: Branch ancestry assertion (REL-06)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with full history (REL-06)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the protected and integration refs (REL-06)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # A full-depth checkout deepens the checked-out ref; it does NOT
+          # guarantee any other branch is present locally. Fetch both
+          # explicitly or the assertion below fails on a missing ref and reads
+          # like a real regression.
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/develop/gsd:refs/remotes/origin/develop/gsd'
+
+      - name: Assert the protected branch is an ancestor of the integration branch (REL-06)
+        id: ancestry
+        shell: bash
+        run: |
+          set -uo pipefail
+          PROTECTED='refs/remotes/origin/main'
+          INTEGRATION='refs/remotes/origin/develop/gsd'
+
+          # ANCESTRY, never a content diff. DESIGN-DECISIONS entry 34 is
+          # explicit that once the graft has happened, a back-merge with
+          # nothing to bring across is an EMPTY pull request that still passes
+          # this assertion — and that a squash or rebase merge collapses the
+          # second-parent link SILENTLY, surfacing only at the next release.
+          # A content comparison would invert both cases.
+          if git merge-base --is-ancestor "${PROTECTED}" "${INTEGRATION}"; then
+            echo "REL-06 OK: ${PROTECTED} is an ancestor of ${INTEGRATION} — the merge-base is intact."
+            exit 0
+          fi
+
+          BASE=$(git merge-base "${PROTECTED}" "${INTEGRATION}" 2>/dev/null || echo '(no common ancestor)')
+
+          {
+            echo 'report<<__EOF__'
+            echo "${PROTECTED} is NOT an ancestor of ${INTEGRATION}."
+            echo ''
+            echo "merge-base:     ${BASE}"
+            echo "${PROTECTED} -> $(git rev-parse "${PROTECTED}" 2>/dev/null || echo '(unresolved)')"
+            echo "${INTEGRATION} -> $(git rev-parse "${INTEGRATION}" 2>/dev/null || echo '(unresolved)')"
+            echo ''
+            echo 'Remediation: open a back-merge pull request from the protected branch into'
+            echo 'the integration branch and merge it as a TRUE MERGE. Never squash and never'
+            echo 'rebase — either collapses the second parent and destroys the merge-base'
+            echo 'advance silently, which is the regression this assertion exists to catch'
+            echo '(DESIGN-DECISIONS entry 34).'
+            echo '__EOF__'
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "::error::${PROTECTED} is no longer an ancestor of ${INTEGRATION} (merge-base ${BASE}) — open a back-merge pull request and merge it as a true merge, never squash or rebase (REL-06, DESIGN-DECISIONS entry 34)."
+          exit 1
+
+      - name: Open or update ancestry-drift issue, deduped (REL-06 D-10)
+        if: failure() && steps.ancestry.outcome == 'failure'
+        uses: actions/github-script@d746ffe35508b1917358783b479e04febd2b8f71  # v9.0.0
+        env:
+          ANCESTRY_REPORT: ${{ steps.ancestry.outputs.report }}
+        with:
+          # Ambient workflow token by default, as above. This job mints no App
+          # token at all — it needs none.
+          script: |
+            const LABELS = ['ci', 'ancestry-drift'];
+            const TITLE = 'Branch ancestry lost — the protected branch is no longer an ancestor of the integration branch';
+            const report = process.env.ANCESTRY_REPORT || '(no report captured)';
+            const runUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
+              `/actions/runs/${context.runId}`;
+            const body = [
+              `Nightly ancestry assertion failed in [run ${context.runId}](${runUrl}).`,
+              '',
+              '```',
+              report,
+              '```',
+              '',
+              'Triggered by `.github/workflows/scheduled-health.yml` (REL-06).',
+            ].join('\n');
+
+            // Same deduplication as the drift alarm, on its own second label so
+            // the two alarms never collide. Repository issue table, not the
+            // lagging search index.
+            const { data: openItems } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: LABELS.join(','),
+              per_page: 100,
+            });
+            const existing = openItems.find(i => !i.pull_request && i.title === TITLE);
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Ancestry still broken as of ${new Date().toISOString()}.\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: TITLE,
+                body,
+                labels: LABELS,
+              });
+            }
