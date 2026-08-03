@@ -14,7 +14,9 @@ suite refer to:
   A1  No filter key under a pull-request-side trigger on a workflow producing a
       required status-check context.
   A2  The base-repo-context pull-request trigger appears nowhere under the
-      workflows directory.
+      workflows directory, except in the ONE reviewed file named in
+      ``A2_REVIEWED_EXCEPTIONS`` -- and there only while the two statically
+      checkable conditions of that exception still hold.
   A3  The CI workflow's declared name still equals the pinned literal, and every
       workflow-run trigger names a workflow some file actually declares.
   A4  The fast-path allowlist still set-equals release-please's own changelog
@@ -41,13 +43,26 @@ event is ever inspected either.
 **What this script does NOT defend against, stated so it is not assumed.** A5
 and A6 make a job-level condition on a required context a build failure. They do
 not make such a condition un-suppressible: this script runs from inside the lint
-job, from the pull request's own checkout, so a head-ref edit reaches it. What
-makes the job itself un-skippable is the ruleset ``workflows`` rule (Phase 13
-D-15), which pins the *definition* of ``ci.yml`` to the protected branch, so the
-protected branch's condition-free ``lint`` job executes regardless of what the
-pull request's copy says. A5 and A6 are defence in depth on top of that; which
-copy of ``ci.yml`` they scan under a pinned run depends on how ``actions/checkout``
-resolves the ref and is measured in plan 13-10, not assumed here.
+job, from the pull request's own checkout, so a head-ref edit reaches it -- an
+``if:`` on ``lint`` skips the very job that would have caught it, and a skipped
+conclusion satisfies the gate.
+
+What closes that circularity is ``.github/workflows/integrity.yml`` (Phase 13
+D-19 / D-23, DESIGN-DECISIONS entry 46): a required-context job triggered on the
+base-repository pull-request event, whose definition and checker both come from
+the protected branch while its check run attaches to the pull request's head sha.
+It calls :func:`check_job_level_conditions` and
+:func:`check_conditional_dependencies` -- these functions, not a second copy of
+them -- against a tree whose rulesets come from the base checkout and whose
+workflows come from the head. A5 and A6 remain the fast build-time signal; the
+un-skippable evaluation of the same two rules lives there.
+
+**Superseded, and named so a reader does not act on it:** this paragraph
+previously credited the ruleset ``workflows`` rule (Phase 13 D-15) with pinning
+``ci.yml``'s definition to the protected branch. That rule requires GitHub
+Enterprise Cloud and is org/enterprise-scoped, so it is unavailable to these
+repositories at any payload shape -- proved empirically and recorded as
+DESIGN-DECISIONS entry 45. Entry 46 replaces it.
 
 Assertion helpers each take a root path so they are testable against synthetic
 trees; the module-level driver below calls them against this repository. The
@@ -97,12 +112,58 @@ A1_REVIEWED_EXCEPTIONS: dict[str, str] = {
         "pull-request trigger is therefore the intended scope rather than drift: the context is not "
         "required on any branch the filter excludes, so no check is left pending."
     ),
+    "integrity.yml": (
+        "Phase 13 D-23 scopes `Integrity (base-ref)` to a required context on the protected branch "
+        "ONLY, exactly as D-11 scopes the GPU context and D-06 the docs one. A `branches:` filter "
+        "under its trigger is therefore the intended scope rather than drift: the context is not "
+        "required on any branch the filter excludes, so no check is left pending. The deferred "
+        "`develop/gsd` extension is a recorded cost — a skip that reaches the integration branch is "
+        "caught by the promotion pull request into `main`."
+    ),
 }
 
-# The base-repo-context pull-request trigger. Never legitimate in either repo:
-# it runs with the base repository's secrets against a fork's code, and one of
-# these repos attaches a self-hosted lab runner.
+# The base-repo-context pull-request trigger. Never legitimate in either repo
+# EXCEPT for the one file named in A2_REVIEWED_EXCEPTIONS below: it runs with the
+# base repository's secrets against a fork's code, and one of these repos
+# attaches a self-hosted lab runner.
 BASE_REPO_CONTEXT_TRIGGER = "pull_request_target"
+
+# The ONE reviewed exception to A2, keyed by workflow filename. CI-12 as amended
+# by Phase 13 D-19 permits this trigger for a single file, and only while three
+# conditions hold. Two of them are STATICALLY ASSERTED below and fail the build;
+# the third is a property of what the steps do rather than of a key that can be
+# looked up, so it is carried here as a reviewed reason. An excepted file is
+# therefore never simply skipped -- a workflow that drifts out of the asserted
+# conditions fails the build rather than quietly keeping its exemption.
+#
+# This file is byte-identical across both repos by design (D-04), so adding or
+# removing an entry is a paired cross-repo change.
+A2_REVIEWED_EXCEPTIONS: dict[str, str] = {
+    "integrity.yml": (
+        "Phase 13 D-19, recorded as DESIGN-DECISIONS entry 46 and licensed by CI-12 as amended by "
+        "plan 13-14. This is the anti-skip mechanism itself: the ONLY control on this account that "
+        "can catch a job-level condition added to a required-context job, because the build-time "
+        "self-test lives inside the job such an edit skips. Its check run attaches to the pull "
+        "request's HEAD sha while the runner sees the BASE commit, measured by the D-21 probe. "
+        "THREE conditions make it safe. (i) BASE-REF CHECKOUT ONLY -- ASSERTED here: no checkout "
+        "step in that workflow may carry a `ref:` input. (ii) IT NEVER CHECKS OUT OR EXECUTES "
+        "HEAD-REF CODE, with reading the head's workflow YAML as DATA through the contents API "
+        "explicitly permitted, because that is the entire point of the job and its parser and rules "
+        "both come from the protected branch -- this condition is REVIEWED, not asserted, since it "
+        "is a property of what the steps do rather than of a lookupable key. (iii) THE WORKFLOW "
+        "GRANTS EXACTLY A READ CONTENT SCOPE -- ASSERTED here, at workflow level and at job level "
+        "both, because a job-level block REPLACES rather than narrows the workflow-level one."
+    ),
+}
+
+# The exact permissions mapping conditions (iii) allows. Compared as a whole
+# mapping rather than key-by-key: "grants nothing beyond a read content scope"
+# has to mean the block carries nothing else at all, or an added key slips
+# through as long as the contents key still reads `read`.
+READ_CONTENT_ONLY_PERMISSIONS: dict[str, str] = {"contents": "read"}
+
+CHECKOUT_ACTION = "actions/checkout"
+CHECKOUT_REF_INPUT = "ref"
 
 CI_WORKFLOW_FILENAME = "ci.yml"
 CI_WORKFLOW_NAME = "CI"
@@ -235,24 +296,53 @@ def check_trigger_filters(
     return violations
 
 
-def check_base_repo_context_trigger(root: pathlib.Path) -> list[str]:
-    """A2 -- flag the base-repo-context pull-request trigger anywhere under the workflows directory.
+def check_base_repo_context_trigger(
+    root: pathlib.Path,
+    exceptions: dict[str, str] | None = None,
+) -> list[str]:
+    """A2 -- flag the base-repo-context pull-request trigger, except in the one reviewed file.
 
     The scan is over raw file text rather than parsed keys, so an occurrence in a
     comment or nested under a reusable-workflow call is caught too. It is scoped
     to the workflows directory so this script's own search literal cannot match
     itself.
 
+    **An excepted file is not simply skipped.** Before the exception is honoured,
+    the two statically checkable conditions of :data:`A2_REVIEWED_EXCEPTIONS` are
+    asserted and either failure is a violation:
+
+      (i)   no checkout step anywhere in that workflow carries a ``ref:`` input --
+            a checkout with an explicit reference is how the job would start
+            looking at head code, and it is the single edit that would turn the
+            exception into the privilege-escalation vector the general ban exists
+            to stop;
+      (iii) the workflow grants exactly a read content scope and nothing else, at
+            workflow level AND in every job that declares its own block, because
+            a job-level ``permissions:`` REPLACES the workflow-level one rather
+            than narrowing it.
+
+    The third condition -- that no head-supplied code is executed, with API reads
+    of head workflow YAML permitted -- stays a *reviewed* condition stated in the
+    exception's reason string, because it is a property of what the steps do
+    rather than of a key that can be looked up. It is not enforced here and must
+    not be read as though it were.
+
     Parameters
     ----------
     root
         Repository root to inspect.
+    exceptions
+        Reviewed-exceptions table keyed by workflow filename; defaults to
+        :data:`A2_REVIEWED_EXCEPTIONS`. Injectable so the tests can pin both
+        directions, mirroring :func:`check_trigger_filters`'s signature.
 
     Returns
     -------
     list of str
-        One entry per workflow file containing the token.
+        One entry per offending workflow file, or per unmet condition on an
+        excepted one.
     """
+    table = A2_REVIEWED_EXCEPTIONS if exceptions is None else exceptions
     violations: list[str] = []
     for path in sorted((root / WORKFLOWS_DIR).glob("*.yml")):
         lines = [
@@ -260,12 +350,86 @@ def check_base_repo_context_trigger(root: pathlib.Path) -> list[str]:
             for number, line in enumerate(path.read_text().splitlines(), start=1)
             if BASE_REPO_CONTEXT_TRIGGER in line
         ]
-        if lines:
+        if not lines:
+            continue
+        if path.name in table:
+            violations.extend(_check_exception_conditions(path))
+            continue
+        violations.append(
+            f"{path.name}: `{BASE_REPO_CONTEXT_TRIGGER}` found on line(s) {', '.join(lines)} — "
+            f"that trigger runs with the base repository's secrets against a fork's code, and "
+            f"one of these repos attaches a self-hosted lab runner. It is never legitimate here. "
+            f"Exactly one file is excepted, by path, in A2_REVIEWED_EXCEPTIONS, and this is not it."
+        )
+    return violations
+
+
+def _check_exception_conditions(path: pathlib.Path) -> list[str]:
+    """Assert conditions (i) and (iii) on the one workflow excepted from A2.
+
+    Parameters
+    ----------
+    path
+        The excepted workflow file.
+
+    Returns
+    -------
+    list of str
+        One entry per unmet condition; empty when the exception still holds.
+    """
+    try:
+        with path.open() as handle:
+            document = yaml.safe_load(handle)
+    except (OSError, yaml.YAMLError) as error:
+        return [
+            f"{path.name}: is excepted from A2 but could not be parsed — {error}. Its exception "
+            f"conditions cannot be asserted, so the exception cannot be honoured."
+        ]
+    if not isinstance(document, dict):
+        return [
+            f"{path.name}: is excepted from A2 but does not parse to a mapping, so its exception "
+            f"conditions cannot be asserted and the exception cannot be honoured."
+        ]
+
+    violations: list[str] = []
+
+    # Condition (iii), workflow level. Compared as a whole mapping: an added key
+    # must fail even while `contents: read` is still present.
+    permissions = document.get("permissions")
+    if permissions != READ_CONTENT_ONLY_PERMISSIONS:
+        violations.append(
+            f"{path.name}: is excepted from the `{BASE_REPO_CONTEXT_TRIGGER}` ban only while its "
+            f"workflow-level `permissions:` block is exactly {READ_CONTENT_ONLY_PERMISSIONS}, and it "
+            f"is {permissions!r} — condition (iii) of that exception. A base-repo-context job with "
+            f"anything beyond a read content scope is the privilege escalation the general ban "
+            f"exists to stop."
+        )
+
+    for job_id, job in _declared_jobs(document).items():
+        # Condition (iii), job level. A job-level block REPLACES the
+        # workflow-level one rather than narrowing it, so a job could otherwise
+        # widen the scope while the workflow-level block still read clean.
+        if "permissions" in job and job.get("permissions") != READ_CONTENT_ONLY_PERMISSIONS:
             violations.append(
-                f"{path.name}: `{BASE_REPO_CONTEXT_TRIGGER}` found on line(s) {', '.join(lines)} — "
-                f"that trigger runs with the base repository's secrets against a fork's code, and "
-                f"one of these repos attaches a self-hosted lab runner. It is never legitimate here."
+                f"{path.name}: job `{job_id}` declares `permissions: {job.get('permissions')!r}`, "
+                f"which is not exactly {READ_CONTENT_ONLY_PERMISSIONS} — condition (iii) of this "
+                f"file's A2 exception. A job-level block REPLACES the workflow-level one, so this "
+                f"widens the scope rather than narrowing it."
             )
+        # Condition (i).
+        steps = job.get("steps")
+        for index, step in enumerate(steps if isinstance(steps, list) else []):
+            if not isinstance(step, dict) or CHECKOUT_ACTION not in str(step.get("uses") or ""):
+                continue
+            inputs = step.get("with")
+            if isinstance(inputs, dict) and CHECKOUT_REF_INPUT in inputs:
+                violations.append(
+                    f"{path.name}: job `{job_id}` step {index} checks out with a "
+                    f"`{CHECKOUT_REF_INPUT}:` input — condition (i) of this file's A2 exception is "
+                    f"base-ref checkout ONLY. A checkout carrying an explicit reference is how this "
+                    f"job would start looking at head code, and it is the single edit that turns the "
+                    f"exception into the vector the ban exists to stop."
+                )
     return violations
 
 
@@ -527,7 +691,7 @@ def run_all(
     """
     violations = [
         *check_trigger_filters(root, exceptions),
-        *check_base_repo_context_trigger(root),
+        *check_base_repo_context_trigger(root),  # its own table; see A2_REVIEWED_EXCEPTIONS
         *check_workflow_name_pin(root),
         *check_fast_path_allowlist(root),
         *check_job_level_conditions(root),

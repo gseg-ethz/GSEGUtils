@@ -1,0 +1,189 @@
+name: Integrity
+
+# The anti-skip check (CI-10, PROT-03, Phase 13 D-19 scoped by D-23), evaluated
+# from the PROTECTED BRANCH so that the pull request under judgement cannot edit
+# what judges it.
+#
+# ============== WHY THIS FILE USES A TRIGGER THE SELF-TEST BANS ==============
+# `.github/scripts/check_ci_config.py` assertion A2 forbids the base-repository-
+# context pull-request trigger in every workflow but this one. This file is that
+# one named exception (CI-12 as amended by Phase 13 D-19), and the exception is
+# NOT a bare path allowance — it carries three conditions, TWO of which the
+# self-test asserts statically and fails the build on:
+#
+#   (i)   ASSERTED — base-ref checkout only: no checkout step in this workflow
+#         carries a `ref:` input. With no ref, `actions/checkout` lands on the
+#         default branch tip, which IS the mechanism. A `ref:` here is the single
+#         edit that would turn this job into the privilege-escalation vector the
+#         general ban exists to stop.
+#   (ii)  REVIEWED — it never checks out or executes head-ref code. Reading the
+#         head's workflow YAML as DATA through the contents API is explicitly
+#         permitted and is the entire point of the job: the parser and the rules
+#         both come from the protected branch, so head content is only ever an
+#         argument to a base-provided program. This one is a property of what the
+#         steps DO rather than of a key that can be looked up, so it is the
+#         exception's reviewed reason string — NOT statically enforced. Do not
+#         read all three as enforced.
+#   (iii) ASSERTED — the workflow-level `permissions:` block grants exactly a read
+#         content scope and nothing else, and no job in this file widens it. A
+#         job-level block REPLACES the workflow-level one, so both are checked.
+#
+# Why the general ban is still correct rather than merely inconvenient: this
+# trigger runs with THIS repository's secrets against a fork's code, and the
+# sibling repository attaches a self-hosted lab runner. The excepted job by
+# construction checks out nothing from head and executes nothing from head.
+# Cite: Phase 13 D-19 / D-23, DESIGN-DECISIONS entry 46, REQUIREMENTS.md CI-12.
+# =============================================================================
+#
+# What else MUST stay true, and why:
+#
+#   - `Integrity (base-ref)` below IS a ruleset required-status-check context
+#     string, on the protected branch ONLY (`.github/rulesets/main.json`, and on
+#     pchandler also the D-13 lab-outage override `main.no-gpu.json`). RENAMING
+#     this job is a coordinated change across every committed payload naming it,
+#     in ONE commit, or the protected branch requires a context nothing produces
+#     and becomes unmergeable BY ANYONE under `bypass_actors: []` (CI-10).
+#   - NO job-level `if:` and NO dependency edge on this job. GitHub counts a
+#     `skipped` conclusion among the SATISFYING ones, so either shape would green
+#     the gate having executed nothing — and this is the job whose whole purpose
+#     is to report exactly those two shapes in the head. It must not carry them
+#     itself.
+#   - NO cancel-in-progress concurrency group. A cancelled run does not satisfy a
+#     required context, so cancelling would block rather than fail closed in any
+#     useful way.
+#   - `branches: [main]` under the trigger is INTENDED SCOPE, not drift: D-23
+#     scopes this mechanism to the protected branch, exactly as D-06 scopes the
+#     docs context and D-11 the GPU one. That is why this file also holds an
+#     entry in assertion A1's reviewed-exceptions table, with the reason stated
+#     there rather than the rule weakened.
+#   - This file is byte-identical across both repos by design (D-04). A future
+#     diff between the two copies is drift, not intent.
+#
+# Recorded 2026-08-03, Phase 13 plan 13-16.
+
+on:
+  pull_request_target:
+    branches: [main]
+
+# CONDITION (iii), asserted by the self-test. Exactly a read content scope.
+permissions:
+  contents: read
+
+jobs:
+  integrity:
+    name: Integrity (base-ref)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Deliberately NO job-level `permissions:` block: a job-level block REPLACES
+    # the workflow-level one rather than narrowing it, so the safest shape is to
+    # state the scope once, above, where condition (iii) is asserted.
+    steps:
+      - name: Check out the protected branch — NO ref input, which is the mechanism
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        # CONDITION (i). With no `ref:` this lands on the default branch tip, so
+        # the checker below and the two rules it calls are the PROTECTED branch's
+        # copies. The D-21 probe proved this by marker string rather than by
+        # inference: `GITHUB_SHA` inside the job is the base tip while the check
+        # run is filed against the pull request's HEAD sha, which is what makes
+        # this job both un-editable by the pull request AND able to satisfy a
+        # required context. Adding a `ref:` here fails the build.
+
+      - name: Fetch the pull request's workflow files as DATA (never as code)
+        id: fetch
+        shell: bash
+        env:
+          # The ambient workflow token. Read scope only — see the permissions
+          # block above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # CONDITION (ii). This is the ONLY contact with the pull request: its
+        # workflow YAML is read into a temporary directory and handed to a
+        # base-provided program as an argument. Nothing from head is checked out,
+        # installed or executed.
+        #
+        # A head living in a FORK resolves against the BASE repository: GitHub
+        # publishes the fork's head commit into this repository as
+        # `refs/pull/N/head`, so the object is reachable here by sha. If it ever
+        # is not, every command below is exit-code gated and this step FAILS —
+        # a maintainer looks, the check does not pass. A failed fetch must never
+        # become an empty directory that reads as no violations.
+        #
+        # `set -e` is deliberately NOT used, matching `ruleset-apply.yml`: this
+        # step runs commands and then checks their results, and aborting on the
+        # command's status would pre-empt those checks and lose their named
+        # error messages. Every command whose result is interpreted is instead
+        # wrapped in an explicit `if ! ...` — and NOTHING is judged by whether
+        # captured output is empty, because `gh` prints API error bodies to
+        # STDOUT, so an emptiness test reads a failure as a success.
+        run: |
+          set -uo pipefail
+          TREE="${RUNNER_TEMP}/hybrid"
+          WORKFLOW_DIR="${TREE}/.github/workflows"
+          rm -rf "${TREE}"
+          mkdir -p "${WORKFLOW_DIR}"
+
+          if ! NAMES=$(gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows?ref=${HEAD_SHA}" \
+            --jq '.[] | select(.type == "file") | .name | select(endswith(".yml") or endswith(".yaml"))'); then
+            echo "::error::could not list \`.github/workflows\` at the pull request head \`${HEAD_SHA}\`. This is a FAILED READ, not a clean result — nothing about this pull request has been checked. A maintainer should look at the API response above."
+            exit 1
+          fi
+
+          # A SECOND, independent guard rather than a substitute for the exit
+          # code above: a listing that succeeded but came back empty means the
+          # head carries no workflow files at all, which the checker itself also
+          # treats as a violation. Both are failures; neither is inferred from
+          # the other.
+          if [ -z "${NAMES}" ]; then
+            echo "::error::the listing of \`.github/workflows\` at \`${HEAD_SHA}\` succeeded but is empty — this pull request appears to carry no workflow files, so the required contexts cannot be produced by it."
+            exit 1
+          fi
+
+          while IFS= read -r NAME; do
+            # The filename is supplied by the pull request. It is used to build a
+            # filesystem path, so it is validated rather than trusted, even
+            # though the contents API returns basenames.
+            if ! printf '%s' "${NAME}" | grep -Eq '^[A-Za-z0-9._-]+\.(yml|yaml)$'; then
+              echo "::error::refusing the head workflow filename \`${NAME}\` — it is not a plain workflow basename, and this value is supplied by the pull request."
+              exit 1
+            fi
+            if ! gh api "repos/${GITHUB_REPOSITORY}/contents/.github/workflows/${NAME}?ref=${HEAD_SHA}" \
+              -H 'Accept: application/vnd.github.raw' > "${WORKFLOW_DIR}/${NAME}"; then
+              echo "::error::could not read \`.github/workflows/${NAME}\` at \`${HEAD_SHA}\`. This is a FAILED READ — the file is NOT assumed absent and this run must not report clean."
+              exit 1
+            fi
+            echo "fetched ${NAME} at ${HEAD_SHA}"
+          done <<< "${NAMES}"
+
+          echo "tree=${TREE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Assemble the hybrid tree — rulesets from base, workflows from head
+        shell: bash
+        env:
+          TREE: ${{ steps.fetch.outputs.tree }}
+        # The rules come from the checkout above, which is the protected branch.
+        # This is the half of the tree the pull request cannot reach, and it is
+        # what makes the required-context set un-editable by the head.
+        run: |
+          set -uo pipefail
+          if ! mkdir -p "${TREE}/.github/rulesets"; then
+            echo "::error::could not create the hybrid tree's rulesets directory under \`${TREE}\`."
+            exit 1
+          fi
+          if ! cp .github/rulesets/*.json "${TREE}/.github/rulesets/"; then
+            echo "::error::could not copy this repository's committed ruleset payloads into the hybrid tree — without them there are no required contexts to check against, so this run must not report clean."
+            exit 1
+          fi
+          echo "hybrid tree assembled at ${TREE}:"
+          echo "  base rulesets:  $(ls "${TREE}/.github/rulesets" | tr '\n' ' ')"
+          echo "  head workflows: $(ls "${TREE}/.github/workflows" | tr '\n' ' ')"
+
+      - name: Assert the head cannot skip a required context (D-19)
+        shell: bash
+        env:
+          TREE: ${{ steps.fetch.outputs.tree }}
+        # Run DIRECTLY, from the base checkout, with no wrapper: a non-zero exit
+        # fails the job and therefore the required context. The checker and the
+        # two conditionality rules it calls are the protected branch's copies —
+        # the same definitions the build-time self-test uses, so the branch gate
+        # and the self-test can never disagree about what a violation is.
+        run: python3 .github/scripts/assert_no_skip.py "${TREE}"
