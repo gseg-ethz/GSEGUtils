@@ -132,6 +132,76 @@ def live_payload(*, with_bypass_actors: bool = True, allowed_merge_methods: list
     return payload
 
 
+def api_error_envelope(*, status: str, message: str) -> dict:
+    """Build a GitHub REST error body in the shape a refused ruleset read returns.
+
+    Note that `status` is a JSON *string* in GitHub's error bodies, not an integer;
+    the fixture keeps that as measured rather than tidying it into an int.
+
+    Parameters
+    ----------
+    status
+        The HTTP status GitHub reports inside the body.
+    message
+        The human-readable refusal text.
+
+    Returns
+    -------
+    dict
+        An envelope carrying no ``id`` and no ``rules``, which is what makes it
+        structurally distinguishable from a ruleset.
+    """
+    return {
+        "message": message,
+        "documentation_url": "https://docs.github.com/rest/repos/rules#create-a-repository-ruleset",
+        "status": status,
+    }
+
+
+# The refusal the D-22 probe measured verbatim against a private repository in a
+# free-plan organisation. Recorded here as a fixture so the guard is tested against
+# the body GitHub actually sends rather than a paraphrase of it.
+MEASURED_REFUSAL_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
+
+
+def test_api_error_envelope_with_the_measured_status_names_the_plan_and_visibility_cause() -> None:
+    """The refusal D-22 measured raises, quoting status and message and naming the real cause."""
+    envelope = api_error_envelope(status="403", message=MEASURED_REFUSAL_MESSAGE)
+    with pytest.raises(ruleset_lib.RulesetReadError) as caught:
+        ruleset_lib.assert_not_api_error(envelope, "protect-main")
+    message = str(caught.value)
+    assert "protect-main" in message, message
+    assert '"403"' in message, message
+    assert MEASURED_REFUSAL_MESSAGE in message, message
+    assert "plan and visibility" in message, message
+    assert "NOT an absence of drift" in message, message
+    # Distinguishable in text from the absent-bypass-actors failure, which is the
+    # other RulesetReadError this module raises.
+    assert ruleset_lib.BYPASS_ACTORS_KEY not in message, message
+
+
+def test_api_error_envelope_with_another_status_raises_and_names_that_status() -> None:
+    """A refusal carrying a different status still raises, and diagnoses that status instead."""
+    envelope = api_error_envelope(status="404", message="Not Found")
+    with pytest.raises(ruleset_lib.RulesetReadError) as caught:
+        ruleset_lib.assert_not_api_error(envelope, "protect-develop-gsd")
+    message = str(caught.value)
+    assert '"404"' in message, message
+    assert "status 404" in message, message
+    assert "must not report clean" in message, message
+    assert "plan and visibility" not in message, message
+
+
+def test_a_real_ruleset_payload_passes_the_envelope_guard_and_still_normalises() -> None:
+    """The passing control: a real payload does not raise, and comparison still works after it."""
+    live = live_payload()
+    committed = committed_payload()
+    ruleset_lib.assert_not_api_error(live, "protect-main")
+    ruleset_lib.assert_not_api_error(committed, ".github/rulesets/main.json")
+    norm_live, norm_committed, _ = ruleset_lib.normalize(live, committed)
+    assert ruleset_lib.diff(norm_live, norm_committed) == []
+
+
 def test_absent_bypass_actors_raises_and_names_repo_and_ruleset() -> None:
     """An absent bypass-actors key is a hard failure naming the repo and the ruleset."""
     with pytest.raises(ruleset_lib.RulesetReadError) as caught:

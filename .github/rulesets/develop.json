@@ -41,18 +41,6 @@
     },
     {
       "type": "deletion"
-    },
-    {
-      "type": "workflows",
-      "parameters": {
-        "workflows": [
-          {
-            "path": ".github/workflows/ci.yml",
-            "ref": "refs/heads/develop/gsd",
-            "repository_id": 1024825129
-          }
-        ]
-      }
     }
   ]
 }

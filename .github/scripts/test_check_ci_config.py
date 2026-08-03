@@ -219,7 +219,12 @@ def test_a1_tolerates_a_workflow_document_with_no_jobs_key(tmp_path: pathlib.Pat
 
 
 def test_a2_passes_on_the_real_workflows_directory() -> None:
-    """No workflow in this repository carries the base-repo-context trigger today."""
+    """The one excepted workflow still meets both asserted conditions on today's tree.
+
+    This is not a vacuous pass: ``integrity.yml`` carries the banned trigger, so
+    this call exercises the exception AND its two condition assertions against
+    the real file rather than against a fixture.
+    """
     assert cc.check_base_repo_context_trigger(REPO_ROOT) == []
 
 
@@ -230,6 +235,110 @@ def test_a2_fails_when_the_token_appears_only_inside_a_comment(tmp_path: pathlib
     violations = cc.check_base_repo_context_trigger(root)
     assert len(violations) == 1, violations
     assert "ci.yml" in violations[0]
+
+
+# --------------------------------------------------------------------------
+# A2's one reviewed exception, and the two conditions asserted behind it
+# --------------------------------------------------------------------------
+
+# The real excepted workflow, read from the tree it ships in, so these fixtures
+# drift with it rather than describing a file that no longer exists.
+EXCEPTED_WORKFLOW = "integrity.yml"
+
+
+def excepted_workflow_text() -> str:
+    """Return the real excepted workflow's text.
+
+    Returns
+    -------
+    str
+        The contents of the repository's own excepted workflow file.
+    """
+    return (REPO_ROOT / cc.WORKFLOWS_DIR / EXCEPTED_WORKFLOW).read_text()
+
+
+def test_a2_honours_the_exception_for_the_real_conforming_workflow(tmp_path: pathlib.Path) -> None:
+    """The real excepted workflow passes A2: the trigger is allowed and both conditions hold."""
+    root = build_tree(tmp_path, {"ci.yml": CLEAN_CI_YML, EXCEPTED_WORKFLOW: excepted_workflow_text()})
+    assert cc.check_base_repo_context_trigger(root) == []
+
+
+def test_a2_fails_when_the_excepted_workflow_grants_a_write_scope(tmp_path: pathlib.Path) -> None:
+    """Widening the excepted workflow's permissions block fails condition (iii)."""
+    widened = excepted_workflow_text().replace(
+        "permissions:\n  contents: read\n", "permissions:\n  contents: read\n  pull-requests: write\n", 1
+    )
+    root = build_tree(tmp_path, {"ci.yml": CLEAN_CI_YML, EXCEPTED_WORKFLOW: widened})
+    violations = cc.check_base_repo_context_trigger(root)
+    assert len(violations) == 1, violations
+    assert EXCEPTED_WORKFLOW in violations[0]
+    assert "permissions" in violations[0]
+
+
+def test_a2_fails_when_a_job_in_the_excepted_workflow_widens_the_permissions(tmp_path: pathlib.Path) -> None:
+    """A job-level block REPLACES the workflow-level one, so it is asserted too.
+
+    Without this, the workflow-level block could read clean while the job that
+    actually runs held a write scope -- the whole exception defeated by one
+    correctly-indented key.
+    """
+    widened = excepted_workflow_text().replace(
+        "    timeout-minutes: 10\n",
+        "    timeout-minutes: 10\n    permissions:\n      contents: write\n",
+        1,
+    )
+    root = build_tree(tmp_path, {"ci.yml": CLEAN_CI_YML, EXCEPTED_WORKFLOW: widened})
+    violations = cc.check_base_repo_context_trigger(root)
+    assert len(violations) == 1, violations
+    assert "job `integrity`" in violations[0]
+
+
+def test_a2_fails_when_the_excepted_workflows_checkout_carries_a_ref_input(tmp_path: pathlib.Path) -> None:
+    """A checkout with an explicit reference fails condition (i) -- base-ref checkout only."""
+    with_ref = excepted_workflow_text().replace(
+        "        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1\n",
+        "        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1\n"
+        "        with:\n          ref: ${{ github.event.pull_request.head.sha }}\n",
+        1,
+    )
+    root = build_tree(tmp_path, {"ci.yml": CLEAN_CI_YML, EXCEPTED_WORKFLOW: with_ref})
+    violations = cc.check_base_repo_context_trigger(root)
+    assert len(violations) == 1, violations
+    assert EXCEPTED_WORKFLOW in violations[0]
+    assert cc.CHECKOUT_REF_INPUT in violations[0]
+
+
+def test_a2_still_fails_on_the_banned_trigger_in_a_different_file(tmp_path: pathlib.Path) -> None:
+    """The exception is keyed on a file path, not a global mute.
+
+    The same trigger in any other workflow still fails the build, which is what
+    distinguishes a named exception from having turned the assertion off.
+    """
+    offender = f"name: Other\n\non:\n  {cc.BASE_REPO_CONTEXT_TRIGGER}:\n    branches: [main]\n\njobs: {{}}\n"
+    root = build_tree(
+        tmp_path,
+        {"ci.yml": CLEAN_CI_YML, EXCEPTED_WORKFLOW: excepted_workflow_text(), "other.yml": offender},
+    )
+    violations = cc.check_base_repo_context_trigger(root)
+    assert len(violations) == 1, violations
+    assert "other.yml" in violations[0]
+    assert EXCEPTED_WORKFLOW not in violations[0]
+
+
+def test_a2_exception_table_is_injectable_in_both_directions(tmp_path: pathlib.Path) -> None:
+    """An empty table restores the blanket ban; a table naming a file excepts only that file."""
+    root = build_tree(tmp_path, {"ci.yml": CLEAN_CI_YML, EXCEPTED_WORKFLOW: excepted_workflow_text()})
+    assert cc.check_base_repo_context_trigger(root, exceptions={}) != []
+    assert cc.check_base_repo_context_trigger(root, exceptions={EXCEPTED_WORKFLOW: "reviewed here"}) == []
+
+
+def test_every_a2_exception_entry_states_its_reason_and_names_its_three_conditions() -> None:
+    """Each entry says WHY, and says which conditions are asserted and which reviewed."""
+    assert cc.A2_REVIEWED_EXCEPTIONS, "the table must never be silently emptied"
+    for filename, reason in cc.A2_REVIEWED_EXCEPTIONS.items():
+        assert len(reason) > 40, f"{filename} exception must state why, not merely exist"
+        assert reason.count("ASSERTED") == 2, f"{filename} must name exactly the two asserted conditions"
+        assert "REVIEWED" in reason, f"{filename} must say which condition is reviewed rather than enforced"
 
 
 # --------------------------------------------------------------------------

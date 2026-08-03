@@ -246,9 +246,21 @@ jobs:
           # steps run a command and then check its OUTPUT (`NAMES` in the fetch
           # step, `RULESET_ID` above), and aborting on the command's status would
           # pre-empt those checks and lose their named error messages.
+          # The response body is CAPTURED, not discarded. `gh api` writes the
+          # API's own `errors` array to STDOUT, so the previous `> /dev/null`
+          # threw away the only thing that explains a rejection and left a bare
+          # `Validation Failed (HTTP 422)` — while the comment above told the
+          # operator to "read the gh error above", which the redirect had made
+          # impossible. Captured on success too and printed ONLY on failure, so
+          # a clean apply stays quiet. Found the hard way in 13-10 Task 2, when
+          # the first real apply 422'd and the reason was unrecoverable.
+          APPLY_RESPONSE="${RUNNER_TEMP}/apply-response.json"
           if ! gh api --method PUT "repos/${GITHUB_REPOSITORY}/rulesets/${RULESET_ID}" \
-            --input "${RUNNER_TEMP}/send-payload.json" > /dev/null; then
-            echo "::error::the update request to ruleset \`${RULESET_NAME}\` (id ${RULESET_ID}) on ${GITHUB_REPOSITORY} FAILED. Live protection state was NOT changed by this run. This is a failed write, not drift — read the gh error above, not the drift comparator."
+            --input "${RUNNER_TEMP}/send-payload.json" > "${APPLY_RESPONSE}" 2>&1; then
+            echo "::group::API response body — the reason for the failure"
+            cat "${APPLY_RESPONSE}" 2>/dev/null || echo "(no response body was captured)"
+            echo "::endgroup::"
+            echo "::error::the update request to ruleset \`${RULESET_NAME}\` (id ${RULESET_ID}) on ${GITHUB_REPOSITORY} FAILED. Live protection state was NOT changed by this run. This is a failed write, not drift — read the API response body in the group above, not the drift comparator."
             exit 1
           fi
 

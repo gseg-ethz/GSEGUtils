@@ -66,6 +66,17 @@ SENDABLE_KEYS: tuple[str, ...] = (
 
 BYPASS_ACTORS_KEY = "bypass_actors"
 
+# The two keys a GitHub REST error body always carries, and the two a real ruleset
+# always carries. An error envelope is discriminated structurally on those four --
+# never by matching against message text, which GitHub is free to reword.
+API_ERROR_ENVELOPE_KEYS: tuple[str, ...] = ("message", "status")
+RULESET_IDENTITY_KEYS: tuple[str, ...] = ("id", "rules")
+
+# The status the D-22 probe measured when the rulesets endpoint refuses a private
+# repository on a plan without rulesets. GitHub returns it inside the error body as
+# a JSON *string*, not an integer, so every comparison against it normalises to str.
+RULESETS_UNAVAILABLE_STATUS = "403"
+
 
 class RulesetReadError(Exception):
     """Raised when a live ruleset payload cannot be trusted enough to compare.
@@ -75,6 +86,78 @@ class RulesetReadError(Exception):
     so no verdict about it is available. Callers must surface it as a failure and
     must never fall through to a clean result.
     """
+
+
+def assert_not_api_error(payload: dict[str, Any], source: str) -> None:
+    """Raise when a parsed payload is a GitHub API error envelope rather than a ruleset.
+
+    **Why this is a hard failure and not a drift finding.** A REST error body is a
+    well-formed JSON object, so it parses cleanly and would be handed to
+    :func:`normalize` and then to :func:`diff` like any other payload. Compared
+    against a committed file it produces differences that describe the envelope
+    rather than the protection state -- or, if the caller were ever to treat an
+    unreadable read as "nothing to report", no differences at all. **A check that
+    cannot read is indistinguishable from a passing one**, which is the exact
+    fail-open shape PROT-02 exists to eliminate. This generalises D-16's rule that
+    an absent ``bypass_actors`` key is a hard failure: an absent *whole payload* is
+    one too, and it gets its own named reason so the two are told apart in the log.
+
+    **Discrimination is structural, never textual.** An error envelope carries
+    :data:`API_ERROR_ENVELOPE_KEYS` and carries neither of
+    :data:`RULESET_IDENTITY_KEYS`; every real ruleset carries both of the latter.
+    Matching on message text would break the first time GitHub rewords a string,
+    and would be defeated by a ruleset that happened to be *named* something
+    error-shaped.
+
+    The raised message has two parts, deliberately: the status and message the API
+    actually returned, quoted so the operator sees the real cause rather than this
+    module's interpretation of it, followed by a named diagnosis. For the status the
+    D-22 probe measured (:data:`RULESETS_UNAVAILABLE_STATUS`) that diagnosis names
+    the plan-and-visibility cause, because a template adopter hitting this is on a
+    private repository on a plan without rulesets and needs to be told what to do,
+    not told that a field is missing.
+
+    Parameters
+    ----------
+    payload
+        A parsed JSON object, live or committed.
+    source
+        Where the payload came from -- a file path or a ruleset name -- quoted back
+        in the failure so one line identifies which read refused.
+
+    Raises
+    ------
+    RulesetReadError
+        When `payload` is an API error envelope.
+    """
+    is_envelope = all(key in payload for key in API_ERROR_ENVELOPE_KEYS) and not any(
+        key in payload for key in RULESET_IDENTITY_KEYS
+    )
+    if not is_envelope:
+        return
+
+    status = str(payload.get("status", "")).strip()
+    message = str(payload.get("message", "")).strip()
+
+    if status == RULESETS_UNAVAILABLE_STATUS:
+        diagnosis = (
+            "the rulesets endpoint is unavailable for this repository's plan and visibility — "
+            "a private repository on a plan without rulesets has no ruleset surface at all, so "
+            "there is no floor here to compare against and this is NOT an absence of drift. "
+            "Make the repository public, or move it to a plan that has rulesets, before this "
+            "check can mean anything (Phase 13 D-22)."
+        )
+    else:
+        diagnosis = (
+            f"the live ruleset read failed with status {status or '<none>'} and returned an API "
+            f"error envelope instead of a ruleset, so no verdict about the live state is "
+            f"available and this run must not report clean."
+        )
+
+    raise RulesetReadError(
+        f'{source}: the read returned an API error envelope, not a ruleset — status "{status}", '
+        f'message "{message}". {diagnosis}'
+    )
 
 
 def trigger_block(document: dict[str, Any]) -> tuple[Any, str | None]:

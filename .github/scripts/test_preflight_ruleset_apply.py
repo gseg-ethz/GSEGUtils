@@ -425,6 +425,83 @@ def test_wrong_argument_count_is_refused(tmp_path: pathlib.Path) -> None:
     assert preflight.main([str(tmp_path)], rulesets_dir=tmp_path) == 1
 
 
+def copy_target_tip_workflows(destination: pathlib.Path, *, omit: str | None = None) -> pathlib.Path:
+    """Copy this repository's real workflow files into `destination`.
+
+    Stands in for the apply workflow's fetch step, which lists the WHOLE
+    ``.github/workflows`` directory at the target ref and reads each entry raw.
+    Copying every file rather than a chosen subset is what makes the two cases
+    below a measurement of the real fetch-plus-glob behaviour rather than a
+    restatement of it.
+
+    Parameters
+    ----------
+    destination
+        Directory to create and populate.
+    omit
+        A filename to leave out, standing in for a workflow absent from the
+        target branch tip.
+
+    Returns
+    -------
+    pathlib.Path
+        The populated directory.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    for source in sorted((REPO_ROOT / ".github/workflows").glob("*.yml")):
+        if source.name == omit:
+            continue
+        (destination / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return destination
+
+
+def test_the_real_committed_main_payload_resolves_the_anti_skip_context_from_the_target_tip(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The new context resolves from a target tip carrying `integrity.yml`.
+
+    MEASURED, not assumed from how the fetch happens to be written. The apply
+    workflow lists the whole workflow directory at the target ref and this
+    preflight globs both accepted extensions, so a workflow file present on the
+    tip is already in scope -- but that is a property of two pieces of code that
+    could each change independently, so it is pinned here. Without this test the
+    preflight could quietly stop resolving `Integrity (base-ref)` and refuse a
+    correct apply, which under `bypass_actors: []` is a branch nobody can merge.
+    """
+    workflows = copy_target_tip_workflows(tmp_path / "wf")
+    assert (workflows / "integrity.yml").is_file(), "the excepted workflow must be on the tip for this case"
+    out = tmp_path / "send.json"
+
+    status = preflight.main([str(REPO_ROOT / ".github/rulesets/main.json"), str(workflows), str(out)])
+
+    assert status == 0
+    assert out.exists()
+    assert "Integrity (base-ref)" in json.dumps(json.loads(out.read_text(encoding="utf-8")))
+
+
+def test_the_same_payload_is_refused_when_the_integrity_workflow_is_absent_from_the_tip(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The companion refusal: the payload requires the context, the tip stops producing it.
+
+    This is the ordering constraint made mechanical. `integrity.yml` must be
+    merged to the protected branch BEFORE the payload requiring its context is
+    applied -- a workflow that is not on the default branch never fires, so the
+    context would sit perpetually pending and, under an empty bypass-actor list,
+    the branch would be unmergeable by anyone including an admin. The preflight
+    refusing here is what stands between a dispatch and that state.
+    """
+    workflows = copy_target_tip_workflows(tmp_path / "wf", omit="integrity.yml")
+    out = tmp_path / "send.json"
+
+    status = preflight.main([str(REPO_ROOT / ".github/rulesets/main.json"), str(workflows), str(out)])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "Integrity (base-ref)" in captured.out
+    assert not out.exists()
+
+
 def test_the_real_committed_develop_payload_passes_against_the_real_ci_yml(tmp_path: pathlib.Path) -> None:
     """The repository's own develop payload cross-references cleanly against its own `ci.yml`.
 
