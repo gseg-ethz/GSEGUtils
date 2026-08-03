@@ -537,9 +537,23 @@ def run_all(
     return violations, len(load_workflows(root))
 
 
-findings, inspected_count = run_all(REPO_ROOT)
-if findings:
-    for finding in findings:
-        print(f"::error::{finding}")
-    sys.exit(1)
-print(f"check_ci_config: OK — assertions A1 through A7 clean across {inspected_count} workflow(s)")
+# The driver runs under `python .github/scripts/check_ci_config.py`, which is the
+# ONLY invocation contract this file has and is unchanged by the guard below.
+#
+# The guard exists because this module is now IMPORTED as a library, by
+# `assert_no_skip.py` (which calls A5 and A6 directly rather than reimplementing
+# them) and by `test_check_ci_config.py`. Without it, importing this module runs
+# the whole self-test against THIS repository as an import side effect — and on a
+# tree that failed any assertion it would `sys.exit(1)` inside the importer,
+# before the importer's own rules had run. For `assert_no_skip.py` that is a
+# wrong-verdict bug in a branch-protection gate: the integrity context would go
+# red reporting the BASE tree's self-test findings, having never looked at the
+# pull request at all. The straight-line shape plan 13-03 chose is preserved;
+# only the import side effect is removed.
+if __name__ == "__main__":
+    findings, inspected_count = run_all(REPO_ROOT)
+    if findings:
+        for finding in findings:
+            print(f"::error::{finding}")
+        sys.exit(1)
+    print(f"check_ci_config: OK — assertions A1 through A7 clean across {inspected_count} workflow(s)")
