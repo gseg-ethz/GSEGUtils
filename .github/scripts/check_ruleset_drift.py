@@ -60,7 +60,16 @@ def parse_spec(spec: str) -> tuple[str, pathlib.Path, pathlib.Path]:
 
 
 def load(path: pathlib.Path) -> dict[str, object]:
-    """Read a JSON payload from `path` and assert it is an object.
+    """Read a JSON payload from `path`, assert it is an object, and reject error envelopes.
+
+    Three read failures are handled here rather than scattered across the caller,
+    and all three share one exception type so :func:`main` needs a single ``except``:
+    the file is unreadable or unparseable, it parses to something other than a JSON
+    object, or it parses to a well-formed object that is a GitHub API *error
+    envelope* rather than a ruleset. The third is the one that looks like success --
+    the live read is fetched to disk by an earlier workflow step, so a refused
+    request lands here as perfectly valid JSON -- and it is checked before anything
+    compares.
 
     Parameters
     ----------
@@ -75,7 +84,8 @@ def load(path: pathlib.Path) -> dict[str, object]:
     Raises
     ------
     ruleset_lib.RulesetReadError
-        When the file is missing, unparseable, or not a JSON object.
+        When the file is missing, unparseable, not a JSON object, or an API error
+        envelope.
     """
     try:
         with path.open(encoding="utf-8") as handle:
@@ -84,6 +94,7 @@ def load(path: pathlib.Path) -> dict[str, object]:
         raise ruleset_lib.RulesetReadError(f"{path}: could not be read as JSON — {error}") from error
     if not isinstance(payload, dict):
         raise ruleset_lib.RulesetReadError(f"{path}: parsed to {type(payload).__name__}, expected a JSON object")
+    ruleset_lib.assert_not_api_error(payload, str(path))
     return payload
 
 
