@@ -1,4 +1,4 @@
-name: CI
+name: Continuous Integration
 
 # Continuous integration (CI-10, CI-14, CI-16): produces the three named
 # required status checks — the lint gate, the test suite and the
