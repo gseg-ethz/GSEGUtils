@@ -38,3 +38,5 @@ DEFAULT_CONFIG = ConfigDict(arbitrary_types_allowed=True, validate_assignment=Tr
 VALIDATE_RETURN_CONFIG = DEFAULT_CONFIG | {"validate_return": True}
 
 validate_variables = validate_call(config=VALIDATE_RETURN_CONFIG)
+
+# 13-17 fail-safe probe — an unrecognised path in the changed set. Never merged.
