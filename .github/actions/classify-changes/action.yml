@@ -12,8 +12,21 @@ description: >
   .planning/phases/13-release-flow-apply-both-repos-symmetric/13-CONTEXT.md
   D-05 (fail-safe allowlist), D-06 (fast-path depth) and D-07 (why the
   classification is a composite and not an upstream job feeding `needs:`).
-  This file is BYTE-IDENTICAL in the GSEGUtils and pchandler repositories by
-  design (D-04): a diff between the two copies is drift, not intent.
+  When the answer cannot be determined, the failing call's own error text is
+  preserved in the emitted reason and a warning annotation naming the runner is
+  raised, so the inert state is visible on the run summary instead of buried in
+  a step nobody opens — gap-closure decision D-A, taken after this classifier
+  sat inert on the self-hosted runner gseg-pc105 for two sessions because that
+  error text was discarded.
+  Both repositories carry a copy of this file, and the two are maintained as a
+  PAIRED CHANGE: edit both together and land them in one coordinated change
+  (Phase 13 premise correction PC-3 — cross-repo symmetry is a phase-landing
+  property, not a standing invariant). A difference between the copies therefore
+  means an incomplete paired change, not a policy violation, and the copies may
+  diverge here deliberately in future. No automated check covers this directory:
+  audit_release_flow.py's TWIN_SUBJECTS are workflows / rulesets / scripts and
+  exclude .github/actions/, so the pairing is a human discipline — which is
+  consistent with D-12's "nothing standing", not a gap in it.
 
 outputs:
   release-artifacts-only:
@@ -45,11 +58,32 @@ runs:
         # instead of silently disabling this fast path.
         ALLOW='CHANGELOG.md .release-please-manifest.json docs/source/conf.py'
 
+        # Deterministic sink for the changed-path call's standard error (D-A a).
+        # A fixed path rather than `mktemp` on purpose: mktemp would be a second
+        # command whose own failure needs handling under `set -u` with no
+        # errexit, and the whole point of this step is that it never aborts.
+        STDERR_FILE="${RUNNER_TEMP:-/tmp}/classify-changes-stderr.$$"
+
         # Every emission writes its reason to the log next to the value, so a run
         # log answers "why did the fast path not engage" without a re-run.
         emit() {
           echo "release-artifacts-only=$1" >> "$GITHUB_OUTPUT"
           echo "classify-changes: $1 — $2"
+        }
+
+        # `emit` states an answer this step KNOWS. The helper below states that
+        # the answer could NOT be determined: the fast path is inert and the full
+        # suite runs. Only the three "could not find out" branches route through
+        # it -- the API call failed, the list came back empty, or the documented
+        # file cap was reached. The non-pull_request branch and the
+        # not-a-release-artifact branch both KNOW the answer is false and stay on
+        # plain `emit`: ci.yml triggers on pull_request, push AND schedule and
+        # invokes this composite unconditionally, so annotating a known-false
+        # branch would raise a warning on every push and every nightly run in
+        # BOTH repositories and destroy the signal this exists to create (D-A b).
+        emit_unknown() {
+          echo "::warning::classify-changes could not determine the changed-path set on runner '${RUNNER_NAME:-unknown}' — $1 — the release-artifact fast path is INERT on this run and the full suite will run"
+          emit false "$1"
         }
 
         if [ "${{ github.event_name }}" != "pull_request" ]; then
@@ -64,19 +98,28 @@ runs:
         # above came from.
         if ! FILES=$(gh api --paginate \
               "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-              --jq '.[].filename' 2>/dev/null); then
-          emit false "the changed-path API call failed — the answer is unknown, so run everything"
+              --jq '.[].filename' 2>"$STDERR_FILE"); then
+          # Keep the failing call's own words (D-A a). Newlines are collapsed so a
+          # multi-line payload cannot forge additional workflow-command lines, and
+          # the text is truncated so a runaway message cannot flood the log.
+          GH_ERR=''
+          if [ -f "$STDERR_FILE" ]; then
+            GH_ERR=$(tr '\n' ' ' < "$STDERR_FILE" | cut -c1-500)
+          fi
+          rm -f "$STDERR_FILE"
+          emit_unknown "the changed-path API call failed: ${GH_ERR:-<no stderr captured>}"
           exit 0
         fi
+        rm -f "$STDERR_FILE"
 
         if [ -z "$FILES" ]; then
-          emit false "the changed-path list came back empty — anomalous, not 'nothing changed'"
+          emit_unknown "the changed-path list came back empty — anomalous, not 'nothing changed'"
           exit 0
         fi
 
         COUNT=$(printf '%s\n' "$FILES" | wc -l)
         if [ "$COUNT" -ge 3000 ]; then
-          emit false "changed-path list reached the documented 3000-file API cap — untrustworthy"
+          emit_unknown "changed-path list reached the documented 3000-file API cap — untrustworthy"
           exit 0
         fi
 
