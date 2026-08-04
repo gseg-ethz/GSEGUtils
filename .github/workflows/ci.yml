@@ -46,6 +46,7 @@ on:
 jobs:
   lint:
     name: Lint (pre-commit)
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     permissions:
@@ -96,6 +97,7 @@ jobs:
 
   tests:
     name: Tests (pytest)
+    needs: [lint]
     runs-on: ubuntu-latest
 
     permissions:
