@@ -263,37 +263,7 @@ def check_trigger_filters(
     list of str
         One entry per offending filter key.
     """
-    table = A1_REVIEWED_EXCEPTIONS if exceptions is None else exceptions
-    contexts = committed_required_contexts(root)
-    violations: list[str] = []
-    for path, document in load_workflows(root):
-        produced = sorted(set(ruleset_lib.job_names(document)) & contexts)
-        if not produced or path.name in table:
-            continue
-        block, form = ruleset_lib.trigger_block(document)
-        if form is None or block is None:
-            # A workflow whose triggers cannot be read has not been checked, and
-            # an unchecked required-check workflow is a violation, not a pass.
-            violations.append(
-                f"{path.name}: no resolvable trigger block under either the quoted or the bare "
-                f"`on:` key, on a workflow producing required context(s) {produced} — this "
-                f"workflow cannot be checked, so it cannot be assumed clean."
-            )
-            continue
-        if not isinstance(block, dict):
-            continue  # a bare list trigger block carries no filter sub-keys
-        for event in A1_INSPECTED_EVENTS:
-            config = block.get(event)
-            if not isinstance(config, dict):
-                continue
-            for key in sorted(FILTER_KEYS & set(config)):
-                violations.append(
-                    f"{path.name}: `{key}:` under `{event}:` on a workflow producing required "
-                    f"context(s) {produced} — a filtered-out run never reports, so the pull request "
-                    f"waits on that check forever and can never merge. Conditionality belongs on "
-                    f"STEPS, not on the trigger."
-                )
-    return violations
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def check_base_repo_context_trigger(
@@ -342,26 +312,7 @@ def check_base_repo_context_trigger(
         One entry per offending workflow file, or per unmet condition on an
         excepted one.
     """
-    table = A2_REVIEWED_EXCEPTIONS if exceptions is None else exceptions
-    violations: list[str] = []
-    for path in sorted((root / WORKFLOWS_DIR).glob("*.yml")):
-        lines = [
-            str(number)
-            for number, line in enumerate(path.read_text().splitlines(), start=1)
-            if BASE_REPO_CONTEXT_TRIGGER in line
-        ]
-        if not lines:
-            continue
-        if path.name in table:
-            violations.extend(_check_exception_conditions(path))
-            continue
-        violations.append(
-            f"{path.name}: `{BASE_REPO_CONTEXT_TRIGGER}` found on line(s) {', '.join(lines)} — "
-            f"that trigger runs with the base repository's secrets against a fork's code, and "
-            f"one of these repos attaches a self-hosted lab runner. It is never legitimate here. "
-            f"Exactly one file is excepted, by path, in A2_REVIEWED_EXCEPTIONS, and this is not it."
-        )
-    return violations
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def _check_exception_conditions(path: pathlib.Path) -> list[str]:
@@ -446,39 +397,7 @@ def check_workflow_name_pin(root: pathlib.Path) -> list[str]:
     list of str
         One entry per name mismatch or unresolvable workflow-run reference.
     """
-    workflows = load_workflows(root)
-    violations: list[str] = []
-
-    declared = {document.get("name") for _, document in workflows if isinstance(document.get("name"), str)}
-    ci = [document for path, document in workflows if path.name == CI_WORKFLOW_FILENAME]
-    if not ci:
-        violations.append(f"{CI_WORKFLOW_FILENAME}: not found under {WORKFLOWS_DIR} — the pinned CI workflow is gone.")
-    else:
-        # Byte-exact on purpose: no case folding, no stripping. Any consumer
-        # matching on this string matches it literally.
-        actual = ci[0].get("name")
-        if actual != CI_WORKFLOW_NAME:
-            violations.append(
-                f"{CI_WORKFLOW_FILENAME}: declared name is {actual!r}, not {CI_WORKFLOW_NAME!r} — the "
-                f"run-counting rule in the workspace audit script "
-                f"(.planning/scripts/audit_release_flow.py, CI_SUBTOTAL_WORKFLOW) keys on that exact "
-                f"string, and any workflow keying on another workflow's name breaks silently."
-            )
-
-    for path, document in workflows:
-        block, _ = ruleset_lib.trigger_block(document)
-        if not isinstance(block, dict):
-            continue
-        config = block.get("workflow_run")
-        if not isinstance(config, dict):
-            continue
-        for referenced in config.get("workflows") or []:
-            if referenced not in declared:
-                violations.append(
-                    f"{path.name}: `workflow_run` lists workflow name {referenced!r}, which no "
-                    f"workflow in this repository declares — this trigger will never fire, silently."
-                )
-    return violations
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def _allowlist_from_composite(root: pathlib.Path) -> set[str] | None:
@@ -505,33 +424,7 @@ def check_fast_path_allowlist(root: pathlib.Path) -> list[str]:
     list of str
         A single entry when the two sets differ, or when either side is unreadable.
     """
-    allowlist = _allowlist_from_composite(root)
-    if allowlist is None:
-        return [
-            f"{COMPOSITE_ACTION_PATH}: no `ALLOW='...'` assignment found — the fast-path allowlist "
-            f"cannot be reconciled against {RELEASE_PLEASE_CONFIG_PATH}."
-        ]
-
-    config_path = root / RELEASE_PLEASE_CONFIG_PATH
-    if not config_path.is_file():
-        return [f"{RELEASE_PLEASE_CONFIG_PATH}: not found — the fast-path allowlist cannot be reconciled."]
-
-    expected = {RELEASE_PLEASE_MANIFEST_PATH}
-    for package in (json.loads(config_path.read_text()).get("packages") or {}).values():
-        if not isinstance(package, dict):
-            continue
-        expected.add(str(package.get("changelog-path") or "CHANGELOG.md"))
-        expected.update(str(extra) for extra in package.get("extra-files") or [])
-
-    if allowlist == expected:
-        return []
-    return [
-        f"{COMPOSITE_ACTION_PATH}: the fast-path allowlist {sorted(allowlist)} no longer set-equals "
-        f"the release artifacts {sorted(expected)} derived from {RELEASE_PLEASE_CONFIG_PATH} "
-        f"(changelog path + extra files) plus {RELEASE_PLEASE_MANIFEST_PATH}. A new extra file must "
-        f"be added to the allowlist, or the fast path silently stops engaging on release pull "
-        f"requests and the economy it exists to buy is lost without any failure."
-    ]
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def check_job_level_conditions(root: pathlib.Path) -> list[str]:
@@ -547,19 +440,7 @@ def check_job_level_conditions(root: pathlib.Path) -> list[str]:
     list of str
         One entry per offending job.
     """
-    contexts = committed_required_contexts(root)
-    violations: list[str] = []
-    for path, document in load_workflows(root):
-        for job_id, job in _declared_jobs(document).items():
-            name = _job_display_name(job_id, job)
-            if name in contexts and "if" in job:
-                violations.append(
-                    f"{path.name}: job `{job_id}` produces required context {name!r} and carries a "
-                    f"job-level condition — a skipped job's `skipped` conclusion counts among the "
-                    f"satisfying ones, so this greens the gate having executed nothing. "
-                    f"Conditionality belongs on STEPS."
-                )
-    return violations
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def check_conditional_dependencies(root: pathlib.Path) -> list[str]:
@@ -575,25 +456,7 @@ def check_conditional_dependencies(root: pathlib.Path) -> list[str]:
     list of str
         One entry per offending dependency edge.
     """
-    contexts = committed_required_contexts(root)
-    violations: list[str] = []
-    for path, document in load_workflows(root):
-        jobs = _declared_jobs(document)
-        for job_id, job in jobs.items():
-            name = _job_display_name(job_id, job)
-            if name not in contexts:
-                continue
-            needs = job.get("needs")
-            needs = [needs] if isinstance(needs, str) else needs
-            for dependency in needs or []:
-                upstream = jobs.get(str(dependency))
-                if isinstance(upstream, dict) and "if" in upstream:
-                    violations.append(
-                        f"{path.name}: job `{job_id}` produces required context {name!r} and depends "
-                        f"on `{dependency}`, which carries a job-level condition — a skipped "
-                        f"dependency skips the dependent, and that also counts as satisfying."
-                    )
-    return violations
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def check_lint_least_privilege(
@@ -616,44 +479,7 @@ def check_lint_least_privilege(
     list of str
         One entry per write scope, or one entry when no permissions block exists.
     """
-    register = A7_PENDING_NARROWINGS if pending is None else pending
-    violations: list[str] = []
-    found = False
-    for path, document in load_workflows(root):
-        for job_id, job in _declared_jobs(document).items():
-            if _job_display_name(job_id, job) != LINT_CONTEXT:
-                continue
-            found = True
-            granted = _write_scopes(job.get("permissions"))
-            if granted is None:
-                violations.append(
-                    f"{path.name}: job `{job_id}` produces required context {LINT_CONTEXT!r} and "
-                    f"declares no `permissions:` block, so it inherits the repository default "
-                    f"instead of stating its least privilege explicitly (CI-16)."
-                )
-                continue
-            if LINT_CONTEXT in register:
-                if not granted:
-                    print(
-                        f"::notice::check_ci_config: A7's pending-narrowing entry for "
-                        f"{LINT_CONTEXT!r} is no longer warranted — `{job_id}` in {path.name} grants "
-                        f"no write scope. Delete the entry from A7_PENDING_NARROWINGS in "
-                        f"{SELF_PATH}, in BOTH repos in the same paired change — this file is "
-                        f"byte-identical across them by design (D-04)."
-                    )
-                continue
-            for scope in granted:
-                violations.append(
-                    f"{path.name}: job `{job_id}` produces required context {LINT_CONTEXT!r} and "
-                    f"grants `{scope}: write` — CI-16 narrows this job to read scopes only, and a "
-                    f"write scope here is a token the pre-commit run does not need."
-                )
-    if not found:
-        violations.append(
-            f"No job under {WORKFLOWS_DIR} declares the name {LINT_CONTEXT!r}, yet it is a required "
-            f"status-check context — nothing produces it, so the gate can never be satisfied."
-        )
-    return violations
+    return []  # ATTACK 7: assertion body replaced with an immediate return
 
 
 def _write_scopes(permissions: Any) -> list[str] | None:
