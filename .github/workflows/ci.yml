@@ -38,6 +38,9 @@ name: CI
 
 on:
   pull_request:
+    paths:
+      - '.github/**'
+      - 'src/**'
   push:
     branches: [develop/gsd]
   schedule:
