@@ -144,3 +144,5 @@ def setup(app):
 rst_epilog = """
 .. |NDArray| replace:: :external+numpydantic:py:class:`NDArray <numpydantic.ndarray.NDArray>`
 """
+
+# 13-17 fast-path probe — throwaway branch, never merged.
