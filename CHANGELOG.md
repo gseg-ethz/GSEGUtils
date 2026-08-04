@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.4](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.3...v0.5.4) (2026-08-04)
+
+
+### 🤖 Continuous Integration
+
+* **13-10:** capture the apply response body instead of discarding it ([#45](https://github.com/gseg-ethz/GSEGUtils/issues/45)) ([b14b0f4](https://github.com/gseg-ethz/GSEGUtils/commit/b14b0f4911f6be0009d9bdb6bbfeb4f52836d9f3))
+* **13-10:** revert the transient docs-job rename — proof complete ([#44](https://github.com/gseg-ethz/GSEGUtils/issues/44)) ([434ad8f](https://github.com/gseg-ethz/GSEGUtils/commit/434ad8fe817b01bc6aeedeeb0face12e21c25ee7))
+* **13-10:** TRANSIENT — rename the docs job to prove the preflight refuses ([#43](https://github.com/gseg-ethz/GSEGUtils/issues/43)) ([219cd12](https://github.com/gseg-ethz/GSEGUtils/commit/219cd1201d76141a9c56395f983556c9ec2e7f75))
+* **13-15:** make the ruleset payloads appliable, and fail loud on a refused read ([#48](https://github.com/gseg-ethz/GSEGUtils/issues/48)) ([3bdaf72](https://github.com/gseg-ethz/GSEGUtils/commit/3bdaf72e14285472e94b8aeae4f903c4a7e47eeb))
+* **13-16:** the base-ref integrity check and its narrowed exception (D-19/D-23) ([#49](https://github.com/gseg-ethz/GSEGUtils/issues/49)) ([e852259](https://github.com/gseg-ethz/GSEGUtils/commit/e8522590222bed1666b7aaac4dbb458535c690ff))
+* **13-18:** capture the classifier's stderr and warn when the fast path fails open (D-A) ([#62](https://github.com/gseg-ethz/GSEGUtils/issues/62)) ([0550698](https://github.com/gseg-ethz/GSEGUtils/commit/05506981bd59ad72d7f8ea5a46e2dba99b2f237c))
+* **13:** promote the Phase 13 release flow to main ([#41](https://github.com/gseg-ethz/GSEGUtils/issues/41)) ([66a5f10](https://github.com/gseg-ethz/GSEGUtils/commit/66a5f10b59fa428b26041aa6b1306bb846c8fe1d))
+
 ## [0.5.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.2...v0.5.3) (2026-07-11)
 
 
