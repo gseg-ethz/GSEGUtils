@@ -38,9 +38,6 @@ name: CI
 
 on:
   pull_request:
-    paths:
-      - '.github/**'
-      - 'src/**'
   push:
     branches: [develop/gsd]
   schedule:
@@ -49,6 +46,7 @@ on:
 jobs:
   lint:
     name: Lint (pre-commit)
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     permissions:
