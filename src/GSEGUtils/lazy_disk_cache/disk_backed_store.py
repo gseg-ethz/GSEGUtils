@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import tempfile
+import warnings
 from pathlib import Path
 from typing import (
     Any,
@@ -175,9 +176,14 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     mutation is unsupported (see PROJECT.md threading constraint).
     """
 
-    _DBNDArrayFileExt = ".npy"
-    _DBNDArrayMetaExt = ".meta.json"
-    _LegacyPickleExt = ".pkl"
+    # Aliases of the shared vocabulary in `paths` (D-14). They survive as class
+    # attributes because pc2img subclasses read them off `self`; the values now
+    # come from the one place that also builds the paths, so the suffix used to
+    # glob the cache directory can no longer drift from the suffix written into
+    # it.
+    _DBNDArrayFileExt = paths.NPY_SUFFIX
+    _DBNDArrayMetaExt = paths.META_SUFFIX
+    _LegacyPickleExt = paths.LEGACY_PICKLE_SUFFIX
 
     _store: dict[str, Optional[T]]
     _cache_dir: Path
@@ -403,17 +409,121 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         """Return a debug representation listing the currently-tracked keys."""
         return f"<DiskBackedStore({list(self._store.keys())})>"
 
+    # -- Deprecated builder aliases (D-15) ---------------------------------
+    #
+    # These three used to *be* the builders. They now delegate to the shared
+    # free functions in `paths`, which validate the key and verify containment
+    # (STORE-02) — behaviour these methods never had.
+    #
+    # They survive rather than being deleted because they are de facto subclass
+    # API despite the underscore: pc2img overrides `_get_npy_path` and
+    # `_get_meta_path`, calls them directly, and asserts on them in its tests.
+    # The parameter name stays `feature` — NOT `key` — for the same reason: a
+    # rename is a silent break for a subclass that overrides with the old name.
+    #
+    # Consistency note worth preserving: D-01 seals `LazyDiskCache.cache_path`
+    # with NO deprecation cycle while these get a full one. Same principle —
+    # evidence of use — opposite outcome, because the setter has zero measured
+    # assigners and these have measured live callers.
+    #
+    # No library-internal call site goes through these wrappers; every one of
+    # them calls `paths.<builder>` directly, so the library never triggers its
+    # own deprecation warning. The suite is run with
+    # `-W error::DeprecationWarning` to keep that true.
+
     def _get_npy_path(self, feature: str) -> Path:
-        """Return the on-disk ``.npy`` path for ``feature``."""
-        return self._cache_dir / f"{feature}{self._DBNDArrayFileExt}"
+        """Return the on-disk ``.npy`` path for ``feature``.
+
+        Parameters
+        ----------
+        feature : str
+            The store key. Named ``feature`` because subclasses override this
+            method by signature.
+
+        Returns
+        -------
+        Path
+            Exactly what :func:`GSEGUtils.lazy_disk_cache.get_npy_path` returns
+            for this store's cache directory.
+
+        Warnings
+        --------
+        Deprecated. Call
+        :func:`GSEGUtils.lazy_disk_cache.get_npy_path(cache_dir, key)
+        <GSEGUtils.lazy_disk_cache.paths.get_npy_path>` instead. This alias is
+        removed in the next breaking release after this one.
+        """
+        warnings.warn(
+            "DiskBackedStore._get_npy_path is deprecated; call "
+            "GSEGUtils.lazy_disk_cache.get_npy_path(cache_dir, key) instead. "
+            "This alias is removed in the next breaking release after this one.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return paths.get_npy_path(self._cache_dir, feature)
 
     def _get_meta_path(self, feature: str) -> Path:
-        """Return the on-disk JSON sidecar path for ``feature``."""
-        return self._cache_dir / f"{feature}{self._DBNDArrayMetaExt}"
+        """Return the on-disk JSON sidecar path for ``feature``.
+
+        Parameters
+        ----------
+        feature : str
+            The store key. Named ``feature`` because subclasses override this
+            method by signature.
+
+        Returns
+        -------
+        Path
+            Exactly what :func:`GSEGUtils.lazy_disk_cache.get_meta_path`
+            returns for this store's cache directory.
+
+        Warnings
+        --------
+        Deprecated. Call
+        :func:`GSEGUtils.lazy_disk_cache.get_meta_path(cache_dir, key)
+        <GSEGUtils.lazy_disk_cache.paths.get_meta_path>` instead. This alias is
+        removed in the next breaking release after this one.
+        """
+        warnings.warn(
+            "DiskBackedStore._get_meta_path is deprecated; call "
+            "GSEGUtils.lazy_disk_cache.get_meta_path(cache_dir, key) instead. "
+            "This alias is removed in the next breaking release after this one.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return paths.get_meta_path(self._cache_dir, feature)
 
     def _get_legacy_pickle_path(self, feature: str) -> Path:
-        """Return the legacy pre-Phase-2 ``.pkl`` path for ``feature`` (refused on read)."""
-        return self._cache_dir / f"{feature}{self._LegacyPickleExt}"
+        """Return the legacy pre-Phase-2 ``.pkl`` path for ``feature`` (refused on read).
+
+        Parameters
+        ----------
+        feature : str
+            The store key. Named ``feature`` because subclasses override this
+            method by signature.
+
+        Returns
+        -------
+        Path
+            Exactly what
+            :func:`GSEGUtils.lazy_disk_cache.get_legacy_pickle_path` returns
+            for this store's cache directory.
+
+        Warnings
+        --------
+        Deprecated. Call
+        :func:`GSEGUtils.lazy_disk_cache.get_legacy_pickle_path(cache_dir, key)
+        <GSEGUtils.lazy_disk_cache.paths.get_legacy_pickle_path>` instead. This
+        alias is removed in the next breaking release after this one.
+        """
+        warnings.warn(
+            "DiskBackedStore._get_legacy_pickle_path is deprecated; call "
+            "GSEGUtils.lazy_disk_cache.get_legacy_pickle_path(cache_dir, key) instead. "
+            "This alias is removed in the next breaking release after this one.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return paths.get_legacy_pickle_path(self._cache_dir, feature)
 
     def add_data_to_store(
         self,
@@ -444,10 +554,15 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         StoreKeyError
             If ``key`` is not a legal single-segment store key (STORE-01).
             Validated **first**, before the "key exists" check and before any
-            path is built, and **unconditionally** — the ``if self._cache_dir``
-            guard below is dead code (``Path`` defines no ``__bool__`` and
-            ``__init__`` assigns a ``Path`` unconditionally), so it must never
-            be allowed to gate the validation.
+            path is built, and **unconditionally**. The former
+            ``if self._cache_dir`` guard on the cache-path construction below
+            was dead code (``Path`` defines no ``__bool__`` and ``__init__``
+            assigns a ``Path`` unconditionally) and has been removed, so no
+            route can present a cache directory the interpreter reads as empty
+            and thereby skip the builder.
+        StoreContainmentError
+            If the ``.npy`` path built for ``key`` would resolve outside the
+            cache directory (STORE-02). A subclass of ``StoreKeyError``.
         KeyError
             If ``key`` is already present in the store.
         """
@@ -457,7 +572,12 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             raise KeyError(f"Key {key} already exists in store.")
 
         enable_caching = enable_caching_override if enable_caching_override is not None else self._enable_caching
-        cache_path = self._get_npy_path(key) if self._cache_dir else None
+        # Unconditional: the former `if self._cache_dir else None` guard was
+        # dead (`Path` defines no `__bool__`, and `__init__` always assigns a
+        # `Path`), so it could only ever have looked like a route that skips
+        # the builder — and with the builder now carrying the containment
+        # check, a route that skips it is a route that skips validation.
+        cache_path = paths.get_npy_path(self._cache_dir, key)
         automatic_offloading = (
             automatic_offloading_override if automatic_offloading_override is not None else self._automatic_offloading
         )
@@ -534,7 +654,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 logger.debug(
                     "Wrote codec pair for %s under %s and cleared in-memory reference.",
                     key,
-                    self._get_npy_path(key),
+                    paths.get_npy_path(self._cache_dir, key),
                 )
                 del obj
             else:
@@ -549,10 +669,10 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         treats as cache miss. Disk-full / permission errors are re-raised after
         best-effort ``.tmp`` cleanup.
         """
-        npy_final = self._get_npy_path(key)
-        json_final = self._get_meta_path(key)
-        npy_tmp = npy_final.with_suffix(".npy.tmp")
-        json_tmp = self._cache_dir / f"{key}.meta.json.tmp"
+        npy_final = paths.get_npy_path(self._cache_dir, key)
+        json_final = paths.get_meta_path(self._cache_dir, key)
+        npy_tmp = paths.get_npy_tmp_path(self._cache_dir, key)
+        json_tmp = paths.get_meta_tmp_path(self._cache_dir, key)
         try:
             # _describe_buffer returns (shape, dtype, in_memory_array). We
             # serialise the live buffer; np.save writes the ndarray with its
@@ -614,9 +734,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         non-``None`` ``cache_path`` so ``enable_purge`` can register) holds
         either way.
         """
-        npy_path = self._get_npy_path(key)
-        json_path = self._get_meta_path(key)
-        legacy_pkl = self._get_legacy_pickle_path(key)
+        npy_path = paths.get_npy_path(self._cache_dir, key)
+        json_path = paths.get_meta_path(self._cache_dir, key)
+        legacy_pkl = paths.get_legacy_pickle_path(self._cache_dir, key)
         if legacy_pkl.exists() and not (npy_path.exists() and json_path.exists()):
             logger.info(
                 "Legacy pre-Phase-2 cache file at %s is not loadable under the new "
