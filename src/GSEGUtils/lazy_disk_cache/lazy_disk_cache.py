@@ -379,11 +379,62 @@ class LazyDiskCache(ABC):
         return self._cache_path
 
     @cache_path.setter
-    def cache_path(self, value: Path):
-        """Set the memmap file path and ensure the parent directory exists."""
-        assert isinstance(value, Path)
-        self._cache_path = value
-        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+    def cache_path(self, value: Path) -> None:
+        """Refuse reassignment: an entry's cache path is fixed at construction (D-01).
+
+        Reading :attr:`cache_path` is unchanged; only assignment is sealed.
+
+        What this closes
+        ----------------
+        The setter used to be public *and* it ``mkdir``-ed the new parent, so it
+        could repoint a live entry anywhere on the filesystem — including outside
+        the cache directory — **after** that entry's store key had already been
+        validated, creating the destination directory on the way. That is the
+        reproduced escape (R6): STORE-02's guarantee that no path the store
+        builds lands outside the cache directory would otherwise read "contained,
+        provided nobody assigns ``entry.cache_path``", which is a filter rather
+        than an invariant.
+
+        Note that the previous ``assert isinstance(value, Path)`` was never a
+        real check — ``python -O`` strips assertions — so this raise is not
+        replacing an enforcement, it is the first one on this route.
+
+        Why there is no deprecation cycle here
+        --------------------------------------
+        Deliberately asymmetric with the ``DiskBackedStore._get_*_path`` builder
+        methods (D-15), which do get a full ``DeprecationWarning`` cycle. Same
+        principle, opposite outcome, and the principle is **evidence of use**:
+        this setter has *zero* measured assigners across GSEGUtils, pchandler,
+        pc2img and iof3D — every reference in all four repos is a read, and this
+        package's own tests only assert equality — while the builder methods have
+        measured live callers in pc2img. A deprecation cycle here would buy no
+        migration room from anyone and would leave the reproduced escape live for
+        another release while a downstream consumer is blocked on it. Recorded
+        because the pair reads as arbitrary otherwise.
+
+        Parameters
+        ----------
+        value : pathlib.Path
+            The attempted path. Used only to make the refusal message
+            actionable; it is never assigned.
+
+        Raises
+        ------
+        AttributeError
+            Always. ``AttributeError`` rather than
+            :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError` because this is not a
+            bad *key*, it is a forbidden *operation* — ``AttributeError`` is what
+            Python raises for an unsettable attribute and what a caller's
+            ``hasattr`` / ``setattr`` reasoning already expects.
+        """
+        current = getattr(self, "_cache_path", None)
+        entry = f"{type(self).__name__} entry at {str(current)!r}" if current is not None else type(self).__name__
+        raise AttributeError(
+            f"Cannot reassign cache_path on the {entry}: the attempted path was {value!r}; "
+            "an entry's cache path is fixed at construction — create the entry through "
+            "DiskBackedStore (which derives the path from the validated store key), or pass "
+            "cache_path= to the constructor."
+        )
 
     def offload(self) -> None:
         """Flush the current buffer to disk, drop the in-RAM array, and mark offloaded."""
