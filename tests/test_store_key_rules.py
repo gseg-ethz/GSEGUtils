@@ -28,6 +28,7 @@ from GSEGUtils.lazy_disk_cache.paths import (
     CLAUSE_CONTROL,
     CLAUSE_RESERVED,
     CLAUSE_SEPARATOR,
+    StoreContainmentError,
     StoreKeyError,
     is_valid_store_key,
     validate_store_key,
@@ -303,4 +304,138 @@ def test_no_normalisation_refuses_a_fullwidth_key_for_its_separator_clause() -> 
         validate_store_key(FULLWIDTH_SEPARATOR_KEY, _CACHE_DIR)
     assert not is_valid_store_key(FULLWIDTH_SEPARATOR_KEY), (
         f"the predicate accepted {FULLWIDTH_SEPARATOR_KEY!r}, which carries a real ASCII separator"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — predicate/validator agreement (D-07, T-14-09)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", [*(key for key, _ in REFUSED_KEYS), *ACCEPTED_KEYS])
+def test_predicate_agrees_with_the_raising_validator(key: str) -> None:
+    """Plan 14-02 / STORE-01 / D-07: ``is_valid_store_key`` is exactly the negation of "the validator raised".
+
+    Parametrised over the **union** of :data:`REFUSED_KEYS` and
+    :data:`ACCEPTED_KEYS` — the whole matrix, not a hand-picked subset, because
+    drift between the two functions is precisely what a subset would miss.
+
+    This group exists for a concrete reason. The D-18 migration note ships a
+    "scan your cache directories" snippet that **imports** the predicate rather
+    than restating the rule as a regex. If the predicate and the validator
+    could disagree, that published snippet would tell consumers a different
+    story than the library enforces — exactly the doc/code drift class this
+    milestone keeps finding. One list drives both assertions, so the snippet
+    cannot drift from the rule it imports.
+    """
+    try:
+        validate_store_key(key, _CACHE_DIR)
+    except StoreKeyError:
+        raised = True
+    else:
+        raised = False
+
+    assert is_valid_store_key(key) is (not raised), (
+        f"is_valid_store_key({key!r}) disagrees with the raising validator "
+        f"(validator raised: {raised}); the published predicate and the enforced rule have drifted"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — refusal message content (D-13, T-14-05)
+# ---------------------------------------------------------------------------
+
+#: One representative refused key per clause, so the message assertions cover
+#: the whole clause vocabulary without re-running the full matrix.
+CLAUSE_REPRESENTATIVES: list[tuple[str, str]] = [
+    ("..", CLAUSE_RESERVED),
+    ("x\n", CLAUSE_CONTROL),
+    ("/etc/passwd", CLAUSE_ABSOLUTE),
+    ("../victim", CLAUSE_SEPARATOR),
+]
+
+
+@pytest.mark.parametrize(("key", "clause"), CLAUSE_REPRESENTATIVES)
+def test_message_contains_the_three_required_elements(key: str, clause: str) -> None:
+    """Plan 14-02 / STORE-01 / D-13: every refusal names the key, the cache directory and the clause.
+
+    All three are required content, not decoration: the key so the reader knows
+    *what* was refused, the cache directory so a multi-store process knows
+    *where*, and the clause so the reader knows *which* part of the rule fired
+    without reading the source.
+    """
+    with pytest.raises(StoreKeyError) as excinfo:
+        validate_store_key(key, _CACHE_DIR)
+    message = str(excinfo.value)
+
+    assert repr(key) in message, f"the refusal message does not carry repr({key!r}): {message!r}"
+    assert str(_CACHE_DIR) in message, f"the refusal message does not name the cache directory: {message!r}"
+    assert clause in message, f"the refusal message does not name the expected clause {clause!r}: {message!r}"
+
+
+def test_message_contains_no_newline_for_a_newline_bearing_key() -> None:
+    r"""Plan 14-02 / STORE-01 / D-13 / T-14-05: a newline in the key cannot split the log record.
+
+    This is the load-bearing case in the group rather than a nicety. A newline
+    is one of the characters the rule refuses, and interpolating such a key raw
+    into the message would let the refused key forge a second log line — which
+    would make this containment fix's own refusal message a log-injection
+    vector. ``repr()`` is what prevents it, and the single-line assertion is
+    what proves ``repr()`` is still there.
+    """
+    key = "x\n"
+    with pytest.raises(StoreKeyError, match=re.escape(CLAUSE_CONTROL)) as excinfo:
+        validate_store_key(key, _CACHE_DIR)
+    message = str(excinfo.value)
+
+    assert "\n" not in message, f"a newline-bearing key split the refusal message across lines: {message!r}"
+    assert "\\n" in message, f"the newline was not rendered in its escaped two-character form: {message!r}"
+
+
+def test_message_contains_a_visible_rendering_of_a_nul_bearing_key() -> None:
+    r"""Plan 14-02 / STORE-01 / D-13: a NUL in the key renders visibly rather than invisibly.
+
+    A raw NUL interpolated into a message is invisible in most terminals and in
+    most log viewers, so the reader would see ``'xy'`` and be unable to tell why
+    it was refused. ``repr()`` renders it as ``\x00`` — exactly when the reader
+    most needs to see it.
+    """
+    key = "x\x00y"
+    with pytest.raises(StoreKeyError, match=re.escape(CLAUSE_CONTROL)) as excinfo:
+        validate_store_key(key, _CACHE_DIR)
+    message = str(excinfo.value)
+
+    assert "\\x00" in message, f"the NUL was not rendered visibly in the refusal message: {message!r}"
+    assert "\x00" not in message, f"the refusal message carries a raw NUL byte: {message!r}"
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — the exception hierarchy (D-12)
+# ---------------------------------------------------------------------------
+
+
+def test_exception_hierarchy_is_value_error_and_deliberately_not_key_error() -> None:
+    """Plan 14-02 / STORE-01 / D-12: ``StoreKeyError`` is a ``ValueError`` and is **not** a ``KeyError``.
+
+    The negative assertion is the one that matters. ``add_data_to_store``
+    already raises ``KeyError`` for "key exists", so a key-shaped ``KeyError``
+    from validation would be indistinguishable from a duplicate insert at the
+    call site — and the two call for opposite responses.
+
+    ``ValueError`` is the chosen base because every existing ``except
+    ValueError`` in pc2img's callers keeps catching it, while iof3D gains the
+    precise ``except`` it needs to fail *one tile* without swallowing every
+    numeric ``ValueError`` raised inside that tile's computation.
+    ``StoreContainmentError`` subclasses ``StoreKeyError`` so a broad
+    ``except StoreKeyError`` still catches both, while a per-tile handler
+    written against the narrow type cannot silently swallow evidence that
+    something was planted in the cache directory.
+    """
+    assert issubclass(StoreKeyError, ValueError), "StoreKeyError stopped being a ValueError; existing callers break"
+    assert issubclass(StoreContainmentError, StoreKeyError), (
+        "StoreContainmentError is no longer a StoreKeyError; a broad `except StoreKeyError` stops catching it"
+    )
+    assert not issubclass(StoreKeyError, KeyError), (
+        "StoreKeyError became a KeyError and is now indistinguishable from add_data_to_store's "
+        "pre-existing 'key exists' error"
     )
