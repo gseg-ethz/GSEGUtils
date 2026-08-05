@@ -679,3 +679,221 @@ def test_json_tmp_routed_both_temporary_names_come_from_the_shared_builders(
     )
     assert (tmp_cache_dir / "k0.npy").exists(), "the offload did not actually write the codec pair"
     assert (tmp_cache_dir / "k0.meta.json").exists(), "the offload did not actually write the codec pair"
+
+
+# ===========================================================================
+# Plan 14-06 / STORE-03 — the symlink group
+# ===========================================================================
+#
+# STORE-03 is the requirement that fails INVISIBLY on the CI runner. Its
+# ``/tmp`` is a real directory, exactly like this host's, so the break that is
+# live on macOS (``mkdtemp`` under ``/var`` → ``/private/var``) and on ETH
+# ``/scratch`` is undetectable here unless the symlink is built explicitly.
+# Everything below therefore runs against the ``symlinked_cache_dir`` fixture,
+# which calls ``.symlink_to()`` itself — and the first group is the one that
+# proves it still does.
+
+
+# ---------------------------------------------------------------------------
+# fixture_is_really_symlinked — the guard the other four depend on for meaning
+# ---------------------------------------------------------------------------
+
+
+def test_fixture_is_really_symlinked_or_the_whole_group_tests_nothing(symlinked_cache_dir: Path) -> None:
+    """Plan 14-06 / STORE-03 / T-14-20 (test-validity guard).
+
+    Read this group's other four tests as conditional on this one. The ambient
+    temporary directory is a **real** directory on this host and on the CI
+    runner, so a fixture that quietly stopped creating a link would leave every
+    remaining STORE-03 test passing while testing nothing at all — a green suite
+    proving the opposite of what it claims.
+
+    Any test named for symlinks that does not itself create one is the warning
+    sign; this is the assertion that turns that warning into a failure.
+    """
+    assert symlinked_cache_dir.is_symlink(), (
+        f"the symlinked_cache_dir fixture returned {str(symlinked_cache_dir)!r}, which is not a "
+        "symlink. Every other test in this group is now exercising the ordinary real-directory "
+        "path while claiming to cover STORE-03 — restore the fixture's .symlink_to() call."
+    )
+    assert symlinked_cache_dir.resolve() != symlinked_cache_dir, (
+        "the fixture is a symlink whose resolved form equals itself, so it points at itself rather "
+        "than at a separate real directory; the symlinked-base code path is not being exercised"
+    )
+
+
+# ---------------------------------------------------------------------------
+# symlinked_cache_dir — the round-trip (SC-2 / T-14-20)
+# ---------------------------------------------------------------------------
+
+
+def test_symlinked_cache_dir_round_trips_through_a_fresh_store(
+    make_store: MakeStoreFn, symlinked_cache_dir: Path
+) -> None:
+    """Plan 14-06 / STORE-03 / SC-2 / T-14-20.
+
+    Write, offload with the container pickled, reopen and read back — with the
+    store constructed on the **link**, never on its target. Constructing on the
+    target would make this pass without exercising the symlinked-base path at
+    all, which is the same degradation the fixture guard above catches one level
+    up.
+
+    This is the single test that would have caught the macOS and ETH
+    ``/scratch`` break on a Linux runner. Comparing a candidate against an
+    *unresolved* base refuses **every legitimate key** when the cache directory
+    is itself a symlink, and that configuration is the default under ``mkdtemp``
+    on macOS and normal on ``/scratch``. The failure mode is an availability
+    regression, not a security one — which is why it needs a round-trip rather
+    than a refusal assertion.
+    """
+    expected = _small_array()
+    writer = make_store(symlinked_cache_dir)
+    writer.add_data_to_store("k0", expected)
+    writer.offload(pickle_container=True)
+
+    assert (symlinked_cache_dir / "k0.npy").exists(), "the offload wrote nothing through the symlinked cache dir"
+    assert (symlinked_cache_dir / "k0.meta.json").exists(), "the sidecar is missing under the symlinked cache dir"
+
+    reader = make_store(symlinked_cache_dir)
+    assert "k0" in reader.keys(), "the rescan did not adopt the entry written through the symlinked cache dir"
+    np.testing.assert_array_equal(np.asarray(reader["k0"]), expected)
+
+
+# ---------------------------------------------------------------------------
+# adopted_symlink — the legitimate case full resolution would refuse (D-17)
+# ---------------------------------------------------------------------------
+
+
+def test_adopted_symlink_loads_through_both_final_component_links(
+    make_store: MakeStoreFn, tmp_cache_dir: Path, tmp_path: Path
+) -> None:
+    """Plan 14-06 / STORE-03 / SC-2 / D-17.
+
+    A real codec pair lives *outside* the cache directory and is adopted into it
+    through **one final-component symlink per member of the pair**. The entry
+    must load, containment must accept both paths, and the array read back must
+    equal the array written outside. Full resolution refuses this case, which is
+    why the policy is parent-only — and this test is the only thing that says
+    so.
+
+    **Both symlinks, not one.** ``_load_entry`` raises ``KeyError(key)`` unless
+    the ``.npy`` **and** the ``.meta.json`` both ``exists()``, and only past
+    that check does it open the sidecar and load the array. A fixture that
+    symlinked only the array would therefore take the cache-**miss** branch, and
+    a test asserting merely "it did not blow up" would pass on the miss path
+    while claiming to demonstrate STORE-03 — retiring a success criterion
+    without exercising it. (``exists()`` follows symlinks, so a dangling link
+    fails the same way; the outside pair is built first.)
+
+    **Content equality, not just the absence of an exception.** With both files
+    present the load path is real, so asserting the values is what proves bytes
+    travelled *through* the symlinks. Without it, a future ``KeyError``-
+    swallowing change would leave this test green. Delete the sidecar link and
+    this test must go red with a ``KeyError``; a test that cannot fail is not
+    evidence.
+    """
+    expected = _small_array()
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+
+    donor = make_store(outside)
+    donor.add_data_to_store("adopted", expected)
+    donor.offload(pickle_container=True)
+    outside_npy = outside / "adopted.npy"
+    outside_meta = outside / "adopted.meta.json"
+    assert outside_npy.exists() and outside_meta.exists(), "the donor store did not write a real codec pair outside"
+
+    adopted_npy = tmp_cache_dir / "adopted.npy"
+    adopted_meta = tmp_cache_dir / "adopted.meta.json"
+    adopted_npy.symlink_to(outside_npy)
+    adopted_meta.symlink_to(outside_meta)
+    assert adopted_npy.is_symlink() and adopted_meta.is_symlink(), "the adoption fixture did not create two symlinks"
+
+    # Containment accepts both — parent-only resolution, so the final component
+    # being a link to elsewhere is not an escape.
+    assert paths_mod.get_npy_path(tmp_cache_dir, "adopted") == adopted_npy
+    assert paths_mod.get_meta_path(tmp_cache_dir, "adopted") == adopted_meta
+
+    store = make_store(tmp_cache_dir)
+    assert "adopted" in store.keys(), "the rescan did not adopt the symlinked entry"
+    np.testing.assert_array_equal(np.asarray(store["adopted"]), expected)
+
+
+# ---------------------------------------------------------------------------
+# parent_only_controls — tolerance is discrimination, not loosening (T-14-18)
+# ---------------------------------------------------------------------------
+
+
+def _control_symlinked_subdirectory_inside_the_cache(cache_dir: Path, outside: Path) -> Path:
+    """Build ``<cache>/sub/x.npy`` where ``sub`` is a symlink pointing outside."""
+    sub = cache_dir / "sub"
+    sub.symlink_to(outside, target_is_directory=True)
+    return sub / "x.npy"
+
+
+def _control_parent_directory_segment(cache_dir: Path, outside: Path) -> Path:
+    """Build the path a parent-directory key would produce: ``<cache>/../victim.npy``."""
+    return cache_dir / ".." / "victim.npy"
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        pytest.param(_control_symlinked_subdirectory_inside_the_cache, id="symlinked-sub-directory"),
+        pytest.param(_control_parent_directory_segment, id="parent-directory-segment"),
+    ],
+)
+def test_parent_only_controls_still_refuse_what_they_always_refused(
+    control: Callable[[Path, Path], Path], tmp_cache_dir: Path, tmp_path: Path
+) -> None:
+    """Plan 14-06 / STORE-03 / D-17 / T-14-18.
+
+    Without these two controls the adopted-symlink test above reads as evidence
+    that containment was **loosened**. With them it reads as evidence that
+    containment **discriminates**: parent-only resolution accepts a
+    final-component link and still refuses a symlinked *directory* component and
+    a parent-directory segment.
+
+    The symlinked sub-directory is what bounds the accepted residual (D-17,
+    T-14-18): the residual is the *leaf* case only. A directory component
+    pointing outside is resolved away by ``candidate.parent.resolve()`` and
+    caught, so "an attacker who can already write inside the cache directory can
+    redirect one entry" does not widen into "…can redirect a whole tree".
+
+    Both cases are asserted at the containment layer directly, because a key
+    carrying either shape is refused one layer earlier by the lexical rule and
+    would never reach here — which is exactly why the containment layer needs
+    its own proof.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    candidate = control(tmp_cache_dir, outside)
+
+    with pytest.raises(StoreContainmentError, match=paths_mod.CLAUSE_ESCAPES):
+        paths_mod._assert_contained(tmp_cache_dir, candidate)
+
+
+# ---------------------------------------------------------------------------
+# symlink_pickle_round_trip — the per-check base survives __getstate__ (D-03)
+# ---------------------------------------------------------------------------
+
+
+def test_symlink_pickle_round_trip_revives_its_entries(make_store: MakeStoreFn, symlinked_cache_dir: Path) -> None:
+    """Plan 14-06 / STORE-03 / D-03.
+
+    Guards the interaction between the per-check containment base and
+    :meth:`DiskBackedStore.__getstate__`, which offloads *before* serialising:
+    the offload writes through the symlinked directory, and the revived store
+    must re-derive its base rather than inherit one. A memoised base would
+    survive the pickle as a resolved real path while ``_cache_dir`` came back as
+    the link, and the two would then disagree for every key.
+    """
+    expected = _small_array()
+    store = make_store(symlinked_cache_dir)
+    store.add_data_to_store("k0", expected)
+
+    revived: DiskBackedStore[DiskBackedNDArray] = pickle.loads(pickle.dumps(store))
+
+    assert revived.cache_dir == symlinked_cache_dir, "the revived store no longer points at the symlinked cache dir"
+    assert "k0" in revived.keys(), "the revived store lost its entry"
+    np.testing.assert_array_equal(np.asarray(revived["k0"]), expected)
