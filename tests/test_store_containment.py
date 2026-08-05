@@ -25,13 +25,23 @@ Route                 Policy                                         Basis
 
 import os
 import pickle
+import re
+import textwrap
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import numpy as np
 import pytest
 
-from GSEGUtils.lazy_disk_cache import StoreContainmentError, StoreKeyError
+import GSEGUtils.lazy_disk_cache as lazy_disk_cache_package
+from GSEGUtils.lazy_disk_cache import (
+    StoreContainmentError,
+    StoreKeyError,
+    get_legacy_pickle_path,
+    get_meta_path,
+    get_npy_path,
+    is_valid_store_key,
+)
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
@@ -897,3 +907,179 @@ def test_symlink_pickle_round_trip_revives_its_entries(make_store: MakeStoreFn, 
     assert revived.cache_dir == symlinked_cache_dir, "the revived store no longer points at the symlinked cache dir"
     assert "k0" in revived.keys(), "the revived store lost its entry"
     np.testing.assert_array_equal(np.asarray(revived["k0"]), expected)
+
+
+# ---------------------------------------------------------------------------
+# Plan 14-07 / STORE-07 — the published contract (D-07 / D-18)
+# ---------------------------------------------------------------------------
+
+#: The documentation page carrying the published store key contract. The scan
+#: snippet below is *extracted from this file and executed*, not re-typed, so
+#: the published snippet and the test that proves it correct cannot drift: an
+#: edit to one is an edit to the other by construction. That is the whole point
+#: — a snippet a consumer runs against their live cache directory is only worth
+#: publishing if something asserts it still answers correctly.
+CONTRACT_PAGE = Path(__file__).resolve().parents[1] / "docs" / "source" / "LazyDiskCache.rst"
+
+#: The six names the package publishes for the key contract. Kept as a literal
+#: tuple rather than derived from ``__all__``: this is the *specification* of
+#: the published surface, and deriving it from the thing under test would make
+#: the assertion vacuous.
+PUBLISHED_SURFACE = (
+    "StoreKeyError",
+    "StoreContainmentError",
+    "is_valid_store_key",
+    "get_npy_path",
+    "get_meta_path",
+    "get_legacy_pickle_path",
+)
+
+#: Deliberately withheld (D-07): the raising validator, because the predicate is
+#: the published half by decision, and the two temporary-name builders, which are
+#: internal construction detail with no downstream caller. A name published by
+#: accident in a package on production PyPI cannot be withdrawn without a break,
+#: which is why the smaller surface is the one pinned here.
+WITHHELD_NAMES = ("validate_store_key", "get_npy_tmp_path", "get_meta_tmp_path")
+
+#: Two stems that are legal today and stay legal. The first is a real pc2img
+#: feature name — parentheses, commas, hyphens and an exponent-shaped dot — and
+#: is the reason the rule is a property denylist rather than a charset.
+LEGAL_STEMS = ("rrim_pack_(range,r16,d8,z1e-05)", "foo.bar")
+
+#: Two stems that used to work and are now refused, one per mechanism: a nested
+#: key (the silent-leak bug fix) and a single filename carrying backslashes (a
+#: perfectly legal POSIX filename, refused under the Windows interpretation).
+ILLEGAL_STEMS = ("tile_03/range", "evil\\..\\x")
+
+
+def _published_scan() -> Callable[[Path], list[str]]:
+    """Return the ``refused_keys`` function exactly as the documentation publishes it.
+
+    Parses the contract page for the ``code-block:: python`` that defines
+    ``refused_keys``, dedents it and executes it. Asserting that exactly one
+    such block exists is load-bearing: if a second scan snippet is ever added,
+    this test would otherwise silently exercise whichever came first.
+    """
+    page = CONTRACT_PAGE.read_text(encoding="utf-8")
+    blocks = re.findall(r"\.\. code-block:: python\n\n((?:(?: {3}.*)?\n)+)", page)
+    matching = [textwrap.dedent(block) for block in blocks if "def refused_keys" in block]
+    assert len(matching) == 1, (
+        f"expected exactly one scan snippet defining refused_keys in {CONTRACT_PAGE.name}, "
+        f"found {len(matching)} — the doc and this test are no longer in step"
+    )
+    namespace: dict[str, Any] = {}
+    exec(compile(matching[0], str(CONTRACT_PAGE), "exec"), namespace)
+    return cast(Callable[[Path], list[str]], namespace["refused_keys"])
+
+
+def _seed_cache_directory(root: Path) -> None:
+    """Write one ``.npy`` artefact per stem, plus one file the scan must skip."""
+    for stem in LEGAL_STEMS + ILLEGAL_STEMS:
+        artefact = root / f"{stem}{paths_mod.NPY_SUFFIX}"
+        artefact.parent.mkdir(parents=True, exist_ok=True)
+        artefact.write_bytes(b"not really an array")
+    # The caution the snippet carries, made executable: the sidecar extension
+    # collides with mypy's cache format, and an unfiltered scan reported
+    # thousands of false hits during this phase's research.
+    noise = root / ".mypy_cache" / "3.12" / f"..{paths_mod.NPY_SUFFIX}"
+    noise.parent.mkdir(parents=True, exist_ok=True)
+    noise.write_bytes(b"type-checker cache, not a store artefact")
+
+
+def _snapshot(root: Path) -> list[tuple[str, Optional[bytes]]]:
+    """Return a content-level fingerprint of everything under ``root``."""
+    entries: list[tuple[str, Optional[bytes]]] = []
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        entries.append((relative, path.read_bytes() if path.is_file() else None))
+    return entries
+
+
+def test_migration_snippet_reports_exactly_the_keys_that_are_now_refused(tmp_path: Path) -> None:
+    """Plan 14-07 / STORE-07 / D-18 / SC-5.
+
+    The snippet a consumer is told to run must return the keys that stop
+    working — no more and no fewer. Two legal stems are seeded alongside the two
+    illegal ones so the test can fail in *both* directions: a snippet that
+    refused everything would pass a "finds the bad ones" assertion.
+
+    The mypy-cache file is not decoration either. Its stem is ``..``, which the
+    rule refuses, so a snippet that dropped the ``SKIP`` filter would report it
+    and fail here.
+    """
+    _seed_cache_directory(tmp_path)
+
+    refused = _published_scan()(tmp_path)
+
+    assert refused == sorted(ILLEGAL_STEMS), (
+        f"the published scan returned {refused!r}; expected exactly the two refused stems "
+        f"{sorted(ILLEGAL_STEMS)!r}. Legal stems reported here mean the snippet is stricter "
+        "than the shipped rule; missing illegal stems mean it is looser."
+    )
+    # The snippet's verdict must be the library's verdict, not a second opinion.
+    assert all(not is_valid_store_key(key) for key in refused)
+    assert all(is_valid_store_key(stem) for stem in LEGAL_STEMS)
+
+
+def test_migration_snippet_is_read_only_and_gives_the_same_answer_twice(tmp_path: Path) -> None:
+    """Plan 14-07 / STORE-07 / D-18.
+
+    A consumer will run this against a live cache directory, probably more than
+    once and possibly interrupting it. The snippet performs no writes, so a
+    second run must return the same list and leave the tree byte-identical —
+    which is also what makes an interrupted run safe to re-run.
+    """
+    _seed_cache_directory(tmp_path)
+    scan = _published_scan()
+
+    before = _snapshot(tmp_path)
+    first = scan(tmp_path)
+    second = scan(tmp_path)
+    after = _snapshot(tmp_path)
+
+    assert first == second, f"the scan is not repeatable: {first!r} then {second!r}"
+    assert after == before, "the scan mutated the cache directory; it must be read-only"
+
+
+def test_public_exports_all_resolve_from_the_package_root() -> None:
+    """Plan 14-07 / STORE-07 / D-07.
+
+    Pins the surface a downstream consumer actually imports from. Importing
+    these from ``GSEGUtils.lazy_disk_cache.paths`` would pass while the
+    *published* surface was broken, which is why the module-level import at the
+    top of this file names the package and not the submodule.
+    """
+    imported = {
+        "StoreKeyError": StoreKeyError,
+        "StoreContainmentError": StoreContainmentError,
+        "is_valid_store_key": is_valid_store_key,
+        "get_npy_path": get_npy_path,
+        "get_meta_path": get_meta_path,
+        "get_legacy_pickle_path": get_legacy_pickle_path,
+    }
+    assert tuple(imported) == PUBLISHED_SURFACE
+
+    declared = set(lazy_disk_cache_package.__all__)
+    missing = [name for name in PUBLISHED_SURFACE if name not in declared]
+    assert not missing, f"published but absent from __all__: {missing!r}"
+
+    for name, obj in imported.items():
+        assert getattr(lazy_disk_cache_package, name) is obj, (
+            f"{name!r} resolves from the package root to a different object than the one imported"
+        )
+
+
+def test_public_exports_withhold_the_internal_names() -> None:
+    """Plan 14-07 / STORE-07 / D-07.
+
+    The withheld half of the same decision. Each of these three is reachable at
+    ``GSEGUtils.lazy_disk_cache.paths.<name>`` for anyone who insists — the
+    assertion is about ``__all__``, not about reachability — but publishing one
+    by accident is a commitment that cannot be withdrawn without a break.
+    """
+    declared = set(lazy_disk_cache_package.__all__)
+    leaked = [name for name in WITHHELD_NAMES if name in declared]
+    assert not leaked, f"internal names leaked into the published surface: {leaked!r}"
+
+    for name in WITHHELD_NAMES:
+        assert hasattr(paths_mod, name), f"{name!r} vanished from the paths module entirely"
