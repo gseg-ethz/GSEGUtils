@@ -221,6 +221,37 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             # the D-05 INFO log via _load_entry.
             available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
             for f in available_files:
+                # D-09 — WARN AND SKIP. This route reconstructs keys from
+                # filenames that are ALREADY on disk, so what it sees is
+                # pre-existing data, not a caller mistake. Raising here would
+                # turn "open an old cache directory" into a crash, which is
+                # precisely the outcome the policy split exists to prevent.
+                #
+                # This is DELIBERATELY the opposite of __setstate__'s policy
+                # (D-10, which raises), and the asymmetry is the substance of
+                # the split rather than an inconsistency: a rescan that raised
+                # would crash on legitimate legacy data, whereas an unpickle
+                # that merely warned would hand back a store silently missing
+                # entries — data loss disguised as success, inside a worker,
+                # which is the hardest class of failure to attribute.
+                #
+                # ACCEPTED COST, chosen with eyes open and recorded in D-09:
+                # the refused file stays on disk, untracked and unreachable,
+                # leaking the same way a nested key leaks today. The migration
+                # note's cache-directory scan snippet (which imports
+                # `is_valid_store_key`) is what makes that leak visible and
+                # actionable rather than silent. Do not "fix" this into a raise.
+                if not paths.is_valid_store_key(f.stem):
+                    logger.warning(
+                        "Skipping cache file %s in cache directory %s: its stem %r is not a legal "
+                        "store key, so it cannot be tracked and the entry is unreachable. The file "
+                        "is left untouched; scan the directory with "
+                        "GSEGUtils.lazy_disk_cache.is_valid_store_key to find every affected entry.",
+                        f.name,
+                        self._cache_dir,
+                        f.stem,
+                    )
+                    continue
                 self._store[f.stem] = None
 
     def _check_T(self, value: object) -> T:
@@ -635,7 +666,43 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         Per D-06 (__setstate__ symmetry), the per-entry load path routes through
         :meth:`_load_entry`, inheriting the legacy-refusal (D-05) and
         cache_path-propagation (W-5) behaviour automatically.
+
+        Raises
+        ------
+        StoreKeyError
+            If the pickled state carries a key the STORE-01 lexical rule
+            refuses (D-10).
+
+        Notes
+        -----
+        D-10 — RAISE. Unpickling is a trust boundary, and this module already
+        treats it as one: :func:`_resolve_lazy_disk_cache_class` resolves
+        sidecar class names through an explicit allow-list with no
+        ``importlib`` fallback for exactly this reason. A *post-fix* pickle
+        cannot legitimately carry an illegal key, because :meth:`__getstate__`
+        snapshots a ``_store`` whose keys the parent process already validated
+        — so an illegal key arriving here means a legacy or a tampered pickle.
+
+        This is DELIBERATELY the opposite of the ``__init__`` rescan's policy
+        (D-09, which warns and skips). Warning-and-skipping here would return a
+        store missing entries with no error: data loss disguised as success,
+        inside a worker. The rescan's input is pre-existing data on disk, so
+        crashing on it would be wrong; this route's input is a serialized
+        snapshot that should never have been illegal, so failing loudly is the
+        only way the caller learns anything.
+
+        The check runs **before** ``__dict__.update`` rather than beside the
+        per-entry reload below, because ``__dict__.update`` is itself a write
+        into ``_store`` — it installs every pickled key wholesale — and the
+        reload loop is gated on ``_enable_caching``. Validating first is the
+        only placement that covers all keys on every configuration and leaves
+        no partially-updated object behind.
         """
+        incoming_store: dict[str, Any] = state.get("_store", {})
+        incoming_cache_dir: Optional[Path] = state.get("_cache_dir")
+        for incoming_key in incoming_store:
+            paths.validate_store_key(incoming_key, incoming_cache_dir)
+
         self.__dict__.update(state)
         if self._enable_caching:
             for key in list(self.keys()):
