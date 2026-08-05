@@ -956,3 +956,29 @@ def test_convert_to_memmap_import_error_fallback(tmp_path, monkeypatch):
     assert bd._mmap is not None
     np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
     # No finally block needed — monkeypatch.setattr auto-restores on teardown.
+
+
+def test_store_key_parent_directory_escape_regression(tmp_cache_dir: Path) -> None:
+    """Plan 14-01 / STORE-01 / SC-4: a parent-directory key is refused and writes nothing.
+
+    Reproduces the escape that blocked pc2img: ``add_data_to_store('../victim', arr)``
+    used to build ``<cache>/../victim.npy`` and overwrite a file *above* the cache
+    directory. All three assertions matter — the raise alone does not prove that
+    nothing was written.
+    """
+    from GSEGUtils.lazy_disk_cache import StoreKeyError
+
+    victim = tmp_cache_dir.parent / "victim.npy"
+    sentinel = b"do-not-overwrite-me"
+    victim.write_bytes(sentinel)
+
+    store = _make_store(tmp_cache_dir)
+    arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+
+    with pytest.raises(StoreKeyError, match="contains a path separator"):
+        store.add_data_to_store("../victim", arr)
+
+    assert victim.read_bytes() == sentinel, "the sentinel above the cache directory was overwritten"
+    assert sorted(p.name for p in tmp_cache_dir.parent.glob("victim.*")) == ["victim.npy"], (
+        "a new victim.* artefact was created above the cache directory"
+    )
