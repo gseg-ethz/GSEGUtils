@@ -24,13 +24,15 @@ Route                 Policy                                         Basis
 """
 
 import os
+import pickle
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
 import pytest
 
-from GSEGUtils.lazy_disk_cache import StoreKeyError
+from GSEGUtils.lazy_disk_cache import StoreContainmentError, StoreKeyError
+from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
 from GSEGUtils.lazy_disk_cache.lazy_disk_cache import LazyDiskCacheConfig
@@ -365,3 +367,315 @@ def test_setitem_no_syscall_a_legal_insert_survives_a_hostile_filesystem(
         monkeypatch.setattr(os, "stat", real_stat)
 
     assert store.keys() == ["legal_key"], "the legal insert did not land"
+
+
+# ===========================================================================
+# Plan 14-06 / STORE-02 — the mechanism proofs
+# ===========================================================================
+#
+# Everything above pins the *lexical* layer at each route. Everything below
+# pins the *containment* layer at each path builder, and pins it by mechanism
+# rather than by outcome. An outcome-only test ("an escaping key raises")
+# passes against a string prefix test on whichever fixture happens to be
+# chosen — which is the whole reason SC-3 asks for the three wrong primitives
+# to be asserted wrong explicitly.
+
+
+def _small_array() -> np.ndarray:
+    """Return a fresh small float32 payload; fresh per call, so no test shares state."""
+    return np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# bypass — SC-3: three wrong primitives, asserted wrong; one right check
+# ---------------------------------------------------------------------------
+
+#: A containment primitive under test: does it *claim* ``candidate`` is inside
+#: ``cache_dir``?
+Primitive = Callable[[Path, Path], bool]
+
+#: Builds ``(cache_dir, candidate)`` for one crafted escape, under ``tmp_path``.
+CraftedCase = Callable[[Path], tuple[Path, Path]]
+
+
+def _string_prefix_says_contained(cache_dir: Path, candidate: Path) -> bool:
+    """Rejected primitive 1: ``str(candidate).startswith(str(cache_dir))``."""
+    return str(candidate).startswith(str(cache_dir))
+
+
+def _bare_is_relative_to_says_contained(cache_dir: Path, candidate: Path) -> bool:
+    """Rejected primitive 2: ``is_relative_to`` on an *unresolved* candidate."""
+    return candidate.is_relative_to(cache_dir)
+
+
+def _bare_common_path_says_contained(cache_dir: Path, candidate: Path) -> bool:
+    """Rejected primitive 3: a bare ``os.path.commonpath`` computation."""
+    return os.path.commonpath([str(cache_dir), str(candidate)]) == str(cache_dir)
+
+
+def _craft_sibling_sharing_the_name_prefix(tmp_path: Path) -> tuple[Path, Path]:
+    """Craft ``/…/cache-evil/x.npy`` against ``/…/cache`` — defeats the string test."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sibling = tmp_path / "cache-evil"
+    sibling.mkdir(parents=True, exist_ok=True)
+    return cache_dir, sibling / "x.npy"
+
+
+def _craft_unresolved_parent_segment(tmp_path: Path) -> tuple[Path, Path]:
+    """Craft ``/…/cache/../victim.npy`` — defeats both purely lexical primitives."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir, cache_dir / ".." / "victim.npy"
+
+
+@pytest.mark.parametrize(
+    ("primitive", "crafted"),
+    [
+        pytest.param(_string_prefix_says_contained, _craft_sibling_sharing_the_name_prefix, id="string-prefix-test"),
+        pytest.param(_bare_is_relative_to_says_contained, _craft_unresolved_parent_segment, id="bare-is-relative-to"),
+        pytest.param(_bare_common_path_says_contained, _craft_unresolved_parent_segment, id="bare-common-path"),
+    ],
+)
+def test_bypass_each_obvious_primitive_accepts_an_escape_the_shipped_check_refuses(
+    primitive: Primitive, crafted: CraftedCase, tmp_path: Path
+) -> None:
+    """Plan 14-06 / STORE-02 / SC-3 / T-14-16.
+
+    A table of why each obvious containment primitive was rejected. Each of the
+    three is a **complete** bypass, not a partial one, and all three fail in the
+    direction of *accepting* an escape:
+
+    * a **string prefix test** accepts a sibling directory that merely shares
+      the cache directory's name prefix — containment is a path relationship,
+      not a string relationship;
+    * a **bare** ``is_relative_to`` on an unresolved path accepts a ``..``
+      segment, because it is purely lexical and never collapses the segment;
+    * a **bare** ``os.path.commonpath`` has the identical blind spot, for the
+      identical reason.
+
+    The wrong answers are asserted **positively** rather than marked
+    expected-to-fail. An ``xfail`` marker would let a primitive silently start
+    behaving differently — including *correctly*, which would quietly remove
+    this group's justification for the extra ``resolve`` call — without anything
+    noticing. Asserted positively, the group reads as documentation and a future
+    "simplification" of :func:`paths._assert_contained` fails a test rather than
+    passing a review.
+    """
+    cache_dir, candidate = crafted(tmp_path)
+
+    assert primitive(cache_dir, candidate) is True, (
+        f"the rejected primitive no longer accepts the crafted escape {str(candidate)!r} against "
+        f"{str(cache_dir)!r}; if it genuinely became correct, retire the case rather than the group"
+    )
+
+    with pytest.raises(StoreContainmentError, match=paths_mod.CLAUSE_ESCAPES):
+        paths_mod._assert_contained(cache_dir, candidate)
+
+
+# ---------------------------------------------------------------------------
+# every_builder — SC-4's builder clause, driven off the registry (T-14-19)
+# ---------------------------------------------------------------------------
+
+#: Every module-level path builder ``paths.py`` publishes, discovered rather
+#: than listed. ``_build`` is private and deliberately unregistered, so the
+#: naming convention (``get_*_path``) is what defines "a builder" here.
+PUBLISHED_BUILDER_NAMES = {
+    name
+    for name, obj in vars(paths_mod).items()
+    if name.startswith("get_") and name.endswith("_path") and callable(obj)
+}
+
+#: The registry, as parametrisation cases. Sorted for a stable report order
+#: under ``pytest-randomly``; the key function keeps the sort off the callables.
+BUILDER_CASES = [
+    pytest.param(name, builder, id=name)
+    for name, builder in sorted(paths_mod.STORE_PATH_BUILDERS.items(), key=lambda item: item[0])
+]
+
+
+@pytest.mark.parametrize(("builder_name", "builder"), BUILDER_CASES)
+def test_every_builder_contains_a_legal_key_and_refuses_an_escaping_one(
+    builder_name: str, builder: Callable[[Path, str], Path], tmp_cache_dir: Path
+) -> None:
+    """Plan 14-06 / STORE-02 / SC-4 / T-14-19.
+
+    Every builder puts a legal key's path inside the cache directory and
+    refuses an escaping key — **iterated off** ``STORE_PATH_BUILDERS`` rather
+    than hand-listed. A hand-written five-case version satisfies the letter of
+    SC-4 today and silently loses it at the next addition: a sixth builder added
+    in Phase 15 would simply not appear.
+
+    The registry-membership assertion is what gives that its teeth. It ties the
+    registry to the set of ``get_*_path`` callables the module actually
+    publishes, so an unregistered sixth builder fails this group **by
+    omission** — the parametrisation cannot grow to cover it, so the set
+    comparison is the thing that notices.
+
+    The containment assertion is on the *parent*, resolved: that is the property
+    :func:`paths._assert_contained` actually enforces (D-17), and asserting on
+    the fully-resolved path instead would encode the policy this phase
+    deliberately did not adopt.
+    """
+    assert set(paths_mod.STORE_PATH_BUILDERS) == PUBLISHED_BUILDER_NAMES, (
+        "STORE_PATH_BUILDERS has drifted from the set of get_*_path builders the module publishes: "
+        f"registered={sorted(paths_mod.STORE_PATH_BUILDERS)} published={sorted(PUBLISHED_BUILDER_NAMES)}. "
+        "A builder outside the registry is a builder outside this contract test."
+    )
+    assert len(paths_mod.STORE_PATH_BUILDERS) == len(PUBLISHED_BUILDER_NAMES)
+
+    legal = builder(tmp_cache_dir, "legal_key")
+    assert legal.parent.resolve() == tmp_cache_dir.resolve(), (
+        f"{builder_name} returned {str(legal)!r}, whose parent is not the cache directory"
+    )
+    assert legal.name.startswith("legal_key"), f"{builder_name} did not build its path from the key"
+
+    with pytest.raises(StoreKeyError):
+        builder(tmp_cache_dir, ILLEGAL_KEY)
+
+
+# ---------------------------------------------------------------------------
+# layer_order — the lexical layer fires first, at every builder (D-03)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("builder_name", "builder"), BUILDER_CASES)
+def test_layer_order_a_doubly_illegal_key_raises_the_base_type_at_each_registered_builder(
+    builder_name: str, builder: Callable[[Path, str], Path], tmp_cache_dir: Path
+) -> None:
+    """Plan 14-06 / STORE-02 / the lexical-then-contained ordering.
+
+    ``'../victim'`` is illegal under **both** layers — a separator violation
+    lexically, and it would resolve outside the cache directory too — so it is
+    the key that discriminates between the two orderings. With the lexical layer
+    first it raises the base :exc:`StoreKeyError`; inverted, it would raise the
+    :exc:`StoreContainmentError` subclass.
+
+    Asserted with ``type(exc) is StoreKeyError`` rather than ``isinstance``.
+    ``StoreContainmentError`` *is* a ``StoreKeyError``, so an ``isinstance``
+    assertion accepts the inverted order and cannot detect the very thing this
+    test exists to detect.
+
+    Why the ordering is load-bearing rather than cosmetic: it is what lets a
+    downstream handler read the exception **type** as evidence of which layer
+    fired — a bad key from the caller, versus a symlink planted in the cache
+    directory. Inverted, every bad key would look like an attack.
+    """
+    with pytest.raises(StoreKeyError) as excinfo:
+        builder(tmp_cache_dir, ILLEGAL_KEY)
+
+    assert type(excinfo.value) is StoreKeyError, (
+        f"{builder_name} raised {type(excinfo.value).__name__} for a key that is illegal under both "
+        "layers; the containment layer ran before the lexical one, so the exception type no longer "
+        "says which layer fired"
+    )
+
+
+# ---------------------------------------------------------------------------
+# base_not_pickled — the resolved base never becomes state (D-03 / T-14-17)
+# ---------------------------------------------------------------------------
+
+
+def test_base_not_pickled_no_attribute_appears_across_a_build_or_a_pickle_round_trip(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-06 / STORE-02 / D-03 / T-14-17.
+
+    The containment base is ``cache_dir.resolve()``, computed inside
+    :func:`paths._assert_contained` on every call. It must never be memoised
+    onto the instance: :meth:`DiskBackedStore.__getstate__` is
+    ``self.__dict__.copy()``, so a stored resolved base would be pickled
+    verbatim and travel into a worker that may be on a different mount
+    namespace, where it would be compared against paths that genuinely differ.
+
+    Made observable in two halves. First, the store's *attribute set* is
+    snapshotted across an offload — which drives all five builders — and must be
+    unchanged. Second, a pickle round-trip must not revive an instance carrying
+    an attribute the original lacked, which is the failure the first half would
+    miss if the memoisation happened in ``__getstate__`` itself.
+    """
+    store = make_store(tmp_cache_dir)
+    attributes_before = set(store.__dict__)
+
+    store.add_data_to_store("k0", _small_array())
+    store.offload(pickle_container=True)
+
+    assert set(store.__dict__) == attributes_before, (
+        "driving a path build added instance state: "
+        f"{sorted(set(store.__dict__) - attributes_before)}. If that is the resolved containment "
+        "base, it will be pickled into a worker (D-03)."
+    )
+
+    revived: DiskBackedStore[DiskBackedNDArray] = pickle.loads(pickle.dumps(store))
+    assert set(revived.__dict__) - attributes_before == set(), (
+        f"the revived store carries state the original lacked: {sorted(set(revived.__dict__) - attributes_before)}"
+    )
+    np.testing.assert_array_equal(np.asarray(revived["k0"]), _small_array())
+
+
+# ---------------------------------------------------------------------------
+# json_tmp_routed — both temporary names come from the seam (SC-4 / T-14-15)
+# ---------------------------------------------------------------------------
+
+
+def test_json_tmp_routed_both_temporary_names_come_from_the_shared_builders(
+    make_store: MakeStoreFn, tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 14-06 / STORE-02 / SC-4 / T-14-15.
+
+    ``.meta.json.tmp`` — SC-4's named target — used to be a bare
+    ``self._cache_dir / f"{key}.meta.json.tmp"`` join, safe only *incidentally*
+    because the real ``.meta.json`` builder ran three lines earlier and would
+    already have raised. Both temporary names must now come from the shared
+    builders, so the property is an invariant rather than a filter.
+
+    Proven by **recorders**, not by filenames. Asserting on the resulting
+    ``.tmp`` names would pass just as well against an inline construction that
+    happens to produce the same string, which is exactly the incidental-safety
+    shape SC-4 rejects.
+
+    The patch target is the attribute on the shared ``paths`` **module**.
+    ``disk_backed_store`` pins ``from . import paths`` with qualified call
+    sites, so it resolves the attribute off the module object at call time and
+    sees the patch. The inverse pairing is the failure this is written against:
+    a name-level import in the store plus a patch on the module leaves the
+    store's bound copy live, the recorders never fire, and the group reports a
+    **vacuous pass** over a store that never touched the seam. The
+    ``== ["k0"]`` assertions (not ``>= 0``) are what make that failure loud.
+    """
+    store = make_store(tmp_cache_dir)
+    store.add_data_to_store("k0", _small_array())
+
+    real_npy_tmp = paths_mod.get_npy_tmp_path
+    real_meta_tmp = paths_mod.get_meta_tmp_path
+    npy_tmp_calls: list[str] = []
+    meta_tmp_calls: list[str] = []
+
+    def recording_npy_tmp(cache_dir: Path, key: str) -> Path:
+        npy_tmp_calls.append(key)
+        return real_npy_tmp(cache_dir, key)
+
+    def recording_meta_tmp(cache_dir: Path, key: str) -> Path:
+        meta_tmp_calls.append(key)
+        return real_meta_tmp(cache_dir, key)
+
+    monkeypatch.setattr("GSEGUtils.lazy_disk_cache.paths.get_npy_tmp_path", recording_npy_tmp)
+    monkeypatch.setattr("GSEGUtils.lazy_disk_cache.paths.get_meta_tmp_path", recording_meta_tmp)
+    try:
+        store.offload(pickle_container=True)
+    finally:
+        # explicitly (belt-and-suspenders; monkeypatch teardown does this too)
+        monkeypatch.setattr("GSEGUtils.lazy_disk_cache.paths.get_npy_tmp_path", real_npy_tmp)
+        monkeypatch.setattr("GSEGUtils.lazy_disk_cache.paths.get_meta_tmp_path", real_meta_tmp)
+
+    assert npy_tmp_calls == ["k0"], (
+        f"the .npy.tmp name did not come from paths.get_npy_tmp_path (recorded {npy_tmp_calls!r}); "
+        "an empty list means the patch did not intercept — suspect the import binding in "
+        "disk_backed_store.py before suspecting the routing"
+    )
+    assert meta_tmp_calls == ["k0"], (
+        f"the .meta.json.tmp name did not come from paths.get_meta_tmp_path (recorded "
+        f"{meta_tmp_calls!r}); this is the name SC-4 calls out by name"
+    )
+    assert (tmp_cache_dir / "k0.npy").exists(), "the offload did not actually write the codec pair"
+    assert (tmp_cache_dir / "k0.meta.json").exists(), "the offload did not actually write the codec pair"
