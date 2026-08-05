@@ -39,6 +39,8 @@ from numpy.typing import DTypeLike, NDArray
 from pydantic import ConfigDict, validate_call
 from pydantic.dataclasses import dataclass
 
+from . import paths
+
 logger = logging.getLogger(__name__)
 
 # Phase 4 PERF-04 D-04: optional psutil for RAM-aware chunk sizing; ImportError fallback.
@@ -149,7 +151,36 @@ class LazyDiskCacheConfig:
             A new configuration. If ``self.cache_path`` is ``None`` the new
             configuration also carries ``cache_path=None`` (and an informational
             log entry is emitted).
+
+        Raises
+        ------
+        GSEGUtils.lazy_disk_cache.StoreKeyError
+            If ``new_folder`` is not a single path segment, under the same
+            lexical rule that guards store keys (D-02). This route looks like it
+            sits outside the containment story — it is a configuration helper,
+            and no store exists yet when it runs — but it joins a
+            caller-supplied string straight into the cache root, and the callers
+            are real: pc2img passes a per-tile id through it, and iof3D passes a
+            path extension through it in three places. STORE-02's guarantee that
+            no path the store builds lands outside the cache directory is hollow
+            if the root those paths hang off can itself be walked upward, so the
+            rule applies here too.
+
+            The check runs **before** the join and **regardless** of whether
+            ``self.cache_path`` is ``None``: a bad folder name is a caller
+            mistake either way, and gating the guard on configuration state is
+            the same shape as the dead ``if self._cache_dir`` conditional this
+            phase removes from the store.
+
+        Notes
+        -----
+        The ``@validate_call()`` decorator above is a **type** check and never
+        was a value check — a hostile folder name is a perfectly well-typed
+        :class:`str`, so the decorator would accept ``'../..'`` without
+        complaint. It is left exactly as it was; the value rule is the separate
+        shared validator called below.
         """
+        paths.validate_store_key(new_folder, self.cache_path)
         new_path = self.cache_path / new_folder if self.cache_path else None
         if new_path is None:
             logger.info("Cache path is None; cannot extend.")
