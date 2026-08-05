@@ -103,6 +103,36 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     # ── Private helpers (not in __all__, not in inventory) ──────────────────────
     (r"py:func", r"_normalize_base"),
     (r"py:meth", r"_coerce_array"),
+    # Phase 14 (STORE-07): the store key contract publishes six names —
+    # is_valid_store_key, StoreKeyError, StoreContainmentError and the three
+    # get_*_path builders — all of which DO resolve and are deliberately NOT
+    # ignored here. The three entries below cover references that are
+    # unresolvable by construction; none of them hides a broken published name.
+    #
+    # `validate_store_key` is the raising validator behind the published
+    # predicate. D-07 publishes "a predicate ... alongside the INTERNAL raising
+    # validator", so it is absent from the package __all__ and from the docs
+    # member allowlist by decision; its docstring in paths.py cross-references
+    # it and cannot resolve it. Same class as _normalize_base above.
+    (r"py:func", r"validate_store_key$"),
+    # The three deprecating builder wrappers on DiskBackedStore (D-15) point
+    # their explicit link target at the defining module rather than at the
+    # published re-export, e.g.
+    # :func:`GSEGUtils.lazy_disk_cache.get_npy_path <...paths.get_npy_path>`.
+    # The displayed name is the published one and resolves; the submodule-
+    # qualified target does not, because `paths` is documented through the
+    # package, not on a page of its own. Repointing those targets at the
+    # published names belongs to whoever next edits disk_backed_store.py.
+    (r"py:func", r"GSEGUtils\.lazy_disk_cache\.paths\..*"),
+    # ── Stdlib short forms and deprecated typing aliases ───────────────────────
+    # `pathlib.Path` is in the python inventory; the bare short form autodoc
+    # renders under autodoc_typehints_format="short" is not. Surfaced by the
+    # Phase 14 path builders and the three deprecating wrappers, all of which
+    # take and return a Path.
+    (r"py:class", r"Path$"),
+    # `typing.Mapping` is the deprecated alias of collections.abc.Mapping and
+    # carries no method entries in the python inventory.
+    (r"py:meth", r"typing\.Mapping\.get$"),
     # dunder methods — Sphinx can't resolve short-form bare `__array__` etc.
     (r"py:meth", r"(__array__|__getitem__|__array_interface__)"),
     (r"py:attr", r"(__array_interface__|H)"),
