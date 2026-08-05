@@ -8,14 +8,17 @@ Plan 02-05 extends with atomicity regression tests.
 
 import gc
 import json
+import logging
 import os
 import pickle
+import re
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from GSEGUtils.lazy_disk_cache import lazy_disk_cache as ldc_mod
+from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import (
     _LAZY_DISK_CACHE_CLASS_REGISTRY,
@@ -982,3 +985,111 @@ def test_store_key_parent_directory_escape_regression(tmp_cache_dir: Path) -> No
     assert sorted(p.name for p in tmp_cache_dir.parent.glob("victim.*")) == ["victim.npy"], (
         "a new victim.* artefact was created above the cache directory"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 Plan 04 — the two LazyDiskCache anchors the store's waist cannot reach
+# ---------------------------------------------------------------------------
+
+
+def test_cache_path_sealed_refuses_reassignment_but_still_reads(tmp_cache_dir: Path) -> None:
+    """Plan 14-04 / STORE-02 / D-01: assignment raises ``AttributeError``; reads are unchanged.
+
+    The seal and the surviving getter are **one** contract, so both are asserted
+    in a single test function. Split across two, the getter could regress
+    without the seal test noticing, and vice versa — and the getter is what the
+    three pre-existing read assertions in this file (``:371``, ``:395``,
+    ``:852``) depend on.
+
+    The message is asserted to carry all three D-01 elements: which entry, the
+    attempted path rendered by ``repr``, and the sanctioned alternative.
+    """
+    store = _make_store_with_one_entry(tmp_cache_dir, key="k0")
+    store.offload()
+    entry = store["k0"]
+    expected = tmp_cache_dir / "k0.dat"
+    attempted = Path("/tmp/anywhere/evil.dat")
+
+    with pytest.raises(
+        AttributeError,
+        match=re.escape("an entry's cache path is fixed at construction"),
+    ) as excinfo:
+        entry.cache_path = attempted
+
+    message = str(excinfo.value)
+    assert repr(attempted) in message, f"the refusal does not name the attempted path by repr: {message}"
+    assert "k0.dat" in message, f"the refusal does not identify which entry was targeted: {message}"
+    assert "DiskBackedStore" in message, f"the refusal does not name the sanctioned alternative: {message}"
+
+    # The getter is untouched, and the seal actually held: the path never moved.
+    assert entry.cache_path == expected
+    assert not attempted.exists(), "the sealed setter still created the destination directory"
+
+
+@pytest.mark.parametrize(
+    ("bad_folder", "clause"),
+    [
+        ("..", paths_mod.CLAUSE_RESERVED),
+        ("a/b", paths_mod.CLAUSE_SEPARATOR),
+        ("/abs", paths_mod.CLAUSE_ABSOLUTE),
+    ],
+)
+def test_extend_cache_path_refuses_a_non_single_segment_folder(
+    tmp_cache_dir: Path, bad_folder: str, clause: str
+) -> None:
+    """Plan 14-04 / STORE-02 / D-02: a folder name that is not one path segment is refused.
+
+    Three cases, three different clauses of the shared lexical rule — the clause
+    strings are imported from ``paths`` rather than restated, so the assertion
+    cannot drift from the shipped vocabulary.
+    """
+    config = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
+
+    with pytest.raises(paths_mod.StoreKeyError, match=re.escape(clause)):
+        config.extend_cache_path(bad_folder)
+
+
+def test_extend_cache_path_accepts_a_single_segment_folder(tmp_cache_dir: Path) -> None:
+    """Plan 14-04 / STORE-02 / D-02: a real per-tile folder name still joins onto the root.
+
+    The guard must not break the live downstream callers it wraps — pc2img
+    passes a per-tile id through this route.
+    """
+    config = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
+
+    extended = config.extend_cache_path("tile_03")
+
+    assert extended.cache_path == tmp_cache_dir / "tile_03"
+    assert extended.enable_caching is config.enable_caching
+
+
+def test_extend_cache_path_with_no_source_path_still_returns_none(caplog: pytest.LogCaptureFixture) -> None:
+    """Plan 14-04 / STORE-02 / D-02: the ``cache_path is None`` branch is otherwise untouched.
+
+    This is the branch downstream callers hit when caching is off: a good folder
+    name still emits the informational log entry and still returns a
+    configuration carrying ``cache_path=None``.
+    """
+    config = LazyDiskCacheConfig(enable_caching=False, cache_path=None)
+
+    with caplog.at_level(logging.INFO, logger="GSEGUtils.lazy_disk_cache.lazy_disk_cache"):
+        extended = config.extend_cache_path("tile_03")
+
+    assert extended.cache_path is None
+    assert any("cannot extend" in record.getMessage() for record in caplog.records), (
+        "the informational log entry for the None-source branch was lost"
+    )
+
+
+def test_extend_cache_path_with_no_source_path_still_refuses_a_bad_folder() -> None:
+    """Plan 14-04 / STORE-02 / D-02: the guard is not conditional on configuration state.
+
+    A bad folder name is a caller mistake whether or not a path exists to join
+    it onto. If validation were ordered behind the ``None`` short-circuit this
+    would return a configuration instead of raising — the same shape as the dead
+    ``if self._cache_dir`` conditional this phase removes from the store.
+    """
+    config = LazyDiskCacheConfig(enable_caching=False, cache_path=None)
+
+    with pytest.raises(paths_mod.StoreKeyError, match=re.escape(paths_mod.CLAUSE_RESERVED)):
+        config.extend_cache_path("..")
