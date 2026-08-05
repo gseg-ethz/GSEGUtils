@@ -40,6 +40,7 @@ from typing import (
     TypeGuard,
     Unpack,
     cast,
+    overload,
     runtime_checkable,
 )
 
@@ -237,8 +238,25 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     def __getitem__(self, key: str) -> T:
         """Return the entry for ``key``, loading it from disk on a cache miss.
 
+        The key is validated lexically **first**, before the in-memory lookup
+        and therefore before :meth:`_load_entry` can build or probe any path
+        (D-11). D-11 deliberately *extends* SC-1, which is written over the
+        routes that write into ``_store``: without a read-side check,
+        ``store['../victim']`` is caught only by the resolved containment deep
+        in the load path, so the invariant still holds but the caller gets a
+        differently-shaped error than the equivalent write would give, at the
+        cost of a ``resolve`` rather than a string comparison. It also closes a
+        read-side existence probe — :meth:`_load_entry`'s legacy-``.pkl``
+        ``exists()`` check would otherwise run on an unvalidated path.
+
         Raises
         ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01,
+            D-11). ``StoreKeyError`` subclasses :class:`ValueError`, **not**
+            :class:`KeyError` (D-12), so a caller wrapping a read in
+            ``except KeyError`` does not catch it. See :meth:`get`, which is
+            overridden precisely because of that.
         KeyError
             If no in-memory entry and no on-disk codec pair exist for ``key``,
             or if a legacy ``.pkl`` is present (refused without invoking
@@ -247,6 +265,8 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             If the on-disk JSON sidecar has an unsupported ``schema_version``
             or an unknown ``lazy_disk_cache_class``.
         """
+        paths.validate_store_key(key, self._cache_dir)
+
         obj = self._store.get(key, None)
         if obj is not None:
             return obj
@@ -255,8 +275,81 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         self._store[key] = loaded_obj
         return loaded_obj
 
+    @overload
+    def get(self, key: str, /) -> Optional[T]: ...
+
+    @overload
+    def get[D](self, key: str, /, default: T | D) -> T | D: ...
+
+    def get[D](self, key: str, /, default: Optional[T | D] = None) -> Optional[T | D]:
+        """Return the entry for ``key``, or ``default`` if it is absent or illegal.
+
+        **This override is not redundant with the inherited method — deleting it
+        silently re-breaks the accessor.** :class:`DiskBackedStore` subclasses
+        :class:`~typing.MutableMapping`, whose :meth:`~typing.Mapping.get` is
+        ``try: return self[key] except KeyError: return default``. D-12 makes
+        :exc:`StoreKeyError` a :class:`ValueError` — deliberately *not* a
+        :class:`KeyError`, because :meth:`add_data_to_store` already raises
+        ``KeyError`` for "key exists". So the moment D-11 makes
+        :meth:`__getitem__` validate, the inherited ``get`` stops catching the
+        refusal and ``store.get('../victim', None)`` **raises** where it
+        previously returned ``None``. D-11 enumerated ``__contains__`` and
+        ``__delitem__`` explicitly and never reached ``.get()``, which inherits
+        the new behaviour without anyone deciding it should.
+
+        The catch tuple ``(KeyError, StoreKeyError)`` is therefore deliberate.
+        It preserves D-11's shape rather than weakening it: ``__contains__`` is
+        an explicit dict-backed membership test, so ``'../victim' in store`` is
+        ``False`` today and stays ``False``; with this override the two
+        interrogative read routes agree (membership is ``False``, ``get``
+        returns the default) while the subscript still raises. No illegal key
+        reaches :meth:`_load_entry` by any route.
+
+        The rejected alternative was widening :meth:`__getitem__` to raise
+        :class:`KeyError` instead, so the inherited ``get`` would keep working.
+        That contradicts D-12's hard constraint — it would collide with
+        :meth:`add_data_to_store`'s existing "key exists" ``KeyError`` and make
+        the read route's error shape differ from every write route's, which is
+        the inconsistency D-11 exists to remove.
+
+        Parameters
+        ----------
+        key : str
+            The store key to look up.
+        default : optional
+            Returned when ``key`` is absent from the store *or* refused by the
+            lexical rule. Defaults to ``None``, matching ``Mapping.get``.
+
+        Returns
+        -------
+        T or default
+            The entry, or ``default``.
+        """
+        try:
+            return self[key]
+        except (KeyError, paths.StoreKeyError):
+            return default
+
     def __setitem__(self, key: str, value: T) -> None:
-        """Validate ``value`` and store it under ``key`` in memory."""
+        """Validate ``key`` lexically and ``value`` structurally, then store in memory.
+
+        The key check is the **first** statement, ahead of ``_check_T`` and the
+        store write (STORE-01). SC-1 constrains *how* it is done: the check
+        performs no ``stat``, no ``resolve`` and no other filesystem syscall, so
+        this route stays pure in-memory and is safe to call inside a ``loky``
+        worker. Nothing may be added here that touches the filesystem — the
+        resolved-containment layer lands in the path builders instead, which is
+        the reason the two layers are separated at all.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01). The
+            key is not tracked when this raises.
+        TypeError
+            If ``value`` fails the value-type / validator checks.
+        """
+        paths.validate_store_key(key, self._cache_dir)
         self._store[key] = self._check_T(value)
 
     def __delitem__(self, key: str) -> None:
