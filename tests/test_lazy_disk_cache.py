@@ -1093,3 +1093,75 @@ def test_extend_cache_path_with_no_source_path_still_refuses_a_bad_folder() -> N
 
     with pytest.raises(paths_mod.StoreKeyError, match=re.escape(paths_mod.CLAUSE_RESERVED)):
         config.extend_cache_path("..")
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 Plan 05 — the D-15 deprecation contract on the three builder aliases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method_name", "builder_name"),
+    [
+        ("_get_npy_path", "get_npy_path"),
+        ("_get_meta_path", "get_meta_path"),
+        ("_get_legacy_pickle_path", "get_legacy_pickle_path"),
+    ],
+)
+def test_deprecated_builder_alias_warns_and_delegates(tmp_cache_dir: Path, method_name: str, builder_name: str) -> None:
+    """Plan 14-05 / STORE-02 / D-15: each surviving alias warns and returns what the seam returns.
+
+    The direct-call shape — one of the two ways the warning reaches pc2img
+    (the other is a ``super()`` call from its own override, covered by the
+    next test). Both assertions are load-bearing:
+
+    * the ``DeprecationWarning`` naming its replacement is the whole contract;
+    * the **equality against the free function** is what stops a wrapper
+      quietly diverging from the seam it is supposed to delegate to. A wrapper
+      that warns correctly and then builds its own path would satisfy the
+      warning half while silently reintroducing the unguarded construction
+      this phase removed.
+
+    Known gap, stated rather than left implicit: a subclass that overrides one
+    of these **without** calling ``super()`` stays silently coupled and never
+    sees the warning. That is immaterial for the current downstream, but the
+    warning is a nudge, not a guarantee.
+    """
+    store = _make_store(tmp_cache_dir)
+    builder = getattr(paths_mod, builder_name)
+
+    with pytest.warns(DeprecationWarning, match=re.escape(builder_name)) as record:
+        result = getattr(store, method_name)("k0")
+
+    assert result == builder(store._cache_dir, "k0"), (
+        f"{method_name} no longer returns what paths.{builder_name} returns — the alias has "
+        "diverged from the seam it delegates to"
+    )
+    assert any(f"GSEGUtils.lazy_disk_cache.{builder_name}" in str(w.message) for w in record), (
+        f"the deprecation warning does not name its replacement: {[str(w.message) for w in record]}"
+    )
+
+
+def test_deprecated_builder_alias_warns_through_a_subclass_super_call(tmp_cache_dir: Path) -> None:
+    """Plan 14-05 / STORE-02 / D-15: the warning reaches a subclass that overrides and calls ``super()``.
+
+    This is pc2img's *current* usage shape — it overrides ``_get_npy_path`` and
+    ``_get_meta_path`` and delegates upward — so it is the shape that decides
+    whether the deprecation is actually delivered today. The direct-call shape
+    (covered above) is the one it falls back to once the override is deleted.
+    """
+    cfg = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
+
+    class _OverridingStore(DiskBackedStore[DiskBackedNDArray]):
+        """A local stand-in for pc2img's subclass: overrides, then calls ``super()``."""
+
+        def _get_npy_path(self, feature: str) -> Path:
+            """Delegate upward, exactly as the downstream override does."""
+            return super()._get_npy_path(feature)
+
+    store = _OverridingStore(config=cfg, factory=DiskBackedNDArray)
+
+    with pytest.warns(DeprecationWarning, match=re.escape("get_npy_path")):
+        result = store._get_npy_path("k0")
+
+    assert result == paths_mod.get_npy_path(tmp_cache_dir, "k0")
