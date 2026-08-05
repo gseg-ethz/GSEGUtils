@@ -47,6 +47,7 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import ConfigDict, validate_call
 
+from . import paths
 from .disk_backed_ndarray import DiskBackedNDArray
 from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw
 
@@ -316,9 +317,18 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
         Raises
         ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01).
+            Validated **first**, before the "key exists" check and before any
+            path is built, and **unconditionally** — the ``if self._cache_dir``
+            guard below is dead code (``Path`` defines no ``__bool__`` and
+            ``__init__`` assigns a ``Path`` unconditionally), so it must never
+            be allowed to gate the validation.
         KeyError
             If ``key`` is already present in the store.
         """
+        paths.validate_store_key(key, self._cache_dir)
+
         if key in self:
             raise KeyError(f"Key {key} already exists in store.")
 
