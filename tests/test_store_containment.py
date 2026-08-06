@@ -1026,14 +1026,23 @@ WITHHELD_NAMES = ("validate_store_key", "get_npy_tmp_path", "get_meta_tmp_path")
 #: is the reason the rule is a property denylist rather than a charset.
 LEGAL_STEMS = ("rrim_pack_(range,r16,d8,z1e-05)", "foo.bar")
 
-#: Two stems that used to work and are now refused, one per mechanism: a nested
-#: key (the silent-leak bug fix) and a single filename carrying backslashes (a
-#: perfectly legal POSIX filename, refused under the Windows interpretation).
-ILLEGAL_STEMS = ("tile_03/range", "evil\\..\\x")
+#: Three stems that used to work and are now refused, one per mechanism: a nested
+#: key (the silent-leak bug fix), a single filename carrying backslashes (a
+#: perfectly legal POSIX filename, refused under the Windows interpretation), and
+#: the **empty** key.
+#:
+#: The empty stem is Plan 14-10 / WR-04 / D-22, and it does double duty: seeding
+#: it writes ``<root>/.npy`` — the pre-fix artefact of the empty key, the file a
+#: cache directory written before this phase can genuinely contain — and listing
+#: it here is the expectation that the realigned snippet now reports it. Before
+#: the realignment the snippet reported ``''`` for that file while the store
+#: adopted ``'.npy'``: one byte on disk, two different keys, which is the
+#: doc/code drift the snippet's whole design exists to prevent.
+ILLEGAL_STEMS = ("tile_03/range", "evil\\..\\x", "")
 
 
-def _published_scan() -> Callable[[Path], list[str]]:
-    """Return the ``refused_keys`` function exactly as the documentation publishes it.
+def _published_namespace() -> dict[str, Any]:
+    """Execute the documentation's scan snippet and return its namespace.
 
     Parses the contract page for the ``code-block:: python`` that defines
     ``refused_keys``, dedents it and executes it. Asserting that exactly one
@@ -1049,7 +1058,25 @@ def _published_scan() -> Callable[[Path], list[str]]:
     )
     namespace: dict[str, Any] = {}
     exec(compile(matching[0], str(CONTRACT_PAGE), "exec"), namespace)
-    return cast(Callable[[Path], list[str]], namespace["refused_keys"])
+    return namespace
+
+
+def _published_scan() -> Callable[[Path], list[str]]:
+    """Return the ``refused_keys`` function exactly as the documentation publishes it."""
+    return cast(Callable[[Path], list[str]], _published_namespace()["refused_keys"])
+
+
+def _published_store_key_for() -> Callable[[Path, Path], str]:
+    """Return the snippet's own key derivation, ``store_key_for``.
+
+    Extracted from the *same* executed block as :func:`_published_scan`, so the
+    derivation this file compares the rescan against is the derivation a
+    consumer actually runs — not a re-typed copy of it. ``refused_keys`` alone
+    could not serve: it reports only the keys it *refuses*, so it cannot say
+    which key a legal file was mapped to, and per-file agreement is exactly the
+    property D-22 makes non-coincidental.
+    """
+    return cast(Callable[[Path, Path], str], _published_namespace()["store_key_for"])
 
 
 def _seed_cache_directory(root: Path) -> None:
@@ -1079,13 +1106,19 @@ def test_migration_snippet_reports_exactly_the_keys_that_are_now_refused(tmp_pat
     """Plan 14-07 / STORE-07 / D-18 / SC-5.
 
     The snippet a consumer is told to run must return the keys that stop
-    working — no more and no fewer. Two legal stems are seeded alongside the two
-    illegal ones so the test can fail in *both* directions: a snippet that
+    working — no more and no fewer. Two legal stems are seeded alongside the
+    three illegal ones so the test can fail in *both* directions: a snippet that
     refused everything would pass a "finds the bad ones" assertion.
 
     The mypy-cache file is not decoration either. Its stem is ``..``, which the
     rule refuses, so a snippet that dropped the ``SKIP`` filter would report it
     and fail here.
+
+    ↻ EXTENDED by Plan 14-10 (WR-04 / D-22). The third illegal stem is the empty
+    key, whose artefact is the bare ``.npy`` file. It is here because the
+    realigned derivation now reports it — the snippet used to report ``''`` for
+    that file while the store adopted ``'.npy'``, so the two sides named
+    different keys for one byte on disk.
     """
     _seed_cache_directory(tmp_path)
 
@@ -1378,3 +1411,229 @@ def test_route_store_property_is_a_read_only_view_not_a_write_route(
     assert list(view) == ["legal_key"]
     assert view["legal_key"] is store._store["legal_key"]
     assert dict(view) == dict(store._store)
+
+
+# ---------------------------------------------------------------------------
+# route_rescan (Plan 14-10 / WR-04 / D-22 / T-14-39 / T-14-40 / T-14-41)
+#
+# One key derivation, proven per file by rebuilding the path from the derived
+# key — and still never fatal.
+# ---------------------------------------------------------------------------
+
+#: The pre-fix artefact of the empty key: a file whose *whole name* is the array
+#: suffix. A cache directory written before this phase can genuinely contain one,
+#: because the empty key was accepted then.
+EMPTY_KEY_ARTEFACT_NAME = paths_mod.NPY_SUFFIX
+
+
+def _warning_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the rendered text of every WARNING record captured so far.
+
+    Rendered rather than ``record.args`` on purpose, matching the convention the
+    D-09 rescan test established: the module's house style is lazy ``%``
+    interpolation and stays so, but keying an assertion to ``args`` would pin the
+    formatting idiom instead of the behaviour.
+    """
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_route_rescan_requires_the_derived_key_to_rebuild_its_own_file(
+    tmp_cache_dir: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 14-10 / WR-04 / D-22 / T-14-39.
+
+    **The round-trip guard is the invariant; the aligned derivation alone is a
+    coincidence.** Stripping the suffix off the file *name* happens to agree with
+    the builders for today's suffix vocabulary, and that agreement is what makes
+    the empty-key phantom disappear. But "happens to agree" is a filter, not an
+    invariant — the same distinction this phase keeps drawing about paths. The
+    guard rebuilds the path from the derived key through the shared builder and
+    refuses the file when the result is not the file the key came from.
+
+    **Why this test monkeypatches the builder, stated plainly rather than left
+    to look like laziness.** With the derivation and the builders in step, no
+    real filename reaches the round-trip branch — which is precisely what makes
+    the guard *unobservable* and therefore untestable by seeding alone. Deleting
+    it would leave the suite green and the property standing by luck. So the
+    disagreement is injected: one key's builder returns a different path, which
+    is exactly the drift the guard exists to survive. If this test ever passes
+    with the guard deleted, suspect the patch target — ``disk_backed_store``
+    calls ``paths.get_npy_path`` as a module attribute at call time, so the
+    rebinding must be on the ``paths`` module object.
+
+    The ``ordinary`` control is not decoration: a rescan that adopted *nothing*
+    would satisfy "does not adopt the drifting key" while being completely
+    broken.
+    """
+    drifting = tmp_cache_dir / f"drifting{paths_mod.NPY_SUFFIX}"
+    ordinary = tmp_cache_dir / f"ordinary{paths_mod.NPY_SUFFIX}"
+    for planted in (drifting, ordinary):
+        planted.write_bytes(b"not-a-real-npy")
+
+    real_builder = paths_mod.get_npy_path
+
+    def drifting_builder(cache_dir: Path, key: str) -> Path:
+        """Return a path that is not the file ``key`` was derived from."""
+        if key == "drifting":
+            return cache_dir / f"{key}_elsewhere{paths_mod.NPY_SUFFIX}"
+        return real_builder(cache_dir, key)
+
+    monkeypatch.setattr(paths_mod, "get_npy_path", drifting_builder)
+
+    with caplog.at_level("WARNING"):
+        store = _store_with_cache_path(tmp_cache_dir)
+
+    assert "drifting" not in store.keys(), (
+        "the rescan adopted a key that does not rebuild its own file — a phantom key the store "
+        "advertises through keys() and can never load"
+    )
+    assert "ordinary" in store.keys(), "the rescan adopted nothing, so the negative assertion proves nothing"
+    assert drifting.exists(), "the rescan deleted a file it should only skip"
+
+    assert any(drifting.name in message and repr("drifting") in message for message in _warning_messages(caplog)), (
+        "no WARNING named the skipped file together with the key that was derived for it"
+    )
+
+
+def test_route_rescan_survives_a_builder_that_refuses_during_the_round_trip(
+    tmp_cache_dir: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 14-10 / D-22 under D-09's standing prohibition / T-14-40.
+
+    D-22 inherits D-09's policy rather than replacing it: **opening a
+    pre-existing cache directory must never become a crash.** The round-trip
+    guard calls the shared builder, and that builder *raises* — for a key the
+    lexical rule refuses, and potentially with a containment error on an odd
+    directory. A guard added under a warn-and-skip policy that could itself
+    propagate would violate the very policy it was added under, so the rebuild is
+    computed inside a handler that turns any builder refusal into the same
+    warn-and-skip.
+
+    That handler is unreachable through the real builders once the predicate has
+    passed, which is why the refusal is injected here. The alternative — trusting
+    the ordering argument — is what this phase has repeatedly found insufficient.
+    """
+
+    def refusing_builder(cache_dir: Path, key: str) -> Path:
+        """Refuse every key, the way the builder would on a hostile directory."""
+        raise StoreContainmentError(f"synthetic refusal for {key!r}: the path {paths_mod.CLAUSE_ESCAPES}")
+
+    (tmp_cache_dir / f"ordinary{paths_mod.NPY_SUFFIX}").write_bytes(b"not-a-real-npy")
+    monkeypatch.setattr(paths_mod, "get_npy_path", refusing_builder)
+
+    with caplog.at_level("WARNING"):
+        store = _store_with_cache_path(tmp_cache_dir)
+
+    assert store.keys() == [], "a key was adopted despite the round-trip check refusing it"
+    assert _warning_messages(caplog), "the refusal was swallowed silently instead of being warned about"
+
+
+def test_route_rescan_opens_a_directory_holding_every_refused_shape_without_raising(
+    tmp_cache_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plan 14-10 / D-09's standing prohibition, re-asserted under D-22 / T-14-40.
+
+    Every refused shape available at this point in the phase, in one directory,
+    opened at once:
+
+    * a nested artefact (the separator clause, and the silent-leak bug fix);
+    * the pre-fix artefact of the empty key (the reserved clause, and the shape
+      D-22 exists for);
+    * a trailing-dot stem and a reserved Win32 device name — both refused only
+      since D-20, which Plan 14-09 shipped and this plan depends on.
+
+    Construction must succeed, warn, adopt only the legal artefact and leave
+    every file on disk. The legal control is what keeps the assertion from
+    passing vacuously.
+    """
+    planted = {
+        "nested": tmp_cache_dir / "tile_03" / f"range{paths_mod.NPY_SUFFIX}",
+        "empty-key": tmp_cache_dir / EMPTY_KEY_ARTEFACT_NAME,
+        "trailing-dot": tmp_cache_dir / f"foo.{paths_mod.NPY_SUFFIX}",
+        "win-device": tmp_cache_dir / f"CON{paths_mod.NPY_SUFFIX}",
+        "legal": tmp_cache_dir / f"ordinary{paths_mod.NPY_SUFFIX}",
+    }
+    for artefact in planted.values():
+        artefact.parent.mkdir(parents=True, exist_ok=True)
+        artefact.write_bytes(b"not-a-real-npy")
+
+    with caplog.at_level("WARNING"):
+        store = _store_with_cache_path(tmp_cache_dir)
+
+    assert store.keys() == ["ordinary"], (
+        f"the rescan adopted {store.keys()!r}; only the legal artefact may be tracked, and the "
+        "nested one is invisible to a non-recursive glob by design"
+    )
+    for label, artefact in planted.items():
+        assert artefact.exists(), f"the rescan deleted the {label} artefact instead of skipping it"
+
+    # Three top-level refusals (nested is never globbed, legal is adopted).
+    assert len(_warning_messages(caplog)) == 3, (
+        f"expected one WARNING per refused top-level artefact, got {_warning_messages(caplog)!r}"
+    )
+
+
+def test_rescan_and_the_published_snippet_derive_the_same_key_for_every_seeded_file(
+    tmp_cache_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plan 14-10 / WR-04 / D-22 / T-14-41 / SC-5.
+
+    **The agreement is asserted per file, not on the aggregate list, and that is
+    the whole point.** Two derivations can return the same sorted list of refused
+    keys while disagreeing about *which file produced which key* — which is
+    exactly the WR-04 reproduction: for the single byte ``<cache>/.npy`` the
+    snippet reported ``''`` and the store adopted ``'.npy'``. An aggregate
+    comparison is blind to that; a per-file one is not.
+
+    The rescan's derivation is read off its *observable behaviour* rather than
+    re-implemented here: for each seeded top-level artefact the store either
+    adopted exactly the snippet's key, or logged a WARNING naming that file
+    together with that key. Re-implementing it in the test would create a third
+    expression of the derivation this task exists to reduce to one.
+
+    The nested artefact is the deliberate asymmetry, asserted rather than
+    ignored: the reopen scan globs non-recursively, so the store never sees it,
+    while the snippet reports it under its relative path — which is precisely the
+    silent leak the contract page tells consumers about, and the reason the
+    snippet is recursive and the rescan is not.
+    """
+    _seed_cache_directory(tmp_cache_dir)
+    store_key_for = _published_store_key_for()
+
+    with caplog.at_level("WARNING"):
+        store = _store_with_cache_path(tmp_cache_dir)
+
+    adopted = set(store.keys())
+    messages = _warning_messages(caplog)
+
+    top_level = sorted(f for f in tmp_cache_dir.glob(f"*{paths_mod.NPY_SUFFIX}") if f.is_file())
+    assert len(top_level) == 4, f"the fixture no longer seeds the expected top-level artefacts: {top_level!r}"
+
+    for artefact in top_level:
+        expected = store_key_for(artefact, tmp_cache_dir)
+        if is_valid_store_key(expected):
+            assert expected in adopted, (
+                f"the snippet derives {expected!r} for {artefact.name!r} and the rule accepts it, "
+                f"but the store did not adopt it; adopted={sorted(adopted)!r}"
+            )
+            assert f"{expected}{paths_mod.NPY_SUFFIX}" == artefact.name, (
+                f"the adopted key {expected!r} does not rebuild {artefact.name!r}"
+            )
+        else:
+            assert expected not in adopted, (
+                f"the store adopted {expected!r}, which the published rule refuses — the reopen "
+                "scan and the published scan disagree about this file"
+            )
+            assert any(artefact.name in message and repr(expected) in message for message in messages), (
+                f"no WARNING named {artefact.name!r} together with the key {expected!r} the snippet "
+                f"derives for it; captured warnings were {messages!r}"
+            )
+
+    nested = tmp_cache_dir / "tile_03" / f"range{paths_mod.NPY_SUFFIX}"
+    nested_key = store_key_for(nested, tmp_cache_dir)
+    assert nested_key == os.path.join("tile_03", "range"), (
+        f"the snippet's nested derivation regressed to {nested_key!r} while the empty-key case was fixed"
+    )
+    assert not is_valid_store_key(nested_key), "the nested key is no longer refused, so the snippet reports nothing"
+    assert nested_key not in adopted, "the non-recursive rescan somehow adopted a nested artefact"
+    assert nested.exists(), "the rescan reached into a subdirectory and disturbed it"

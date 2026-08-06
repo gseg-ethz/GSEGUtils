@@ -114,9 +114,17 @@ So ``.`` and ``..`` are refused as **defence-in-depth against a future bare
 join**, not as the closing of a live hole. Stating only the rule would leave the
 next reader with a false model of where the danger is.
 
-The empty key has its own, concrete reason: ``''`` builds ``<cache>/.npy``, whose
-rescan stem is ``'.npy'`` — a *different, legal-looking* key. It is refused
-because it does not round-trip.
+The empty key has its own, concrete reason: ``''`` builds ``<cache>/.npy``, a
+file no key can own. It is refused because it does not round-trip.
+
+Reading a ``<cache>/.npy`` left behind by an older version is the other half of
+the same story, and it is worth stating because the library used to get it wrong.
+The reopen scan derived that file's key with :attr:`~pathlib.PurePath.stem`,
+which returns ``'.npy'`` for it — a *different, legal-looking* key the store then
+adopted and could never load, because building a path from ``'.npy'`` gives
+``<cache>/.npy.npy``. Since 0.5.x the scan strips the suffix off the file *name*
+and additionally requires the derived key to rebuild the very file it came from,
+so such a file is warned about and skipped rather than advertised as a key.
 
 Why nested keys are refused — this one is a bug fix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -185,7 +193,11 @@ Scanning your existing cache directories
 
 The snippet below reports which of the keys already on disk will now be refused.
 It **imports the predicate** rather than restating the rule as a pattern, so it
-cannot drift away from what the library actually enforces.
+cannot drift away from what the library actually enforces. It also derives the
+key from a filename exactly the way the store's own reopen scan does — that is
+what ``store_key_for`` is — so the two cannot disagree about *which key a given
+file belongs to*, which is a second way a scan and a library can drift apart even
+when they share one rule.
 
 It is read-only: it opens no file, writes nothing and creates nothing, so it is
 safe to interrupt and safe to re-run.
@@ -202,11 +214,24 @@ safe to interrupt and safe to re-run.
 
 .. code-block:: python
 
+   import os
    from pathlib import Path
 
    from GSEGUtils.lazy_disk_cache import is_valid_store_key
 
    SKIP = {".mypy_cache", ".pytest_cache", ".ruff_cache", ".git", ".venv", "venv", "site-packages"}
+
+
+   def store_key_for(npy: Path, cache_dir: Path) -> str:
+       """Return the store key the array file *npy* belongs to.
+
+       The suffix is stripped off the *file name* and the relative parent is
+       rejoined, which is exactly how the store's own reopen scan derives a key.
+       """
+       relative = npy.relative_to(cache_dir)
+       key = npy.name[: -len(".npy")]
+       parent = str(relative.parent)
+       return key if parent == "." else os.path.join(parent, key)
 
 
    def refused_keys(cache_dir: Path) -> list[str]:
@@ -216,7 +241,7 @@ safe to interrupt and safe to re-run.
            relative = npy.relative_to(cache_dir)
            if SKIP.intersection(relative.parts):
                continue
-           found.add(str(relative)[: -len(".npy")])
+           found.add(store_key_for(npy, cache_dir))
        return sorted(key for key in found if not is_valid_store_key(key))
 
 Every key it returns is one that used to work and now raises. A nested key it
