@@ -941,7 +941,8 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         ------
         StoreKeyError
             If the pickled state carries a key the STORE-01 lexical rule
-            refuses (D-10).
+            refuses (D-10), **or** if it carries a ``_cache_dir`` that is
+            present and is not a :class:`~pathlib.Path` (D-21).
 
         Notes
         -----
@@ -982,9 +983,48 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         reload loop is gated on ``_enable_caching``. Validating first is the
         only placement that covers all keys on every configuration and leaves
         no partially-updated object behind.
+
+        **D-21 — the containment base is state too, and it was the one thing
+        crossing this boundary unchecked (WR-06).** Every incoming key used to be
+        validated against ``_cache_dir``, which was then installed *verbatim from
+        the same untrusted state*. ``_cache_dir`` is the authorization boundary
+        every builder resolves against, so validating keys against a base the
+        state itself chose does not constrain where bytes land: every key passes,
+        and every path lands wherever the base points. The type guard below
+        precedes the per-key loop for a concrete reason beyond tidiness — the
+        refusal message for a bad key interpolates the incoming base, so a
+        malformed base would otherwise be rendered into a message before anything
+        noticed it was malformed.
+
+        **What that guard buys, and what it does not.** It catches *malformed or
+        legacy state* — which is the case D-10 actually names. It does **not**
+        defend against a hostile pickle: unpickling untrusted data is
+        arbitrary-code execution regardless of any validation this method
+        performs, so no check here is a security boundary against an attacker who
+        already controls the byte stream. Stated plainly rather than left implied,
+        because a guard on a deserialization route reads as a security boundary
+        unless it says otherwise, and the trust-boundary framing above would
+        otherwise be overclaimed.
+
+        **No ``expected_cache_dir`` parameter was added.** The review proposed an
+        opt-in check against a caller-supplied expected directory; it was
+        considered and declined, because the user did not want the extra public
+        surface — and a published parameter in a package on production PyPI
+        cannot be withdrawn without a break. The refusal is part of D-21 rather
+        than an omission; do not re-propose it as one.
         """
         incoming_store: dict[str, Any] = state.get("_store", {})
         incoming_cache_dir: Optional[Path] = state.get("_cache_dir")
+        # D-21. An absent base and an explicitly-absent base both stay legal: a
+        # store with no configured cache path is a supported configuration and
+        # this guard must not break it. Only a *present, non-Path* base is
+        # refused.
+        if incoming_cache_dir is not None and not isinstance(incoming_cache_dir, Path):
+            raise paths.StoreKeyError(
+                f"Invalid pickled cache directory {incoming_cache_dir!r}: the restored containment "
+                f"base must be a pathlib.Path, but got {type(incoming_cache_dir).__name__}. This is "
+                "malformed or legacy pickled state; nothing has been restored."
+            )
         for incoming_key in incoming_store:
             paths.validate_store_key(incoming_key, incoming_cache_dir)
 

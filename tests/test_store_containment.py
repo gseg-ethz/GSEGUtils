@@ -30,6 +30,8 @@ seventh validation site, so SC-1's "every route" is an invariant rather than an
 enumeration of the routes someone remembered.
 """
 
+import ast
+import inspect
 import os
 import pickle
 import re
@@ -1420,6 +1422,12 @@ def test_route_store_property_is_a_read_only_view_not_a_write_route(
 # key — and still never fatal.
 # ---------------------------------------------------------------------------
 
+#: The public surface D-21 declined (WR-06). The review proposed an opt-in
+#: ``expected_cache_dir`` check; it was considered and refused, because a
+#: published parameter in a package on production PyPI cannot be withdrawn
+#: without a break.
+DECLINED_SURFACE = "expected_cache_dir"
+
 #: The pre-fix artefact of the empty key: a file whose *whole name* is the array
 #: suffix. A cache directory written before this phase can genuinely contain one,
 #: because the empty key was accepted then.
@@ -1744,9 +1752,44 @@ def test_route_setstate_adds_no_expected_cache_dir_surface() -> None:
     withdrawn without a break. Recorded as a test rather than only as prose,
     because a later reader meeting the guard without the context will read the
     absence as an oversight and helpfully add it.
-    """
-    import inspect
 
-    source = Path(paths_mod.__file__).parent.joinpath("disk_backed_store.py").read_text(encoding="utf-8")
-    assert "expected_cache_dir" not in source, "the declined expected_cache_dir surface reappeared in the store"
-    assert "expected_cache_dir" not in inspect.signature(DiskBackedStore.__setstate__).parameters
+    **Asserted over the AST rather than over the source text**, and the
+    distinction is not pedantry: D-21 *requires* the name to appear in
+    ``__setstate__``'s Notes block, because recording the refusal is half the
+    decision. A substring assertion would therefore make the documentation of
+    the refusal indistinguishable from its reversal — and, written first that
+    way, it went red against the very sentence the decision asked for. The AST
+    sees parameters, assignments, attributes and keywords; it does not see
+    docstrings or comments, which is exactly the discrimination wanted.
+    """
+    package_root = Path(paths_mod.__file__).parent.parent
+    modules = sorted(package_root.rglob("*.py"))
+    assert modules, f"no source modules found under {package_root}"
+
+    offenders: list[str] = []
+    for module in modules:
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        for node in ast.walk(tree):
+            named = (
+                isinstance(node, ast.arg)
+                and node.arg == DECLINED_SURFACE
+                or isinstance(node, ast.Name)
+                and node.id == DECLINED_SURFACE
+                or isinstance(node, ast.Attribute)
+                and node.attr == DECLINED_SURFACE
+                or isinstance(node, ast.keyword)
+                and node.arg == DECLINED_SURFACE
+            )
+            if named:
+                offenders.append(f"{module.name}:{getattr(node, 'lineno', '?')}")
+
+    assert not offenders, (
+        f"the declined {DECLINED_SURFACE!r} surface reappeared as code at {offenders!r}; it was "
+        "considered and refused, and the refusal is recorded in __setstate__'s Notes block"
+    )
+    assert DECLINED_SURFACE not in inspect.signature(DiskBackedStore.__setstate__).parameters
+
+    # The refusal must still be *recorded* — a silently-dropped rationale is how
+    # a declined option comes back as a helpful addition.
+    notes = DiskBackedStore.__setstate__.__doc__ or ""
+    assert DECLINED_SURFACE in notes, "the Notes block no longer records why this surface was declined"
