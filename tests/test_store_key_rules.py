@@ -20,6 +20,7 @@ later group can reuse them rather than restate them.
 
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import cast
 
 import pytest
 
@@ -103,6 +104,30 @@ ACCEPTED_KEYS: tuple[str, ...] = (
 
 #: Lookup from a refused key to the clause it must report.
 EXPECTED_CLAUSE: dict[str, str] = dict(REFUSED_KEYS)
+
+#: The non-``str`` inputs (Plan 14-09 / WR-02). The first four are the review's
+#: verbatim reproduction, each of which escaped as a bare :exc:`TypeError` from
+#: the control-character scan on a predicate documented to return ``bool``.
+#:
+#: The fifth is **not** from that reproduction and is here for a different
+#: reason: a :class:`bytearray` is *unhashable*, so ``key in _RESERVED_KEYS``
+#: raises ``TypeError: unhashable type: 'bytearray'`` before any character is
+#: examined. It is what makes the guard's *position* — first statement, ahead of
+#: the reserved-name membership test — provable rather than stylistic: move the
+#: guard after that test and this case alone goes red.
+#:
+#: Deliberately **not** folded into :data:`REFUSED_KEYS`, whose
+#: ``list[tuple[str, str]]`` typing feeds :data:`EXPECTED_CLAUSE` and the
+#: group-subset guard. There is also no ``CLAUSE_*`` constant for this case: the
+#: clause vocabulary describes *how a key is shaped*, and these values are not
+#: keys at all.
+NON_STR_KEYS: list[object] = [
+    None,
+    Path("../victim"),
+    b"../victim",
+    5,
+    bytearray(b"../victim"),
+]
 
 
 def test_refused_key_groups_are_all_present_in_the_master_list() -> None:
@@ -438,4 +463,63 @@ def test_exception_hierarchy_is_value_error_and_deliberately_not_key_error() -> 
     assert not issubclass(StoreKeyError, KeyError), (
         "StoreKeyError became a KeyError and is now indistinguishable from add_data_to_store's "
         "pre-existing 'key exists' error"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group 10 — the type axis (Plan 14-09 / WR-02, T-14-33)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", NON_STR_KEYS)
+def test_predicate_is_total_and_returns_false_for_a_non_str(value: object) -> None:
+    """Plan 14-09 / STORE-01 / WR-02: the published predicate returns ``bool`` for *every* argument.
+
+    ``is_valid_store_key`` documents ``Returns: bool`` and the contract page
+    sells it as the supported way to check a composed name *without catching an
+    exception*. Before this plan a non-``str`` escaped as a bare
+    :exc:`TypeError` out of the control-character scan — so the one published
+    call shape the predicate exists for could crash a downstream's per-tile
+    pre-check, and neither ``except StoreKeyError`` nor ``except ValueError``
+    caught it.
+
+    The ``Path`` case is the one that bites in practice: a consumer pre-checking
+    a path-typed identifier got a crash for exactly the escape shape this phase
+    is about.
+    """
+    # The annotation says ``str``; passing something else is the whole point of
+    # this test, because the real downstream case is a caller who ignored it
+    # (a ``Path``-typed identifier fed straight into the pre-check). The cast
+    # keeps ``mypy --strict`` honest about the deviation instead of widening the
+    # published annotation, which is surface and did not change.
+    assert is_valid_store_key(cast(str, value)) is False, (
+        f"is_valid_store_key({value!r}) did not return False; the predicate is not total over its input domain"
+    )
+
+
+@pytest.mark.parametrize("value", NON_STR_KEYS)
+def test_validator_refuses_a_non_str_with_a_message_naming_the_received_type(value: object) -> None:
+    """Plan 14-09 / STORE-01 / WR-02: the raising validator refuses a non-``str`` as ``StoreKeyError``.
+
+    The type of the exception is the assertion that matters: ``store[Path('../victim')] = v``
+    must refuse with the *documented* type — a :exc:`StoreKeyError`, therefore a
+    :class:`ValueError` — rather than an undocumented :exc:`TypeError` that no
+    caller was told to expect.
+
+    The message must name the received type, because the caller's mistake is a
+    type mistake and ``'..'`` versus ``Path('..')`` is otherwise invisible in a
+    log. It carries a ``repr`` of the value for the same reason every other
+    refusal does (D-13).
+    """
+    expected_type_name = type(value).__name__
+    with pytest.raises(StoreKeyError) as excinfo:
+        validate_store_key(cast(str, value), _CACHE_DIR)  # see the cast note above
+    message = str(excinfo.value)
+
+    assert expected_type_name in message, (
+        f"the refusal message does not name the received type {expected_type_name!r}: {message!r}"
+    )
+    assert repr(value) in message, f"the refusal message does not carry repr({value!r}): {message!r}"
+    assert not isinstance(excinfo.value, StoreContainmentError), (
+        "a non-str key reported as a containment failure; it is a key-shape refusal, not environment evidence"
     )
