@@ -1920,6 +1920,135 @@ def test_rescan_and_the_published_snippet_derive_the_same_key_for_every_seeded_f
     assert nested.exists(), "the rescan reached into a subdirectory and disturbed it"
 
 
+#: The artefact suffix ``_SuffixSubStore`` repoints to. Deliberately *ends* in
+#: the base suffix so the seeding is genuinely ambiguous to a careless glob: a
+#: rebuild that hardcoded the module constant produces ``<key>.npy``, not
+#: ``<key>.sub.npy``, for every one of these files.
+SUBCLASS_NPY_SUFFIX = f".sub{paths_mod.NPY_SUFFIX}"
+
+
+class _SuffixSubStore(DiskBackedStore[DiskBackedNDArray]):
+    """A ``DiskBackedStore`` repointing only the artefact-suffix attribute.
+
+    **This subclass is the only shape that can detect the D-26 defect at all,
+    which is why it exists rather than being folded into an existing fixture.**
+    For the base class the rescan's derivation vocabulary and its rebuild
+    vocabulary are the *same object* — ``_DBNDArrayFileExt`` **is**
+    ``paths.NPY_SUFFIX`` — so the round-trip check is a tautology and passes
+    however the rebuild is written. Nothing in this repository's suite could
+    therefore see that the two had drifted apart.
+
+    Repointing the suffix is not an exotic thing to do: the class publishes
+    these three attributes as an override point in its own words (*"they survive
+    as class attributes because pc2img subclasses read them off ``self``"*). A
+    subclass that takes the class at its word used to adopt **nothing** from a
+    directory of its own artefacts — an empty store plus one warning per file,
+    which is the "data loss disguised as success" shape the D-09/D-10 policy
+    split was written against.
+    """
+
+    _DBNDArrayFileExt = SUBCLASS_NPY_SUFFIX
+
+
+def test_route_rescan_adopts_a_subclass_that_repoints_the_artefact_suffix(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plan 14-14 / WR-02 / D-26 / T-14-59.
+
+    The rescan globs and derives with ``self._DBNDArrayFileExt`` and used to
+    rebuild with the *module-level* builder, which hardcodes the module suffix.
+    For the base class those are one object, so the guard proved nothing; for a
+    subclass that repoints the attribute they disagree for **every** file, so the
+    round-trip rejected all of them. Reproduced before the fix: two seeded
+    artefacts, ``keys() == []``, two warnings.
+
+    **The negative controls carry as much weight as the positive one.** A rescan
+    that adopted everything indiscriminately would satisfy "both subclass
+    artefacts were adopted" on its own, so this test also pins that the
+    base-suffix artefact is *not* adopted (the subclass globs its own suffix and
+    never sees it) and that an artefact whose derived key the widened rule
+    refuses is still skipped with a warning — D-26 changes which builder the
+    guard calls, not whether the guard exists.
+
+    The base-class positive control lives in the same function on purpose: a
+    "fix" that repaired the subclass by breaking the base class would otherwise
+    surface only as an aggregate suite-count change, which is not a diagnosis.
+    """
+    subclass_dir = tmp_path / "subclass-cache"
+    subclass_dir.mkdir()
+    planted = {
+        "adopted-alpha": subclass_dir / f"alpha{SUBCLASS_NPY_SUFFIX}",
+        "adopted-beta": subclass_dir / f"beta{SUBCLASS_NPY_SUFFIX}",
+        # Carries the BASE suffix: invisible to the subclass's own glob.
+        "base-suffix": subclass_dir / f"plain{paths_mod.NPY_SUFFIX}",
+        # Carries the subclass suffix but derives a key the widened device
+        # denylist refuses (D-23, Plan 14-13) — warn and skip still applies.
+        "refused": subclass_dir / f"CON{SUBCLASS_NPY_SUFFIX}",
+    }
+    for artefact in planted.values():
+        artefact.write_bytes(b"not-a-real-npy")
+
+    cfg = LazyDiskCacheConfig(
+        enable_caching=True,
+        cache_path=subclass_dir,
+        purge_disk_on_gc=False,
+        automatic_offloading=False,
+    )
+    with caplog.at_level("WARNING"):
+        subclass_store = _SuffixSubStore(config=cfg, factory=DiskBackedNDArray)
+
+    assert sorted(subclass_store.keys()) == ["alpha", "beta"], (
+        f"the subclass adopted {subclass_store.keys()!r}; a subclass using the class's own "
+        "published extension point must adopt its own artefacts, and adopting none of them is an "
+        "empty store reported as success"
+    )
+    assert "plain" not in subclass_store.keys(), (
+        "the subclass adopted an artefact carrying the BASE suffix, which its own glob never sees"
+    )
+    assert "CON" not in subclass_store.keys(), "the rescan adopted a key the lexical rule refuses"
+
+    messages = _warning_messages(caplog)
+    assert len(messages) == 1, f"expected exactly one WARNING, for the refused artefact only; got {messages!r}"
+    assert repr(planted["refused"].name) in messages[0], (
+        f"the single WARNING does not name the refused artefact: {messages[0]!r}"
+    )
+    for label, artefact in planted.items():
+        assert artefact.exists(), f"the rescan deleted the {label} artefact instead of skipping it"
+
+    # The base-class positive control, in its own directory so the two suffix
+    # vocabularies cannot overlap through the glob.
+    caplog.clear()
+    base_dir = tmp_path / "base-cache"
+    base_dir.mkdir()
+    (base_dir / f"ordinary{paths_mod.NPY_SUFFIX}").write_bytes(b"not-a-real-npy")
+    with caplog.at_level("WARNING"):
+        base_store = _store_with_cache_path(base_dir)
+
+    assert base_store.keys() == ["ordinary"], (
+        f"the base class adopted {base_store.keys()!r}; the subclass fix broke the base class"
+    )
+    assert _warning_messages(caplog) == [], "the base class now warns about an artefact it used to adopt"
+
+
+def test_route_rescan_still_refuses_the_phantom_empty_key(tmp_cache_dir: Path) -> None:
+    """Plan 14-14 / D-22 restated under D-26 / T-14-39.
+
+    D-26 changes which builder the round-trip guard calls, so the property D-22
+    bought is re-asserted directly rather than inferred from the guard still
+    being present: the pre-fix artefact of the empty key — a file whose *whole*
+    name is the array suffix — is adopted under neither the phantom key
+    ``'.npy'`` (what ``Path.stem`` returns for it) nor the empty string (what the
+    derivation returns).
+    """
+    (tmp_cache_dir / EMPTY_KEY_ARTEFACT_NAME).write_bytes(b"not-a-real-npy")
+
+    store = _store_with_cache_path(tmp_cache_dir)
+
+    assert store.keys() == [], f"the rescan adopted {store.keys()!r} for the empty-key artefact"
+    assert paths_mod.NPY_SUFFIX not in store.keys(), "the phantom key came back"
+    assert "" not in store.keys(), "the empty key was adopted despite not round-tripping"
+
+
 # ---------------------------------------------------------------------------
 # route_setstate (Plan 14-10 / WR-06 / D-21 / T-14-37)
 #
