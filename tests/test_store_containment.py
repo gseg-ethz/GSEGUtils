@@ -1637,3 +1637,116 @@ def test_rescan_and_the_published_snippet_derive_the_same_key_for_every_seeded_f
     assert not is_valid_store_key(nested_key), "the nested key is no longer refused, so the snippet reports nothing"
     assert nested_key not in adopted, "the non-recursive rescan somehow adopted a nested artefact"
     assert nested.exists(), "the rescan reached into a subdirectory and disturbed it"
+
+
+# ---------------------------------------------------------------------------
+# route_setstate (Plan 14-10 / WR-06 / D-21 / T-14-37)
+#
+# The containment base crosses the pickle boundary too, and it was the one
+# thing crossing it unchecked.
+# ---------------------------------------------------------------------------
+
+
+def test_route_setstate_refuses_a_non_path_cache_dir_before_updating_the_instance(
+    make_store: MakeStoreFn, tmp_cache_dir: Path, tmp_path: Path
+) -> None:
+    """Plan 14-10 / WR-06 / D-21 / T-14-37.
+
+    D-10 argues at length that unpickling is a trust boundary and that this
+    module already treats it as one — then validated every incoming *key*
+    against a containment base it installed **verbatim from the same untrusted
+    state**. ``_cache_dir`` is the authorization boundary every builder resolves
+    against, so key validation against an attacker-chosen base does not
+    constrain where bytes land: every key passes, and every path lands wherever
+    the base points.
+
+    **The refusal must precede ``__dict__.update``, and the "left unmodified"
+    half is what proves it did.** Asserting only that the call raised would be
+    satisfied by a guard placed after the update, which is the silently-short —
+    here silently-*redirected* — store D-10 exists to prevent. It is also why
+    the guard sits before the per-key loop rather than after it: the refusal
+    message for a bad key interpolates the incoming base, so a malformed base
+    would otherwise be rendered into a message before anything noticed it was
+    malformed.
+
+    The two legal shapes are asserted in the same function so the guard cannot
+    be over-tight. A store with no configured cache path is a supported
+    configuration, and a guard that broke it would be a regression rather than a
+    fix — which is exactly the failure mode a raise-only test would miss.
+
+    **Scope, recorded so it is not re-litigated.** No ``expected_cache_dir``
+    parameter is added. The review offered one; the user declined the extra
+    public surface, and that refusal is part of D-21 rather than an omission.
+    """
+    donor = make_store(tmp_cache_dir)
+    victim = make_store(tmp_cache_dir)
+
+    hostile: dict[str, Any] = dict(donor.__dict__)
+    hostile["_cache_dir"] = str(tmp_path / "elsewhere")
+    hostile["_store"] = {"legal_key": None}
+
+    before = dict(victim.__dict__)
+    with pytest.raises(StoreKeyError, match="cache directory"):
+        victim.__setstate__(hostile)
+
+    assert dict(victim.__dict__) == before, (
+        "__setstate__ updated the instance before refusing the base — a partially restored store "
+        "is the failure this guard exists to prevent"
+    )
+    assert isinstance(victim.cache_dir, Path), "a non-Path containment base was installed"
+    assert "legal_key" not in victim.store, "the hostile state's keys were installed anyway"
+
+    # ... and neither legal shape is refused.
+    absent_base: dict[str, Any] = dict(donor.__dict__)
+    del absent_base["_cache_dir"]
+    absent_base["_store"] = {}
+    make_store(tmp_cache_dir).__setstate__(absent_base)
+
+    explicit_none: dict[str, Any] = dict(donor.__dict__)
+    explicit_none["_cache_dir"] = None
+    explicit_none["_store"] = {}
+    make_store(tmp_cache_dir).__setstate__(explicit_none)
+
+
+@pytest.mark.parametrize("enable_caching", [True, False], ids=["caching-on", "caching-off"])
+def test_route_setstate_ordinary_round_trips_still_work_under_every_configuration(
+    make_store: MakeStoreFn, tmp_cache_dir: Path, tmp_path: Path, enable_caching: bool
+) -> None:
+    """Plan 14-10 / D-21 — the over-tightness control.
+
+    A type guard on a deserialization route is one line away from breaking every
+    legitimate unpickle, and the two caching configurations take *different*
+    paths through ``__setstate__`` (only the caching-on branch runs the reload
+    loop). The no-cache-path store is the third shape: it never carried a
+    configured cache directory at all, so it is the configuration a guard
+    written as "the base must be present and be a ``Path``" would break.
+    """
+    expected = _small_array()
+    store = make_store(tmp_cache_dir, enable_caching=enable_caching)
+    store.add_data_to_store("k0", expected)
+
+    revived: DiskBackedStore[DiskBackedNDArray] = pickle.loads(pickle.dumps(store))
+    assert "k0" in revived.keys(), "an ordinary round-trip lost its entry"
+    assert isinstance(revived.cache_dir, Path)
+
+    fallback_store = _store_with_cache_path(None, fallback_root=tmp_path)
+    fallback_store["legal_key"] = _entry()
+    revived_fallback: DiskBackedStore[DiskBackedNDArray] = pickle.loads(pickle.dumps(fallback_store))
+    assert "legal_key" in revived_fallback.keys(), "a store built without a configured cache path no longer round-trips"
+
+
+def test_route_setstate_adds_no_expected_cache_dir_surface() -> None:
+    """Plan 14-10 / D-21 — the refusal, pinned so it is not silently reversed.
+
+    The review proposed an opt-in ``expected_cache_dir`` check alongside the type
+    guard. It was considered and declined: the user did not want the extra public
+    surface, and a published parameter in a package on production PyPI cannot be
+    withdrawn without a break. Recorded as a test rather than only as prose,
+    because a later reader meeting the guard without the context will read the
+    absence as an oversight and helpfully add it.
+    """
+    import inspect
+
+    source = Path(paths_mod.__file__).parent.joinpath("disk_backed_store.py").read_text(encoding="utf-8")
+    assert "expected_cache_dir" not in source, "the declined expected_cache_dir surface reappeared in the store"
+    assert "expected_cache_dir" not in inspect.signature(DiskBackedStore.__setstate__).parameters
