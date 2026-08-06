@@ -20,7 +20,14 @@ Route                 Policy                                         Basis
 ``get``               return the default                            D-11a
 ``__init__`` rescan   warn and skip, leaving the file untouched      D-09
 ``__setstate__``      raise, never a silently short store            D-10
+``store`` property    not a write route at all — a read-only view    D-19
 ===================== ============================================== ======
+
+The last row is the odd one out on purpose, and the difference is the decision:
+the other six routes *validate* a write, while the ``store`` property has no
+write to validate. Plan 14-08 closed it structurally rather than adding a
+seventh validation site, so SC-1's "every route" is an invariant rather than an
+enumeration of the routes someone remembered.
 """
 
 import os
@@ -28,6 +35,7 @@ import pickle
 import re
 import textwrap
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Callable, Optional, cast
 
 import numpy as np
@@ -304,9 +312,17 @@ def test_route_setstate_raises_rather_than_returning_a_short_store(
     """Plan 14-03 / STORE-01 / D-10.
 
     Unpickling is a trust boundary, and a post-fix pickle cannot legitimately
-    carry an illegal key: ``__getstate__`` snapshots a ``_store`` the parent
-    already validated, so an illegal key arriving here means a legacy or a
+    carry an illegal key — so an illegal key arriving here means a legacy or a
     tampered pickle.
+
+    ↻ CORRECTED by Plan 14-08 (CR-02). This docstring used to locate that
+    guarantee in ``__getstate__``, claiming it "snapshots a ``_store`` the
+    parent already validated". It does not: it offloads when caching is enabled
+    and then copies ``__dict__`` verbatim, validating nothing. The guarantee
+    lives in the *write* routes — the five rows above — plus D-19's read-only
+    ``store`` view, which together are why an illegal key cannot enter
+    ``_store`` after construction. Same false premise as the one corrected in
+    ``__setstate__``'s own Notes block; do not restore either.
 
     The negative half is the point. Warning-and-skipping instead — the policy
     the ``__init__`` rescan deliberately uses — would hand back a store
@@ -1207,3 +1223,94 @@ def test_builder_containment_a_str_subclass_defeats_the_lexical_layer_and_is_cau
         assert paths_mod.CLAUSE_ESCAPES in message, (
             f"{builder_name} refused, but not with the containment clause: {message!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# route_store_property — the public accessor is a read-only view, not a write
+# route (Plan 14-08 / CR-02 / V-1 / SC-1 / D-19 / T-14-26)
+# ---------------------------------------------------------------------------
+
+#: One illegal key per clause of the lexical rule, so the route is exercised
+#: across the whole refusal vocabulary rather than at the single canonical key.
+ILLEGAL_SHAPES = (ILLEGAL_KEY, "..", "", "a/b", "/etc/passwd", "x\n")
+
+
+def test_route_store_property_is_a_read_only_view_not_a_write_route(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-08 / CR-02 / SC-1 / D-19 / T-14-26.
+
+    Before D-19 this property returned ``self._store`` **by reference**, so
+    ``store.store['../victim'] = entry`` installed an illegal key with no
+    validation and ``keys()`` reported it — a write route into ``_store`` that
+    nothing guarded, falsifying SC-1's *every route* quantifier.
+
+    **The legal-key assertion is the one that carries the decision.** A legal
+    key fails to install too, which is what proves the closure is *structural*
+    rather than a fifth validation site: there is no write to validate, so
+    there is no site to forget. Had this been closed by validation, the legal
+    key would have gone in and SC-1 would still have been an enumeration of the
+    routes someone remembered.
+
+    **Why two different exception types, deliberately.** ``mappingproxy``
+    refuses the two *syntactic* mutations through type slots that raise
+    :exc:`TypeError`, and refuses the *method* mutations by simply not having
+    them, which raises :exc:`AttributeError`. Both are refusals and neither
+    mutates, so this test asserts the type each operation actually produces.
+    Do not "tidy" this into a uniform ``TypeError`` — measured on CPython
+    3.12, ``proxy.update(...)`` raises ``AttributeError: 'mappingproxy' object
+    has no attribute 'update'``, and a uniform assertion goes red.
+
+    The identity assertion matters independently: a view that *was* the
+    internal dict would satisfy every read assertion here while leaving the
+    write route wide open.
+    """
+    store = make_store(tmp_cache_dir)
+    store["legal_key"] = _entry()
+    baseline = store.keys()
+    assert baseline == ["legal_key"]
+
+    view = store.store
+    assert view is not store._store, (
+        "the property handed out the internal mapping itself; the write route CR-02 reported is "
+        "still open regardless of what the annotation says"
+    )
+    assert isinstance(view, MappingProxyType), f"expected a read-only proxy, got {type(view).__name__}"
+
+    # ``cast`` only defeats the *static* check so the runtime behaviour can be
+    # exercised. The static half is a real part of the guarantee and is enforced
+    # by mypy over this very file: without the cast, mypy rejects the assignment
+    # as an unsupported target, which is how a downstream caller meets D-19.
+    mutable = cast(Any, view)
+
+    # Every illegal shape fails to install ...
+    for illegal in ILLEGAL_SHAPES:
+        with pytest.raises(TypeError):
+            mutable[illegal] = _entry()
+        assert store.keys() == baseline, f"a refused write of {illegal!r} still changed the store"
+
+    # ... and so does a perfectly legal one, which is the structural proof.
+    with pytest.raises(TypeError):
+        mutable["another_legal_key"] = _entry()
+    assert store.keys() == baseline, "a legal key installed through the read-only view"
+
+    # The remaining mutating operations, each with the type it actually raises.
+    with pytest.raises(TypeError):
+        del mutable["legal_key"]
+    for label, operation in (
+        ("update", lambda: mutable.update({"another_legal_key": None})),
+        ("pop", lambda: mutable.pop("legal_key")),
+        ("clear", lambda: mutable.clear()),
+        ("setdefault", lambda: mutable.setdefault("another_legal_key", None)),
+    ):
+        with pytest.raises(AttributeError):
+            operation()
+        assert store.keys() == baseline, f"the refused {label} still changed the store"
+
+    # The accessor is narrowed, not removed: every read still works.
+    assert "legal_key" in view
+    assert ILLEGAL_KEY not in view
+    assert len(view) == 1
+    assert list(view) == ["legal_key"]
+    assert view["legal_key"] is store._store["legal_key"]
+    assert dict(view) == dict(store._store)

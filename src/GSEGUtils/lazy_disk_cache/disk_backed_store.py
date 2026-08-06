@@ -31,10 +31,12 @@ import os
 import tempfile
 import warnings
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     Any,
     Callable,
     Iterator,
+    Mapping,
     MutableMapping,
     Optional,
     Protocol,
@@ -596,9 +598,61 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         self._store[key] = self._check_T(new_container)
 
     @property
-    def store(self) -> dict[str, Optional[T]]:
-        """Return the internal mapping of keys to in-memory entries (``None`` if offloaded)."""
-        return self._store
+    def store(self) -> Mapping[str, Optional[T]]:
+        """Return a **read-only view** of the mapping of keys to in-memory entries.
+
+        The value is ``None`` where an entry is currently offloaded to disk.
+
+        Mutating the returned mapping raises :exc:`TypeError` — assignment,
+        ``del``, ``update``, ``pop``, ``clear`` and ``setdefault`` all refuse.
+        Reads are unaffected: membership, iteration, ``len`` and subscript-read
+        behave exactly as they did. The accessor is *narrowed*, not removed.
+
+        Notes
+        -----
+        D-19 — **the route is closed structurally rather than validated.**
+        Before this, the property handed out ``self._store`` itself, so
+        ``store.store['../victim'] = entry`` installed an illegal key with no
+        validation and ``keys()`` duly reported it. STORE-01's claim is written
+        over *every* route that writes into the internal mapping — "including
+        the routes that bypass the public insertion API" — so adding a fifth
+        validation site here would have left that claim an **enumeration** of
+        the routes someone remembered, rather than an **invariant**. A
+        read-only view removes the route instead of guarding it: there is no
+        write to validate, so there is no site to forget.
+
+        *Measured basis, not assumed.* Across ``30_GSEGUtils``,
+        ``41_pchandler``, ``pc2img`` and ``iof3D`` there are **zero
+        write-through sites** for this property; every measured usage is a
+        read.
+
+        This is deliberately the **same evidence principle as D-01's sealed
+        ``cache_path`` setter**, and the pair should be read as one policy
+        rather than two unrelated removals: in both cases a public mutation
+        route was withdrawn outright, with no deprecation cycle, *because the
+        measurement said nobody was using it that way*. Where the evidence says
+        the opposite it is honoured the other way — D-15 gives the promoted
+        path builders a full deprecation cycle precisely because they have
+        measured live callers.
+
+        *The one known downstream cost*, named here so the next reader meets it
+        beside the change: pc2img's legacy alias property ``image_data``
+        (``disk_backed_image_store.py``) simply returns ``self.store`` but is
+        annotated ``-> dict[str, DiskBackedImageData | None]``. That annotation
+        becomes wrong under a :class:`~types.MappingProxyType` return and turns
+        pc2img's strict mypy red until it widens to
+        :class:`~collections.abc.Mapping`. It is a one-line fix downstream, and
+        it is a breaking change to a published API — carried in the migration
+        note as **BC-GSEG-007**.
+
+        Returns
+        -------
+        Mapping[str, Optional[T]]
+            A read-only proxy over the internal mapping. It is a *view*, not a
+            copy: entries offloaded or loaded after this call are visible
+            through it.
+        """
+        return MappingProxyType(self._store)
 
     @property
     def cache_dir(self) -> Path:
@@ -799,9 +853,24 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         treats it as one: :func:`_resolve_lazy_disk_cache_class` resolves
         sidecar class names through an explicit allow-list with no
         ``importlib`` fallback for exactly this reason. A *post-fix* pickle
-        cannot legitimately carry an illegal key, because :meth:`__getstate__`
-        snapshots a ``_store`` whose keys the parent process already validated
-        — so an illegal key arriving here means a legacy or a tampered pickle.
+        cannot legitimately carry an illegal key — so an illegal key arriving
+        here means a legacy or a tampered pickle.
+
+        **Where that guarantee actually comes from, stated precisely because an
+        earlier version of this note got it wrong.** It does *not* come from
+        :meth:`__getstate__`: that method offloads when caching is enabled and
+        then copies the instance dictionary verbatim
+        (``state = self.__dict__.copy()``), validating **no keys of any kind**.
+        Reading it as a validating snapshot was a false premise, and
+        verification falsified it. The guarantee comes instead from the write
+        routes plus the read-only view: every route that installs a key into
+        ``_store`` validates it — :meth:`__setitem__`, :meth:`add_data_to_store`
+        and this method — the ``__init__`` rescan refuses to track one (D-09),
+        and after D-19 the mapping is no longer handed out mutably through the
+        public :attr:`store` accessor. So an illegal key cannot enter ``_store``
+        after construction, and therefore cannot be in a snapshot this codebase
+        produced. The conclusion below is unchanged; only its stated reason was
+        wrong.
 
         This is DELIBERATELY the opposite of the ``__init__`` rescan's policy
         (D-09, which warns and skips). Warning-and-skipping here would return a
