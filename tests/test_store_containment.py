@@ -1581,6 +1581,75 @@ def test_route_rescan_opens_a_directory_holding_every_refused_shape_without_rais
     )
 
 
+#: The forged record a planted name embeds. It is shaped like a real log line
+#: on purpose: the failure mode CR-01 reproduced is not a garbled message but a
+#: *well-formed* second record asserting the opposite of what happened.
+FORGED_RECORD = "\nWARNING:all clear, 0 files skipped\n"
+
+
+@pytest.mark.parametrize(
+    "newline_planted_in",
+    ["filename", "cache-directory"],
+    ids=["newline-in-filename", "newline-in-cache-directory"],
+)
+def test_route_rescan_warning_escapes_a_newline_bearing_filename(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, newline_planted_in: str
+) -> None:
+    r"""Plan 14-12 / CR-01 / D-13 under D-09 / T-14-49 / T-14-52.
+
+    **The rescan sibling of**
+    ``test_message_contains_no_newline_for_a_newline_bearing_key``
+    (``test_store_key_rules.py``), and it lives here rather than beside its twin
+    because its subject is a *route*, not the rule: it needs a real
+    :class:`DiskBackedStore`, a real cache directory and a real file planted in
+    it, which is what the route-policy matrix in this module is for.
+
+    This message is the **only** one in the subsystem whose input is genuinely
+    untrusted — the rescan reads names off disk, written by whoever can write
+    into the cache directory, and newlines are legal in POSIX filenames. Under
+    D-09's warn-and-skip policy the log is the reader's *only* signal, which is
+    what makes forging it worse here than anywhere else: the reproduction
+    planted a filename that made one ``logger.warning`` call emit three lines,
+    the second of which read ``WARNING:all clear, 0 files skipped`` while a file
+    was in fact being skipped.
+
+    **Two seedings, because the message interpolates two components.** One
+    plants the newline in the *file* name, the other in the *cache directory*
+    name — a directory whose own name embeds a newline, holding an
+    ordinarily-refused artefact so the warning fires at all. Reverting either
+    format specifier must turn this test red; a single seeding would leave one
+    of them a change nothing would notice reverting.
+
+    Asserted on ``record.getMessage()`` — the *rendered* result of the lazy
+    ``%``-interpolation — rather than on ``record.msg``: the latter is the
+    format string, which is identical with and without the defect.
+    """
+    if newline_planted_in == "filename":
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        planted = cache_dir / f"evil{FORGED_RECORD}.{paths_mod.NPY_SUFFIX}"
+    else:
+        cache_dir = tmp_path / f"cache{FORGED_RECORD}dir"
+        cache_dir.mkdir()
+        planted = cache_dir / EMPTY_KEY_ARTEFACT_NAME
+    planted.write_bytes(b"not-a-real-npy")
+
+    with caplog.at_level("WARNING"):
+        store = _store_with_cache_path(cache_dir)
+
+    assert store.keys() == [], f"the rescan adopted {store.keys()!r} for a refused artefact"
+    assert planted.exists(), "the rescan deleted a file it should only skip"
+
+    messages = _warning_messages(caplog)
+    assert len(messages) == 1, f"expected exactly one WARNING for the single planted file, got {messages!r}"
+    for message in messages:
+        assert "\n" not in message, f"a planted newline split the record across lines: {message!r}"
+    assert "\\n" in messages[0], (
+        f"the newline was not rendered in its escaped two-character form, so the escaping is a "
+        f"strip rather than repr: {messages[0]!r}"
+    )
+
+
 def test_rescan_and_the_published_snippet_derive_the_same_key_for_every_seeded_file(
     tmp_cache_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
