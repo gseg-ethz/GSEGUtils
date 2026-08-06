@@ -351,6 +351,38 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         the read route's error shape differ from every write route's, which is
         the inconsistency D-11 exists to remove.
 
+        **The containment carve-out (WR-03), which is why the handler is
+        ordered rather than a single tuple.** D-12 makes
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreContainmentError` a *subclass* of
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, so the tuple above
+        caught it too — and swallowing it is exactly what the published
+        contract page tells consumers not to do:
+
+            *"A per-item handler that skips one bad key should not silently
+            swallow the second kind, so catch the base type only where you mean
+            'this key was bad'."*
+
+        This method **is** such a handler, and it is the library's own. A
+        refused key is evidence about *the caller's key*; a containment
+        violation is evidence about *the environment* — something planted a
+        symlink in the cache directory — and degrading that into a ``None``
+        turns an attack signal into an ordinary cache miss inside the caller's
+        loop. So the subclass is caught and re-raised **before** the broader
+        tuple. The order is the entire mechanism: a subclass caught after its
+        base is never reached, and inverting these two clauses silently
+        restores the swallow.
+
+        *Reachability, stated honestly rather than implied.* For a plain
+        :class:`str` key this carve-out cannot fire from here: once the lexical
+        layer has accepted the key it carries no separator, so the built path's
+        parent is lexically the cache directory and
+        :func:`~GSEGUtils.lazy_disk_cache.paths._assert_contained` is
+        unconditionally satisfied. It fires for a :class:`str` **subclass**
+        whose ``__str__`` disagrees with its characters, and it would fire on
+        any future lexical-layer regression — which is precisely when the
+        signal is most wanted, and precisely when a swallowed one would be
+        least recoverable.
+
         Parameters
         ----------
         key : str
@@ -363,9 +395,20 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         -------
         T or default
             The entry, or ``default``.
+
+        Raises
+        ------
+        StoreContainmentError
+            If the path built for ``key`` would resolve outside the cache
+            directory. Deliberately **not** converted into ``default`` (WR-03).
         """
         try:
             return self[key]
+        except paths.StoreContainmentError:
+            # Environment evidence, not a bad key — never swallowed by a read.
+            # Must stay ABOVE the tuple below: it is a subclass of one of its
+            # members, so a handler ordered the other way never reaches here.
+            raise
         except (KeyError, paths.StoreKeyError):
             return default
 
