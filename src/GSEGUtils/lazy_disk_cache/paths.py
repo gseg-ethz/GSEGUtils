@@ -83,24 +83,106 @@ _RESERVED_KEYS: Final[frozenset[str]] = frozenset({"", ".", ".."})
 _SEPARATORS: Final[tuple[str, str]] = ("/", "\\")
 _DEL_CHAR: Final[str] = "\x7f"
 
-#: The reserved Win32 device names (D-20), held in a single case and compared
-#: against the upper-cased **pre-dot stem** of the key. Held upper-case so the
-#: comparison is one ``.upper()`` on the key rather than a scan of the set.
+#: The reserved Win32 device names (D-20, widened by D-23), held in a single
+#: case and compared against the upper-cased **pre-dot stem** of the key. Held
+#: upper-case so the comparison is one ``.upper()`` on the key rather than a scan
+#: of the set.
 #:
 #: ``.upper()`` is a case operation over the exact characters supplied, not a
 #: fold to ASCII, so it does not breach the no-normalisation rule: a fullwidth
 #: ``ＣＯＮ`` upper-cases to fullwidth ``ＣＯＮ``, stays out of this set, and is
 #: accepted — which is correct, because on Win32 it is an ordinary filename and
 #: not the console device.
+#:
+#: **D-23's additions, and why each is here.** The digit comprehensions run from
+#: ``0`` rather than ``1``, and the superscript forms ``COM¹ COM² COM³`` /
+#: ``LPT¹ LPT² LPT³`` are present, because Microsoft's *Naming Files, Paths, and
+#: Namespaces* reserved list — the list this comment already appeals to —
+#: includes them. ``CONIN$`` and ``CONOUT$`` are on that list as reserved console
+#: names. Round 2 shipped the set without any of them under a residual paragraph
+#: that presented the device axis as closed; a public grammar that overstates its
+#: own coverage is the sanitise-rather-than-reject failure this phase set out to
+#: avoid, one level up.
+#:
+#: The superscript entries are **exact characters, not a case fold**: ``'¹'``
+#: upper-cases to ``'¹'``, so they extend the set without normalising anything,
+#: and any non-ASCII spelling of the same name — fullwidth ``ＣＯＮ``, for
+#: instance — stays outside the set and stays accepted. That is correct rather
+#: than an oversight, because on Win32 such a name is an ordinary filename, and
+#: it is what keeps this widening inside D-05.
 _WIN_DEVICE_NAMES: Final[frozenset[str]] = frozenset(
-    {"CON", "PRN", "AUX", "NUL"} | {f"COM{digit}" for digit in range(1, 10)} | {f"LPT{digit}" for digit in range(1, 10)}
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{digit}" for digit in range(0, 10)}
+    | {f"LPT{digit}" for digit in range(0, 10)}
+    | {f"COM{superscript}" for superscript in "¹²³"}
+    | {f"LPT{superscript}" for superscript in "¹²³"}
 )
+
+#: The characters stripped from the **pre-dot stem** before the reserved-device
+#: membership test (D-23) — ASCII space only. See :func:`_device_stem` for the
+#: conditional that scopes it and for why it is not ``_TRAILING_CHARS``.
+_DEVICE_STEM_STRIP: Final[str] = " "
 
 #: The characters Win32 strips from the end of a filename (D-20). ASCII space
 #: and ASCII full stop **only** — widening this to Unicode whitespace or to the
 #: fullwidth full stop would start folding, and the fullwidth-dots acceptance
 #: test is the standing proof that the rule folds nothing.
 _TRAILING_CHARS: Final[str] = " ."
+
+
+def _device_stem(key: str) -> str:
+    """Return the pre-dot stem of ``key`` used to decide the reserved-device test.
+
+    Everything before the first ``'.'``, right-stripped of
+    :data:`_DEVICE_STEM_STRIP` — **but only when ``key`` actually contains a
+    ``'.'``**. The condition is on the key, not on whether the strip would change
+    anything, because it is a rule rather than an optimisation.
+
+    **Why the strip exists.** Win32 strips trailing spaces from the name
+    component *before* device resolution, so ``'CON .txt'`` resolves to the
+    console while its unstripped stem ``'CON '`` upper-cases outside
+    :data:`_WIN_DEVICE_NAMES` and the key itself ends in ``'t'``. It therefore
+    slipped past both the device test and the trailing test (§ WR-04).
+
+    **Why the strip is conditional, which is the part that looks like an
+    accident and is not.** :data:`_DEVICE_STEM_STRIP` and
+    :data:`_TRAILING_CHARS` look alike and are not alike. The trailing clause
+    (``CLAUSE_TRAILING``) already owns the key's **own** trailing run; this
+    strip exists solely to reach spaces *interior* to the key — the ones
+    sitting between a device stem and its extension. The division is general:
+    **interior spaces are the device clause's business, trailing spaces are the
+    trailing clause's.** An *unconditional* strip lets the device clause reach
+    into the trailing clause's territory and repoints
+    ``'com1 '``, ``'con '`` and ``'nul  '`` from ``CLAUSE_TRAILING`` onto
+    ``CLAUSE_RESERVED`` — a repoint of pre-existing refusals, introduced by the
+    very change (D-23) that D-24 exists to keep from repointing anything. No
+    clause position fixes that; only the conditional does.
+
+    **The residual attribution nuance, recorded rather than left to be
+    rediscovered.** ``'com1 '`` is consequently refused as *"ends in a space or
+    a dot"* even though Win32's reason to collide on it is the device name. It
+    is refused **either way**, so the collision axis stays closed and no key
+    escapes; only the reported clause differs. D-24's stability-of-attribution
+    promise wins that tie, because BC-GSEG-006 publishes the clause strings as a
+    grep target and downstream log-greppers depend on them not moving.
+
+    The returned stem decides **membership and nothing else**. It is never used
+    to build a path: :func:`_build` joins the suffix onto the key exactly as the
+    caller supplied it, so the rule stays decidable over those exact characters
+    (D-05).
+
+    Parameters
+    ----------
+    key : str
+        The candidate store key, exactly as the caller supplied it.
+
+    Returns
+    -------
+    str
+        The stem to test for membership of :data:`_WIN_DEVICE_NAMES`.
+    """
+    stem = key.split(".", 1)[0]
+    return stem.rstrip(_DEVICE_STEM_STRIP) if "." in key else stem
 
 
 def _refuse(key: str, cache_dir: Optional[Path], clause: str) -> NoReturn:
@@ -151,7 +233,10 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     1. ``CLAUSE_RESERVED`` — the key is ``''``, ``'.'`` or ``'..'``, **or** its
        pre-dot stem upper-cases to a reserved Win32 device name (D-20). The stem
        test is what refuses ``con.npy`` and ``COM1.dat`` as well as bare ``CON``:
-       on Win32 a device name is still the device with a suffix attached. It is
+       on Win32 a device name is still the device with a suffix attached. The
+       stem is right-stripped of ASCII spaces **when the key contains a dot**, so
+       ``CON .txt`` is refused too (D-23); see :func:`_device_stem` for why that
+       condition is a rule rather than an optimisation. It is
        reported under this clause rather than a new one because the wording
        already reads as "empty or a reserved path name", which describes a device
        name exactly, and reusing it keeps the published clause vocabulary stable
@@ -221,13 +306,34 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     from the collision direction instead of the traversal direction.
 
     **The residual, stated so it is accepted rather than assumed closed.**
+    ↻ **CORRECTED by Plan 14-13 (D-23, § WR-04).** This paragraph previously
+    named only case-folding and Unicode normalisation, which left the *device*
+    axis reading as closed when it is a fixed list. What the device test actually
+    is, stated precisely:
+
+    * It is a **fixed name list** — :data:`_WIN_DEVICE_NAMES` — matched
+      case-insensitively against the **pre-dot stem** after a trailing-ASCII-space
+      strip (see :func:`_device_stem`). It covers exactly the names enumerated in
+      that set: ``CON``, ``PRN``, ``AUX``, ``NUL``, ``CONIN$``, ``CONOUT$``,
+      ``COM0``–``COM9``, ``LPT0``–``LPT9`` and the superscript ``COM¹²³`` /
+      ``LPT¹²³`` forms.
+    * It does **not** attempt to model every Win32 path-parsing behaviour. Any
+      device-resolving shape outside that list, or reached by a mechanism other
+      than a trailing-space strip on the stem, is not covered.
+    * The mechanism claims behind it — that Win32 resolves these names to
+      character devices, and that it strips trailing spaces before doing so — are
+      **Win32 filesystem behaviour and cannot be confirmed on a Linux host**.
+      What this repository's tests confirm is which keys the shipped rule accepts
+      and refuses.
+
+    Two residuals are unchanged and remain unfixable by *any* lexical rule.
     Case-insensitive NTFS and default APFS collapse ``'Foo'`` and ``'foo'`` onto
     one file, and APFS normalises Unicode so NFC and NFD spellings of one name
-    collide. **Neither is fixable by any lexical rule**, because both are
-    filesystem behaviour rather than key shape — refusing one spelling of a pair
-    would mean choosing a canonical form, which is precisely the normalisation
-    D-05 forbids. A reader told only about the clauses above would assume the
-    collision axis is closed; it is narrowed, not closed.
+    collide. Both are filesystem behaviour rather than key shape — refusing one
+    spelling of a pair would mean choosing a canonical form, which is precisely
+    the normalisation D-05 forbids.
+
+    So the collision axis is **narrowed, not closed**, on all three counts.
 
     The escape argument, unchanged: **the separator is the entire escape
     mechanism, and dots carry no escape risk.**
@@ -320,7 +426,7 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
             "key, and this function will not guess which of its components was meant."
         )
 
-    if key in _RESERVED_KEYS or key.split(".", 1)[0].upper() in _WIN_DEVICE_NAMES:
+    if key in _RESERVED_KEYS or _device_stem(key).upper() in _WIN_DEVICE_NAMES:
         _refuse(key, cache_dir, CLAUSE_RESERVED)
 
     if any(ord(char) < 32 or char == _DEL_CHAR for char in key):

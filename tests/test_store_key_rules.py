@@ -449,6 +449,40 @@ def test_widened_device_list_refuses_every_reserved_name_the_contract_page_claim
     assert not is_valid_store_key(key), f"the predicate accepted the reserved device name {key!r}"
 
 
+@pytest.mark.parametrize(("key", "clause"), DEVICE_STEM_BOUNDARY_KEYS)
+def test_the_device_stem_strip_stays_out_of_the_trailing_clause_s_territory(key: str, clause: str) -> None:
+    """Plan 14-13 / STORE-01 / D-23: the two boundary families keep the clauses they have always reported.
+
+    This is a **control**, and it is deliberately green both before and after
+    D-23's widening: every one of these five keys reported the clause asserted
+    here before the device half existed at all. It exists to make the *conditional*
+    in :func:`~GSEGUtils.lazy_disk_cache.paths._device_stem` load-bearing, which
+    no other test in this file does.
+
+    Make the stem strip **unconditional** — right-strip whether or not the key
+    contains a ``'.'`` — and the first three rows go red: ``'com1 '``, ``'con '``
+    and ``'nul  '`` become device stems and repoint from the trailing clause onto
+    the reserved one. That is a repoint of pre-existing refusals introduced by the
+    very widening D-24 exists to keep from repointing anything, and without this
+    group it happens with nothing going red, because no key of that shape was in
+    :data:`REFUSED_KEYS` before Plan 14-13 put it there.
+
+    The last two rows pull the other way and constrain the *placement* rather than
+    the strip: ``'con.'`` and ``'com1. '`` are device stems that also end in a
+    trailing run, and they must keep reporting the reserved clause. That is what
+    forbids the naive "just put the device test last" reading of D-24.
+    """
+    with pytest.raises(StoreKeyError, match=re.escape(clause)) as excinfo:
+        validate_store_key(key, _CACHE_DIR)
+    assert not is_valid_store_key(key), f"the predicate accepted the boundary-family key {key!r}"
+
+    other = CLAUSE_RESERVED if clause == CLAUSE_TRAILING else CLAUSE_TRAILING
+    assert other not in str(excinfo.value), (
+        f"{key!r} is now reported under {other!r} as well as {clause!r}; the device clause and the "
+        "trailing clause have stopped dividing the space cleanly"
+    )
+
+
 def test_a_device_name_in_a_fullwidth_spelling_is_still_accepted() -> None:
     """Plan 14-13 / STORE-01 / D-23 / D-05: the device widening folds nothing.
 
