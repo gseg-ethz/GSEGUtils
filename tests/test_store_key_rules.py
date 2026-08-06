@@ -1075,8 +1075,14 @@ _PAGE_MARKER = re.compile(r"^\.\.\s+CONTRACT-PAGE-KEYS:\s*(?P<group>[A-Z0-9-]+)\
 #: passes every assertion it makes — zero of them — and reports success. Round 2's
 #: own standard, that a test which cannot fail is not evidence, applies to the
 #: parser and not only to the rule.
+#:
+#: Both values are the counts measured on the shipped page, not a slack margin.
+#: The refused floor is deliberately tight enough that *each* marked group is
+#: load-bearing: the collision table contributes exactly one literal the refusal
+#: table does not carry (``"com1.dat"``), so losing that marker alone drops the
+#: count below the floor rather than passing unnoticed.
 _MIN_LEGAL_PAGE_LITERALS: int = 6
-_MIN_REFUSED_PAGE_LITERALS: int = 29
+_MIN_REFUSED_PAGE_LITERALS: int = 30
 
 #: The shapes D-23 added to the device set. The page presented a strict subset of
 #: the refused device names before Plan 14-15; ``CON .txt`` is the one a reader is

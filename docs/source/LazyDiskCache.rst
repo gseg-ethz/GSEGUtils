@@ -29,6 +29,13 @@ All of these are legal, and all of them round-trip through the on-disk name
 exactly — with one filesystem-level caveat noted under *Where the exact
 round-trip stops* below:
 
+.. CONTRACT-PAGE-KEYS: LEGAL-CODE-BLOCK
+   The first whitespace-delimited token of every line in the block below is
+   asserted to be *accepted* by the shipped rule, in
+   ``tests/test_store_key_rules.py::test_contract_page_key_literals_agree_with_the_shipped_rule``.
+   Keep one key per line with its commentary after it, and keep this marker
+   directly above the directive.
+
 .. code-block:: text
 
    rrim_pack_(range,r16,d8,z1e-05)     parentheses, commas, hyphens, underscores
@@ -49,7 +56,19 @@ What is refused
 
 Clauses are evaluated in a fixed order, so a key violating several always reports
 the same one. The clause wording below is the wording the exception message
-carries, so you can grep your logs for it:
+carries, so you can grep your logs for it. **The table is in evaluation order**,
+and one clause string is produced at *two* of those positions — the reserved-name
+clause covers the exact strings ``''``/``'.'``/``'..'`` first and the Win32 device
+names fifth. That is deliberate rather than untidy: the device test was added
+after the others, and putting it last-but-one is what keeps every key that was
+already refused for another reason reporting the clause it always reported.
+
+.. CONTRACT-PAGE-KEYS: REFUSED-TABLE-COLUMN-3
+   Every double-quoted literal in the *Examples* column below is asserted to be
+   refused by the shipped rule, in
+   ``tests/test_store_key_rules.py::test_contract_page_key_literals_agree_with_the_shipped_rule``.
+   Keep key literals double-quoted and on one line, and keep this marker directly
+   above the directive, or that test stops seeing this table and fails on its floor.
 
 .. list-table::
    :header-rows: 1
@@ -58,11 +77,9 @@ carries, so you can grep your logs for it:
    * - Clause (as it appears in the message)
      - Refuses
      - Examples
-   * - ``is empty or a reserved path name``
-     - the exact strings ``''``, ``'.'`` and ``'..'``, **and** any key whose
-       pre-dot stem is a Win32 device name, matched case-insensitively
-     - ``""``, ``"."``, ``".."``, ``"CON"``, ``"nul"``, ``"con.npy"``,
-       ``"COM1.dat"``
+   * - ``is empty or a reserved path name`` — first position
+     - the exact strings ``''``, ``'.'`` and ``'..'``
+     - ``""``, ``"."``, ``".."``
    * - ``contains a control character``
      - any character below ``\x20``, and ``\x7f``
      - ``"x\ny"``, ``"x\x00y"``
@@ -74,6 +91,16 @@ carries, so you can grep your logs for it:
      - ``/`` or ``\`` anywhere, including a *trailing* separator, and anything
        ``pathlib`` reads as multi-segment under either flavour
      - ``"../victim"``, ``"tile_03/range"``, ``"a/"``, ``"..\\..\\x"``
+   * - ``is empty or a reserved path name`` — **same clause string, evaluated
+       here**
+     - any key whose pre-dot stem is a Win32 device name, matched
+       case-insensitively, after a trailing-ASCII-space strip. The names are
+       ``CON``, ``PRN``, ``AUX``, ``NUL``, ``CONIN$``, ``CONOUT$``,
+       ``COM0``–``COM9``, ``LPT0``–``LPT9`` and the superscript ``COM¹²³`` /
+       ``LPT¹²³`` forms
+     - ``"CON"``, ``"nul"``, ``"con.npy"``, ``"COM1.dat"``, ``"COM0"``,
+       ``"LPT0"``, ``"CONIN$"``, ``"CONOUT$"``, ``"com¹"``, ``"lpt³"``,
+       ``"CON .txt"``
    * - ``ends in a space or a dot``
      - a trailing run of ASCII spaces or ASCII dots. Evaluated **last**, so a
        key violating an earlier clause still reports that earlier clause
@@ -153,6 +180,13 @@ the cache directory. The three clauses below are about something else entirely:
 separately because a reader who has absorbed the escape argument will otherwise
 read them as arbitrary — none of them escapes anything.
 
+.. CONTRACT-PAGE-KEYS: REFUSED-TABLE-COLUMN-1
+   Every double-quoted literal in the *Refused* column below is asserted to be
+   refused by the shipped rule, in
+   ``tests/test_store_key_rules.py::test_contract_page_key_literals_agree_with_the_shipped_rule``.
+   Only the first column is read, which is why the second may freely mention
+   ``"a"`` and other *legal* keys while explaining what collides with what.
+
 .. list-table::
    :header-rows: 1
    :widths: 26 74
@@ -163,11 +197,25 @@ read them as arbitrary — none of them escapes anything.
      - **Windows strips trailing dots and spaces from a filename.** So ``"a"``,
        ``"a "`` and ``"a."`` all resolve to the same file, and two distinct
        store keys silently overwrite one artefact.
-   * - a device name — ``CON``, ``nul``, ``com1.dat``
+   * - a device name — ``"CON"``, ``"nul"``, ``"com1.dat"``, ``"COM0"``,
+       ``"LPT0"``, ``"CONIN$"``, ``"CONOUT$"``, ``"com¹"``, ``"lpt³"``,
+       ``"CON .txt"``
      - These name character devices, not files. A write is discarded and the
        read comes back empty. The suffix does not help: ``con.npy`` is still
-       the device, which is why the match is against the pre-dot stem.
-   * - a bare colon — ``ab:cd``
+       the device, which is why the match is against the pre-dot stem. The set
+       is the reserved list Microsoft's *Naming Files, Paths, and Namespaces*
+       enumerates, so it includes the zero-suffixed ports ``COM0``/``LPT0``, the
+       console names ``CONIN$``/``CONOUT$`` and the superscript port spellings.
+       **The last example is the one that looks like a typo and is not:**
+       ``"CON .txt"`` is refused because Win32 strips trailing spaces from the
+       name component *before* resolving it, so the space does not save the key
+       — the stem it resolves is ``CON``. The strip is applied for this test
+       only when the key contains a dot, so ``"com1 "`` keeps reporting the
+       trailing-space clause it always reported rather than moving here.
+       Matching is case-insensitive over the exact characters supplied and
+       folds nothing: a fullwidth ``ＣＯＮ`` stays outside the set and stays
+       legal, because on Win32 it is an ordinary filename.
+   * - a bare colon — ``"ab:cd"``
      - On NTFS this opens an *alternate data stream* on the file ``ab`` rather
        than creating a file called ``ab:cd``.
 
@@ -198,6 +246,29 @@ by Unicode normalisation form, do not rely on them being distinct entries on
 those filesystems. On a case-sensitive, non-normalising filesystem — Linux
 ext4/xfs, and APFS configured case-sensitive — the exact round-trip holds as
 written.
+
+There is a third residual, and it is a different kind: **the device-name refusal
+is narrowed, not closed.** Naming only the two filesystem behaviours above left
+the device axis reading as complete when it is a fixed list, so, precisely:
+
+* It is a **fixed name list** — ``CON``, ``PRN``, ``AUX``, ``NUL``, ``CONIN$``,
+  ``CONOUT$``, ``COM0``–``COM9``, ``LPT0``–``LPT9`` and the superscript
+  ``COM¹²³`` / ``LPT¹²³`` forms — matched case-insensitively against the pre-dot
+  stem after a trailing-ASCII-space strip. It covers exactly those names.
+* It does **not** model every Win32 path-parsing behaviour. Any device-resolving
+  shape outside that list, or reached by a mechanism other than a trailing-space
+  strip on the stem, is not covered.
+* The mechanism claims behind it — that Win32 resolves these names to character
+  devices, and that it strips trailing spaces before doing so — are **Win32
+  filesystem behaviour and cannot be confirmed on the hosts this library is
+  tested on**. What the test suite confirms is which keys the shipped rule
+  accepts and refuses, which is a narrower claim than the mechanism.
+
+So the collision axis is **narrowed, not closed**, on all three counts. The
+device list is enumerable and is enumerated; the other two are not fixable by
+any lexical rule at all, because refusing one spelling of a colliding pair would
+mean choosing a canonical form — which is exactly the normalisation this rule
+forbids.
 
 Why nested keys are refused — this one is a bug fix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -258,6 +329,19 @@ environment* — something planted a symlink in the cache directory. A per-item
 handler that skips one bad key should not silently swallow the second kind, so
 catch the base type only where you mean "this key was bad".
 
+**Not every route raises, so not every route needs a handler.** Three routes
+answer an illegal key instead of raising: ``key in store`` returns ``False``,
+``store.get(key, default)`` returns its default, and ``store.pop(key, default)``
+returns its default. Two neighbours deliberately do raise: the bare
+``store.pop(key)``, because answering a miss with ``None`` is not what a mapping
+``pop`` does, and ``store.setdefault(key, default)``, because ``setdefault`` is
+a **write** route and refusing an illegal key on a write is the point of this
+contract. A ``StoreContainmentError`` propagates out of *all* of them, including
+the defaulting ones — it is evidence about the environment rather than about the
+key, and swallowing it behind a default would hide exactly the case worth
+seeing. The full per-route enumeration lives in ``BC-GSEG-006`` in
+``MIGRATION-v1.0.md``.
+
 Pre-checking a key
 ~~~~~~~~~~~~~~~~~~
 
@@ -292,6 +376,14 @@ when they share one rule.
 
 It is read-only: it opens no file, writes nothing and creates nothing, so it is
 safe to interrupt and safe to re-run.
+
+It scans for the **base** array extension, ``.npy``. If you subclass
+:class:`~GSEGUtils.lazy_disk_cache.DiskBackedStore` and repoint
+``_DBNDArrayFileExt``, substitute your own extension in the two places the
+snippet names it — otherwise the scan matches nothing and reports an empty
+result that reads like a clean bill of health. Repointing that attribute is a
+supported configuration: since 0.5.x the reopen scan reads the extension off the
+instance, so such a store adopts its own artefacts.
 
 .. caution::
    Exclude type-checker caches, virtual environments and ``site-packages``. The

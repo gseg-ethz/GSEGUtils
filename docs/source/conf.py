@@ -149,8 +149,27 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     # `typing.Mapping` is the deprecated alias of collections.abc.Mapping and
     # carries no method entries in the python inventory.
     (r"py:meth", r"typing\.Mapping\.get$"),
+    # `typing.MutableMapping` is the same case one interface down. Surfaced by
+    # Plan 14-14's `pop` docstring, which contrasts the overridden `pop` with the
+    # inherited `setdefault` (D-25) and links the latter to the ABC that defines
+    # it. Anchored to that one method, not to the class, so a future reference to
+    # a *different* MutableMapping method still has to resolve or be justified.
+    (r"py:meth", r"typing\.MutableMapping\.setdefault$"),
     # dunder methods — Sphinx can't resolve short-form bare `__array__` etc.
-    (r"py:meth", r"(__array__|__getitem__|__array_interface__)"),
+    # `__setstate__` and `__delitem__` joined the list in Phase 14: the pickle
+    # protocol hook is referenced from `cache_dir`'s docstring (Plan 14-14,
+    # § WR-03) and `__delitem__` from `pop`'s (D-25). Both are real methods on
+    # `DiskBackedStore`; neither is in the docs member allowlist, so neither has
+    # a target to resolve to — the same class as the entries above, and each is
+    # named exactly rather than covered by a `__.*__` pattern.
+    (r"py:meth", r"(__array__|__getitem__|__array_interface__|__setstate__|__delitem__)"),
+    # `_POP_DEFAULT_MISSING` is the module-level sentinel distinguishing "no
+    # default supplied" from `default=None` in `pop` (D-25). It is private by
+    # construction — the whole point of a sentinel is that no caller can name it
+    # — so it is absent from `__all__` and from the member allowlist, exactly
+    # like `validate_store_key` and `_normalize_base` above. `pop`'s docstring
+    # names it because a reader needs to know a sentinel exists.
+    (r"py:data", r"_POP_DEFAULT_MISSING$"),
     (r"py:attr", r"(__array_interface__|H)"),
     # ── autodoc_preserve_defaults false positives ───────────────────────────────
     # autodoc_preserve_defaults=True exposes keyword-only, default=..., optional
