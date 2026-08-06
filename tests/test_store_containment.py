@@ -33,6 +33,7 @@ enumeration of the routes someone remembered.
 import os
 import pickle
 import re
+import tempfile
 import textwrap
 from pathlib import Path
 from types import MappingProxyType
@@ -65,20 +66,48 @@ ILLEGAL_KEY = "../victim"
 MakeStoreFn = Callable[..., DiskBackedStore[DiskBackedNDArray]]
 
 
-def _store_with_cache_path(cache_path: Optional[Path]) -> DiskBackedStore[DiskBackedNDArray]:
+def _store_with_cache_path(
+    cache_path: Optional[Path], *, fallback_root: Optional[Path] = None
+) -> DiskBackedStore[DiskBackedNDArray]:
     """Build an empty store over ``cache_path`` — or over none at all.
 
     ``cache_path=None`` is the second half of the ``route_add_data``
     parametrisation: the store then falls back to a ``mkdtemp`` directory, and
     ``add_data_to_store``'s ``if self._cache_dir`` conditional is exercised in
     the state its author intended it to gate.
+
+    **WR-09 — why ``fallback_root`` exists.** That ``mkdtemp`` fallback lands
+    in the *system* temporary directory, outside pytest's managed tree, and
+    nothing ever removes it: one leaked directory per invocation, surviving the
+    whole session. ``fallback_root`` is the caller-supplied base that fixes it —
+    for the duration of construction ``tempfile.tempdir`` points at it, so the
+    fallback directory is created under the per-test ``tmp_path`` and pytest
+    removes it with everything else. The fallback *branch* is still exercised
+    exactly as before: ``cache_path`` really is ``None``, so ``__init__`` really
+    does take the ``mkdtemp`` arm. Only where that directory lands changes.
+
+    Passing ``cache_path=None`` without a ``fallback_root`` is refused rather
+    than tolerated, so the leak cannot come back by someone adding a call site
+    and not knowing about this.
     """
+    if cache_path is None and fallback_root is None:
+        raise AssertionError(
+            "_store_with_cache_path(None) leaks a mkdtemp directory outside pytest's managed "
+            "tree; pass fallback_root=<a tmp_path-derived directory> (WR-09)"
+        )
     cfg = LazyDiskCacheConfig(
         enable_caching=True,
         cache_path=cache_path,
         purge_disk_on_gc=False,
         automatic_offloading=False,
     )
+    if cache_path is None:
+        previous_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(fallback_root)
+        try:
+            return DiskBackedStore[DiskBackedNDArray](config=cfg, factory=DiskBackedNDArray)
+        finally:
+            tempfile.tempdir = previous_tempdir
     return DiskBackedStore[DiskBackedNDArray](config=cfg, factory=DiskBackedNDArray)
 
 
@@ -125,7 +154,7 @@ def test_route_setitem_refuses_an_illegal_key_and_does_not_track_it(
 
 @pytest.mark.parametrize("configured_cache_path", [True, False], ids=["with-cache-path", "without-cache-path"])
 def test_route_add_data_refuses_an_illegal_key_unconditionally(
-    configured_cache_path: bool, tmp_cache_dir: Path
+    configured_cache_path: bool, tmp_cache_dir: Path, tmp_path: Path
 ) -> None:
     """Plan 14-03 / STORE-01 / SC-1.
 
@@ -139,7 +168,10 @@ def test_route_add_data_refuses_an_illegal_key_unconditionally(
     parametrisations must therefore refuse — if one ever accepts, the hole has
     been resurrected by someone "fixing" the conditional.
     """
-    store = _store_with_cache_path(tmp_cache_dir if configured_cache_path else None)
+    store = _store_with_cache_path(
+        tmp_cache_dir if configured_cache_path else None,
+        fallback_root=tmp_path,
+    )
 
     with pytest.raises(StoreKeyError, match="Invalid store key"):
         store.add_data_to_store(ILLEGAL_KEY, np.zeros(3, dtype=np.float32))
@@ -208,6 +240,28 @@ def test_route_get_returns_the_default_while_the_subscript_still_raises(
     green — which is exactly how this gap went unnoticed when D-11 was written,
     since D-11 enumerated ``__contains__`` and ``__delitem__`` and never
     reached ``.get()``.
+
+    **The fourth assertion (Plan 14-10 / WR-03) belongs in this same function
+    for that same reason**, and it is the one that reverses a direction. The
+    first three say *swallow*; the fourth says *do not*, and the line between
+    them is the whole of D-12's two-type split. ``StoreContainmentError``
+    subclasses ``StoreKeyError``, so the catch tuple above swallowed it too —
+    the library's own accessor doing precisely what the contract page tells
+    consumers not to do: *"A per-item handler that skips one bad key should not
+    silently swallow the second kind."* A refused key is evidence about the
+    caller; a containment violation is evidence about the **environment**, and
+    degrading it to a ``None`` turns a planted symlink into an ordinary cache
+    miss inside the caller's loop. Asserted here rather than in a fifth test
+    function because a reader who changes the catch tuple must meet all four
+    halves of the contract at once.
+
+    The containment error is driven through the module-level ``Sneaky`` helper
+    (Plan 14-08): the lexical layer accepts its characters, and the builder
+    inside ``_load_entry`` refuses what it actually formats to. That shape is
+    also the honest reachability story — for a plain ``str`` key the containment
+    layer cannot fire from this path once the lexical layer has passed, so this
+    carve-out matters for the ``str``-subclass shape and for any future
+    lexical-layer regression, which is exactly when the signal is most wanted.
     """
     store = make_store(tmp_cache_dir)
     sentinel = object()
@@ -216,6 +270,9 @@ def test_route_get_returns_the_default_while_the_subscript_still_raises(
     assert (ILLEGAL_KEY in store) is False, "__contains__ must stay an unguarded, dict-backed membership test"
     with pytest.raises(StoreKeyError, match="Invalid store key"):
         store[ILLEGAL_KEY]
+
+    with pytest.raises(StoreContainmentError, match=re.escape(paths_mod.CLAUSE_ESCAPES)):
+        store.get(Sneaky("safe"), sentinel)
 
 
 def test_route_get_still_returns_the_default_for_a_legal_but_absent_key(
@@ -858,7 +915,14 @@ def _control_symlinked_subdirectory_inside_the_cache(cache_dir: Path, outside: P
 
 
 def _control_parent_directory_segment(cache_dir: Path, outside: Path) -> Path:
-    """Build the path a parent-directory key would produce: ``<cache>/../victim.npy``."""
+    """Build the path a parent-directory key would produce: ``<cache>/../victim.npy``.
+
+    ``outside`` is deliberately unused (WR-09): this control escapes *upward*
+    and needs no directory outside the cache to point at, while its sibling
+    does. The parameter is present only so both controls share one callable
+    shape and can be parametrised together — do not delete it, and do not
+    invent a use for it.
+    """
     return cache_dir / ".." / "victim.npy"
 
 
