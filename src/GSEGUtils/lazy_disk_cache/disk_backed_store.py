@@ -748,6 +748,20 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         read-only view removes the route instead of guarding it: there is no
         write to validate, so there is no site to forget.
 
+        ↻ **CORRECTED by Plan 14-12 (CR-02).** The paragraph above is kept
+        exactly as it was written, and the *argument* in it is the thing worth
+        keeping — but the claim as made was **premature**. When it was written,
+        ``__getstate__`` was still a second route into the same mapping
+        through a public protocol method: its ``self.__dict__.copy()`` is
+        shallow, so the state it returned carried ``_store`` **itself**, and
+        ``copy.copy(store)`` handed back a store sharing the original's entry
+        mapping. What closed it is the detached snapshot in
+        ``__getstate__`` (Plan 14-12); the claim holds now, and did not
+        before. That is the argument proving itself: a claim quantified over
+        *every route* but maintained by **enumerating** routes degrades
+        silently at the next route somebody adds — which is precisely how this
+        one was missed for a round. Do not restore the unqualified wording.
+
         *Measured basis, not assumed.* Across ``30_GSEGUtils``,
         ``41_pchandler``, ``pc2img`` and ``iof3D`` there are **zero
         write-through sites** for this property; every measured usage is a
@@ -955,10 +969,37 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         The store itself is still pickled here (we serialise our own metadata
         like ``_cache_dir`` / ``_store`` keys); only the per-entry payloads have
         been moved to the codec-pair on disk by the time we get here.
+
+        The returned state is a **snapshot, detached at the mapping level**: its
+        ``_store`` is a fresh :class:`dict`, not this instance's own mapping, so
+        writing into it cannot reach the live store. It is **not** a deep copy —
+        the entry *values* are the same objects — and nothing more should be
+        read into the detachment than that.
         """
         if self._enable_caching:
             self.offload(pickle_container=True)
         state = self.__dict__.copy()
+        # D-19 completed (Plan 14-12, CR-02). `__dict__.copy()` is SHALLOW, so
+        # without this line `state["_store"] is self._store` and there are two
+        # consequences — a reader who sees only the pickle one will eventually
+        # "simplify" this away:
+        #
+        #   (a) the returned state is a LIVE WRITE ROUTE into `_store` through a
+        #       public protocol method, with no key validation on it. That is
+        #       the same shape as the `store` property CR-02 closed in round 1,
+        #       one accessor over, and it is what made D-19's structural-closure
+        #       claim false as written.
+        #   (b) `copy.copy(store)` — which travels `__reduce_ex__` →
+        #       `__getstate__` → `__setstate__` — handed back a store SHARING
+        #       the original's entry mapping. Insert into the copy and the
+        #       original grows the key; `del` from it and the original loses
+        #       one. That half has nothing to do with keys: it is a plain
+        #       data-integrity defect on a class explicitly designed to travel
+        #       through joblib/loky.
+        #
+        # It must stay AFTER the conditional offload above, or the copied values
+        # would be the pre-offload ones.
+        state["_store"] = dict(self._store)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -999,6 +1040,24 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         after construction, and therefore cannot be in a snapshot this codebase
         produced. The conclusion below is unchanged; only its stated reason was
         wrong.
+
+        ↻ **CORRECTED AGAIN by Plan 14-12 (CR-02).** The correction above is
+        Plan 14-08's, and it stays: **a note that has been wrong twice, with
+        both corrections visible, is a better warning to the next reader than a
+        note that reads as though it had always been right.** Do not collapse
+        these two into one tidy paragraph.
+
+        What 14-08's replacement text got wrong is its *conclusion*. Having
+        correctly quoted ``state = self.__dict__.copy()`` as validating no keys,
+        it concluded that an illegal key "cannot be in a snapshot this codebase
+        produced" — which did **not** follow from the quoted line, because that
+        line **aliased** the mapping rather than copying it. The snapshot was
+        the live ``_store``, so anyone holding a state object could write an
+        illegal key straight into the store the snapshot came from, and the
+        enumeration of write routes above was therefore incomplete at the moment
+        it was written. The conclusion follows **now**: Plan 14-12 makes
+        :meth:`__getstate__` return a detached ``dict``, so the snapshot is a
+        copy, and every route that installs a key into ``_store`` validates it.
 
         This is DELIBERATELY the opposite of the ``__init__`` rescan's policy
         (D-09, which warns and skips). Warning-and-skipping here would return a
