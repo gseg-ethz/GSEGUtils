@@ -160,11 +160,20 @@ class LazyDiskCacheConfig:
             sits outside the containment story — it is a configuration helper,
             and no store exists yet when it runs — but it joins a
             caller-supplied string straight into the cache root, and the callers
-            are real: pc2img passes a per-tile id through it, and iof3D passes a
-            path extension through it in three places. STORE-02's guarantee that
-            no path the store builds lands outside the cache directory is hollow
-            if the root those paths hang off can itself be walked upward, so the
-            rule applies here too.
+            are real: pc2img calls it **directly**, passing a per-tile id and a
+            computed settings hash, and iof3D calls it **directly** with a path
+            extension derived from a filename stem and also reaches it
+            **indirectly** through pc2img's plural ``extend_cache_paths``
+            wrapper. STORE-02's guarantee that no path the store builds lands
+            outside the cache directory is hollow if the root those paths hang
+            off can itself be walked upward, so the rule applies here too.
+
+            The individual call sites are enumerated in ``MIGRATION-v1.0.md``
+            under BC-GSEG-006 delta (4), and **deliberately not repeated here**:
+            they are line numbers in another repository, they drift, and a
+            second copy of them is precisely how the previous version of this
+            sentence came to name a count that neither repository matched
+            (§ WR-06). One place, not two.
 
             The check runs **before** the join and **regardless** of whether
             ``self.cache_path`` is ``None``: a bad folder name is a caller
