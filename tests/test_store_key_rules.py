@@ -208,6 +208,140 @@ ACCEPTED_KEYS: tuple[str, ...] = (
 #: Lookup from a refused key to the clause it must report.
 EXPECTED_CLAUSE: dict[str, str] = dict(REFUSED_KEYS)
 
+#: Every clause constant, so a test can assert that a key reports **one** of them
+#: rather than only that it reports the expected one.
+ALL_CLAUSES: tuple[str, ...] = (
+    CLAUSE_RESERVED,
+    CLAUSE_CONTROL,
+    CLAUSE_ABSOLUTE,
+    CLAUSE_SEPARATOR,
+    CLAUSE_TRAILING,
+)
+
+#: The five keys § WR-05 reproduced as **repointed** by the round-2 device
+#: widening, each paired with the clause it reported *before the device half
+#: existed* (Plan 14-13 / D-24). D-24 moves the device test after the control,
+#: absolute and separator tests so each of them reports its original clause
+#: again.
+#:
+#: ⚠ ``'com1.\\\\server\\share\\x'`` is pinned at :data:`CLAUSE_SEPARATOR`, which
+#: **contradicts § WR-05's stated** ``CLAUSE_ABSOLUTE``. Measured, twice, against
+#: a scratch build with ``_WIN_DEVICE_NAMES`` emptied: a leading ``'com1.'``
+#: prefix means :class:`~pathlib.PureWindowsPath` sees no UNC anchor, so the
+#: separator test is what catches it. The measurement is what is pinned here; the
+#: review's value is not.
+PRE_EXISTING_CLAUSE_KEYS: list[tuple[str, str]] = [
+    ("con.a/b", CLAUSE_SEPARATOR),
+    ("nul.x\n", CLAUSE_CONTROL),
+    ("aux.C:evil", CLAUSE_ABSOLUTE),
+    ("com1.\\\\server\\share\\x", CLAUSE_SEPARATOR),
+    ("lpt1.a/", CLAUSE_SEPARATOR),
+]
+
+#: The **frozen pre-widening snapshot** (Plan 14-13 / D-24): every key in
+#: :data:`REFUSED_KEYS` that was *already refused* before the device half
+#: existed, paired with the clause it reported then.
+#:
+#: **Written out as an explicit literal on purpose.** Deriving it from
+#: :data:`REFUSED_KEYS` — the very thing it checks — would produce a test that
+#: cannot fail. The duplication is the mechanism.
+#:
+#: **Measured, not copied.** Each value was read off a scratch build of
+#: ``paths.py`` with ``_WIN_DEVICE_NAMES`` emptied, which is exactly "before the
+#: device half existed". That is deliberately *not* the shipped rule at
+#: ``56c8306``: ``56c8306`` is the post-widening, pre-relocation state, so a
+#: snapshot taken there would be a guard against *future* clause additions rather
+#: than the guard for "every pre-existing refusal" this test's name claims — and
+#: it structurally could not see a repoint on a key that was not already in
+#: :data:`REFUSED_KEYS`, which is exactly how the ``'com1 '`` family hid.
+PRE_WIDENING_CLAUSE: dict[str, str] = {
+    "../victim": CLAUSE_SEPARATOR,
+    "a/b": CLAUSE_SEPARATOR,
+    "tile_03/range": CLAUSE_SEPARATOR,
+    "a/": CLAUSE_SEPARATOR,
+    "..\\..\\x": CLAUSE_SEPARATOR,
+    "/etc/passwd": CLAUSE_ABSOLUTE,
+    "C:evil": CLAUSE_ABSOLUTE,
+    "C:/abs": CLAUSE_ABSOLUTE,
+    "\\\\server\\share\\x": CLAUSE_ABSOLUTE,
+    "": CLAUSE_RESERVED,
+    ".": CLAUSE_RESERVED,
+    "..": CLAUSE_RESERVED,
+    "a\\": CLAUSE_SEPARATOR,
+    "x\n": CLAUSE_CONTROL,
+    "x\x00y": CLAUSE_CONTROL,
+    "\uff0e\uff0e/victim": CLAUSE_SEPARATOR,
+    "foo.": CLAUSE_TRAILING,
+    "a ": CLAUSE_TRAILING,
+    "x.": CLAUSE_TRAILING,
+    "...": CLAUSE_TRAILING,
+    " ": CLAUSE_TRAILING,
+    "ab:cd": CLAUSE_ABSOLUTE,
+    "com1 ": CLAUSE_TRAILING,
+    "con ": CLAUSE_TRAILING,
+    "nul  ": CLAUSE_TRAILING,
+    "con.": CLAUSE_TRAILING,
+    "com1. ": CLAUSE_TRAILING,
+}
+
+#: The **two** pairs that disagree with the snapshot above, carried as named
+#: entries with their reason and the round that moved them rather than quietly
+#: excluded (Plan 14-13 / D-24). An exception you can read is a decision; a key
+#: silently missing from the comparison is a hole.
+#:
+#: Adding a third entry here means a clause was repointed, and it requires the
+#: same justification these two carry.
+ROUND_2_CLAUSE_MOVES: dict[str, tuple[str, str]] = {
+    "con.": (
+        CLAUSE_RESERVED,
+        "moved TRAILING -> RESERVED by D-20 in round 2, when the device half was added ahead of the "
+        "trailing test. D-24's chosen placement (device test between the separator and trailing tests) "
+        "deliberately preserves that rather than moving it a second time.",
+    ),
+    "com1. ": (
+        CLAUSE_RESERVED,
+        "same round-2 move as 'con.': a device stem that also ends in a trailing run. Putting the device "
+        "test *after* the trailing test would repoint both back — which is why 'just put the new clause "
+        "last' is the wrong reading of D-24.",
+    ),
+}
+
+#: Keys :data:`REFUSED_KEYS` carries that were **accepted** before the device
+#: half existed (Plan 14-13). They are new refusals from D-20's and D-23's
+#: widenings, so there is no pre-existing clause for them to preserve — but they
+#: are enumerated rather than skipped, so the three tables together partition
+#: :data:`REFUSED_KEYS` exactly and a key cannot fall out of the comparison
+#: unnoticed.
+#: It is exactly :data:`WIN_DEVICE_KEYS` — every one of the seven D-20 names and
+#: every one of D-23's eight additions was accepted by the pre-widening rule, and
+#: nothing else in :data:`REFUSED_KEYS` was.
+NEWLY_REFUSED_BY_THE_DEVICE_WIDENING: tuple[str, ...] = WIN_DEVICE_KEYS
+
+
+def reported_clause(key: str) -> str | None:
+    """Return the ``CLAUSE_*`` constant ``validate_store_key`` reports for ``key``.
+
+    ``None`` when the key is **accepted** — which is a distinct outcome from
+    "refused under some other clause" and the tests below need to tell them
+    apart, because disabling a sub-clause turns a refusal into an acceptance
+    rather than into a different clause.
+
+    The message is split at the fixed generic tail before the clause constants
+    are searched for. The tail paraphrases the whole rule (``"… not an absolute
+    or drive-relative path … and not ending in a space or a dot"``), and although
+    no constant is currently a verbatim substring of it, relying on that would
+    make this helper silently wrong the first time the tail is reworded.
+    """
+    try:
+        validate_store_key(key, _CACHE_DIR)
+    except StoreKeyError as excinfo:
+        head = str(excinfo).split("; a store key must")[0]
+        found = [clause for clause in ALL_CLAUSES if clause in head]
+        assert len(found) == 1, f"{key!r} reported {len(found)} clauses ({found!r}) in {head!r}"
+        return found[0]
+    return None
+
+
 #: The non-``str`` inputs (Plan 14-09 / WR-02). The first four are the review's
 #: verbatim reproduction, each of which escaped as a bare :exc:`TypeError` from
 #: the control-character scan on a predicate documented to return ``bool``.
@@ -541,31 +675,122 @@ def test_widening_refuses_a_trailing_dot_but_not_a_leading_or_interior_one() -> 
 
 
 def test_widening_does_not_change_the_clause_reported_by_an_already_refused_key() -> None:
-    r"""Plan 14-09 / STORE-01 / D-20: evaluation order is preserved for every pre-existing refusal.
+    r"""Plan 14-09 / D-20, extended by Plan 14-13 / D-24: evaluation order holds for every pre-existing refusal.
 
-    The trailing test is placed **last**, after the separator test, and that
-    position is load-bearing rather than tidy. ``'a/'`` and ``'a\'`` are already
-    refused by the separator clause and existing tests assert *that* clause; a
-    trailing test placed earlier would silently repoint them. ``'.'`` and
-    ``'..'`` end in dots and would likewise be re-reported under the new clause
-    from any position ahead of the reserved test.
+    **The name has finally caught up with the parametrisation.** Two groups of
+    cases, covering the two clauses this phase added and the two positions they
+    are held at.
 
-    This test pins the three keys that would move if the order were changed,
-    independently of the parametrised groups that would also catch it — because
-    a reordering is exactly the kind of edit that comes with "and update the
-    expected clauses" attached.
+    *The four original cases* — ``'a/'``, ``'a\'``, ``'..'`` and ``'.'`` — cover
+    **clause 6's** placement. The trailing test is placed after the separator
+    test, and that position is load-bearing rather than tidy: ``'a/'`` and
+    ``'a\'`` are already refused by the separator clause and existing tests
+    assert *that* clause, while ``'.'`` and ``'..'`` end in dots and would be
+    re-reported under the trailing clause from any position ahead of the reserved
+    test.
+
+    *The five cases added by Plan 14-13* cover **clause 1's device half**, which
+    the previous round moved without noticing. Clause 5's docstring argued that
+    an earlier placement "would silently repoint a currently-refused key onto a
+    new clause" — and clause 1 was widened in that same round, sits **first**,
+    and did exactly that: ``con.a/b`` reported RESERVED where it had reported
+    SEPARATOR, and four more. This test was named and docstringed as covering
+    *every* pre-existing refusal while parametrising four keys that exercise
+    clause 6's placement only, so it could not detect the widening that actually
+    repointed — and it is the test a future reader trusts. D-24 relocates the
+    device test after the control, absolute and separator tests; these five rows
+    are what hold it there.
+
+    Each expected clause was **measured** against a scratch build with
+    ``_WIN_DEVICE_NAMES`` emptied rather than copied from the review — see
+    :data:`PRE_EXISTING_CLAUSE_KEYS` for the one value where the two disagree.
+
+    The assertions are symmetric by construction: every row asserts the exact
+    clause reported and that **no other** clause constant appears, so a key that
+    reported SEPARATOR cannot start mentioning the reserved wording either.
     """
     for key, clause in (
         ("a/", CLAUSE_SEPARATOR),
         ("a\\", CLAUSE_SEPARATOR),
         ("..", CLAUSE_RESERVED),
         (".", CLAUSE_RESERVED),
+        *PRE_EXISTING_CLAUSE_KEYS,
     ):
         with pytest.raises(StoreKeyError, match=re.escape(clause)) as excinfo:
             validate_store_key(key, _CACHE_DIR)
-        assert CLAUSE_TRAILING not in str(excinfo.value), (
-            f"{key!r} is now reported under the trailing clause; the new test ran ahead of "
-            f"the {clause!r} test and changed a pre-existing refusal"
+        assert reported_clause(key) == clause, (
+            f"{key!r} now reports {reported_clause(key)!r} rather than {clause!r}; a clause test ran "
+            "ahead of the one that used to catch it and repointed a pre-existing refusal"
+        )
+        for other in ALL_CLAUSES:
+            if other == clause:
+                continue
+            assert other not in str(excinfo.value), (
+                f"{key!r} is reported under {other!r} as well as {clause!r}; the clause vocabulary "
+                "BC-GSEG-006 publishes as a grep target has stopped being one-to-one"
+            )
+
+
+def test_every_pre_existing_key_clause_pairing_survives_the_widening() -> None:
+    """Plan 14-13 / STORE-01 / D-24: the whole refused matrix is compared against a frozen pre-widening snapshot.
+
+    The mechanical companion to the named test above. That one pins nine keys a
+    reader can reason about; this one pins **every** key in
+    :data:`REFUSED_KEYS` against :data:`PRE_WIDENING_CLAUSE`, a literal snapshot
+    measured against a build with ``_WIN_DEVICE_NAMES`` emptied.
+
+    Three tables partition :data:`REFUSED_KEYS` and the partition itself is
+    asserted first, because a key that falls out of all three would be exempt
+    from the comparison and nothing else here would notice:
+
+    * :data:`PRE_WIDENING_CLAUSE` — refused before the device half existed, so
+      its clause must not have moved;
+    * :data:`ROUND_2_CLAUSE_MOVES` — the **two** pairs that did move, in round 2
+      rather than this one, each carrying its reason. They are compared against
+      the exception value, so this test still fails if either moves *again*;
+    * :data:`NEWLY_REFUSED_BY_THE_DEVICE_WIDENING` — accepted before, so there is
+      no earlier clause to preserve; they must simply still be refused.
+
+    Why the snapshot is a literal rather than a comprehension over
+    :data:`REFUSED_KEYS`: a test that derives its expectations from the thing it
+    is checking cannot fail. The duplication is the mechanism, not an oversight,
+    and updating it is meant to be a deliberate act.
+    """
+    partitioned = set(PRE_WIDENING_CLAUSE) | set(NEWLY_REFUSED_BY_THE_DEVICE_WIDENING)
+    assert partitioned == set(EXPECTED_CLAUSE), (
+        "the snapshot tables no longer partition REFUSED_KEYS; unclassified: "
+        f"{sorted(set(EXPECTED_CLAUSE) - partitioned)!r}, unknown: {sorted(partitioned - set(EXPECTED_CLAUSE))!r}"
+    )
+    assert not set(PRE_WIDENING_CLAUSE) & set(NEWLY_REFUSED_BY_THE_DEVICE_WIDENING), (
+        "a key is listed both as refused pre-widening and as newly refused by it"
+    )
+    assert set(ROUND_2_CLAUSE_MOVES) <= set(PRE_WIDENING_CLAUSE), (
+        "an exception was recorded for a key that has no pre-widening clause to be an exception to"
+    )
+
+    for key, baseline in PRE_WIDENING_CLAUSE.items():
+        moved = ROUND_2_CLAUSE_MOVES.get(key)
+        expected = baseline if moved is None else moved[0]
+        actual = reported_clause(key)
+        assert actual is not None, (
+            f"{key!r} is no longer refused at all; a sub-clause of the rule has been removed or disabled"
+        )
+        if moved is None:
+            assert actual == expected, (
+                f"{key!r} reported {baseline!r} before the device half existed and now reports "
+                f"{actual!r}; BC-GSEG-006 publishes these strings as a grep target, so a downstream "
+                f"grepping {baseline!r} has stopped finding it"
+            )
+        else:
+            assert actual == expected, (
+                f"{key!r} is a recorded round-2 exception expected to report {expected!r} and now "
+                f"reports {actual!r}. {moved[1]}"
+            )
+
+    for key in NEWLY_REFUSED_BY_THE_DEVICE_WIDENING:
+        assert reported_clause(key) == CLAUSE_RESERVED, (
+            f"{key!r} was accepted before the device widening and must now be refused under "
+            f"{CLAUSE_RESERVED!r}; it reports {reported_clause(key)!r}"
         )
 
 
