@@ -302,6 +302,36 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             #      filter-versus-invariant distinction this phase draws about
             #      paths, applied to keys.
             #
+            #      D-26 (Plan 14-14, WR-02) FINISHES that half: derivation and
+            #      rebuild now read from ONE source rather than agreeing by
+            #      construction. Both halves of the decision are recorded,
+            #      because each reads as a mistake to a different reader.
+            #
+            #      WHY THE INSTANCE ATTRIBUTE. The glob and the derivation above
+            #      use `self._DBNDArrayFileExt`; the rebuild used to use the
+            #      module-level `.npy` builder. For the base class those are the
+            #      SAME OBJECT, so the round-trip was a tautology — which is
+            #      exactly why nothing in this repository's suite caught it. For
+            #      a subclass that repoints the attribute — the documented reason
+            #      the attribute exists, see the class-attribute comment above —
+            #      they disagree for EVERY file, so the store adopted NOTHING and
+            #      warned once per file. An empty store plus a per-file warning is
+            #      the "data loss disguised as success" shape the D-09/D-10 policy
+            #      split was written against, reached through the extension point
+            #      the class publishes. Deriving with one vocabulary and rebuilding
+            #      with another is the defect; one vocabulary is the fix.
+            #
+            #      WHY THE INTRA-PACKAGE SEAM RATHER THAN A NEW PUBLIC BUILDER.
+            #      `paths._build` is private-within-package, and `paths` and this
+            #      module are the same package, so this is not a layering break.
+            #      The alternative — promoting a suffix-taking builder to the
+            #      published surface — was rejected: SC-5 was verified against a
+            #      published surface of EXACTLY SIX names and the docs member
+            #      allowlist is written to that number, so widening it to serve an
+            #      INTERNAL round-trip check would re-open a verified criterion
+            #      and a documentation allowlist for no consumer benefit. Same
+            #      argument recorded in `DESIGN-DECISIONS.md`.
+            #
             # ORDERING, which is what keeps D-09's prohibition intact: check the
             # cheap predicate FIRST — it cannot raise, and it is what makes the
             # warning fire for the shapes D-09 already covered. Only then
@@ -315,7 +345,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 skip_reason = "the key derived from its name is not a legal store key"
             else:
                 try:
-                    rebuilt = paths.get_npy_path(self._cache_dir, key)
+                    rebuilt = paths._build(self._cache_dir, key, self._DBNDArrayFileExt)
                 except paths.StoreKeyError as exc:
                     skip_reason = f"the shared path builder refuses the key derived from its name ({exc})"
                 else:

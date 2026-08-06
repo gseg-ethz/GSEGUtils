@@ -1662,8 +1662,16 @@ def test_route_rescan_requires_the_derived_key_to_rebuild_its_own_file(
     disagreement is injected: one key's builder returns a different path, which
     is exactly the drift the guard exists to survive. If this test ever passes
     with the guard deleted, suspect the patch target — ``disk_backed_store``
-    calls ``paths.get_npy_path`` as a module attribute at call time, so the
-    rebinding must be on the ``paths`` module object.
+    calls the builder as a module attribute at call time, so the rebinding must
+    be on the ``paths`` module object.
+
+    ↻ **PATCH TARGET MOVED by Plan 14-14 (D-26).** The rescan used to rebuild
+    with ``paths.get_npy_path``; it now rebuilds through ``paths._build`` with
+    the *instance's* own artefact suffix, so that is where the drift has to be
+    injected. Only the seam moved: what this test asserts is unchanged, and it
+    still goes red when the round-trip comparison is deleted. That is what
+    "D-26 changes which builder the guard calls, not whether the guard exists"
+    means in practice.
 
     The ``ordinary`` control is not decoration: a rescan that adopted *nothing*
     would satisfy "does not adopt the drifting key" while being completely
@@ -1674,15 +1682,15 @@ def test_route_rescan_requires_the_derived_key_to_rebuild_its_own_file(
     for planted in (drifting, ordinary):
         planted.write_bytes(b"not-a-real-npy")
 
-    real_builder = paths_mod.get_npy_path
+    real_build = paths_mod._build
 
-    def drifting_builder(cache_dir: Path, key: str) -> Path:
+    def drifting_build(cache_dir: Path, key: str, suffix: str) -> Path:
         """Return a path that is not the file ``key`` was derived from."""
         if key == "drifting":
-            return cache_dir / f"{key}_elsewhere{paths_mod.NPY_SUFFIX}"
-        return real_builder(cache_dir, key)
+            return cache_dir / f"{key}_elsewhere{suffix}"
+        return real_build(cache_dir, key, suffix)
 
-    monkeypatch.setattr(paths_mod, "get_npy_path", drifting_builder)
+    monkeypatch.setattr(paths_mod, "_build", drifting_build)
 
     with caplog.at_level("WARNING"):
         store = _store_with_cache_path(tmp_cache_dir)
@@ -1719,14 +1727,19 @@ def test_route_rescan_survives_a_builder_that_refuses_during_the_round_trip(
     That handler is unreachable through the real builders once the predicate has
     passed, which is why the refusal is injected here. The alternative — trusting
     the ordering argument — is what this phase has repeatedly found insufficient.
+
+    ↻ **PATCH TARGET MOVED by Plan 14-14 (D-26)**, from ``paths.get_npy_path`` to
+    the shared ``paths._build`` seam the rebuild now calls. The prohibition being
+    asserted is untouched: a builder refusal during the round trip is still
+    converted into the same warn-and-skip and still cannot reach the caller.
     """
 
-    def refusing_builder(cache_dir: Path, key: str) -> Path:
+    def refusing_build(cache_dir: Path, key: str, suffix: str) -> Path:
         """Refuse every key, the way the builder would on a hostile directory."""
         raise StoreContainmentError(f"synthetic refusal for {key!r}: the path {paths_mod.CLAUSE_ESCAPES}")
 
     (tmp_cache_dir / f"ordinary{paths_mod.NPY_SUFFIX}").write_bytes(b"not-a-real-npy")
-    monkeypatch.setattr(paths_mod, "get_npy_path", refusing_builder)
+    monkeypatch.setattr(paths_mod, "_build", refusing_build)
 
     with caplog.at_level("WARNING"):
         store = _store_with_cache_path(tmp_cache_dir)
