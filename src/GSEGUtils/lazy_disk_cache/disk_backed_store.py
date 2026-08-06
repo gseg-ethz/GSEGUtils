@@ -220,47 +220,100 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         self._value_type = value_type
         self._validator = validator
 
-        if self._cache_dir is not None:
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
+        # Unconditional: the former `if self._cache_dir is not None` guard was
+        # dead for exactly the reason recorded while its twin was deleted from
+        # `add_data_to_store` — `__init__` assigns a `Path` on *both* branches a
+        # few lines up, so no route can present a cache directory the
+        # interpreter reads as empty. Leaving one instance of the pattern
+        # standing weakened the argument the phase made when it removed the
+        # other (WR-09), so both are gone and the claim now holds in both places
+        # it was made.
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Scan for existing files. We track any key that has a Phase-2 codec
-            # pair (.npy + .meta.json); legacy .pkl files are intentionally NOT
-            # registered here so __getitem__ surfaces them as a cache miss with
-            # the D-05 INFO log via _load_entry.
-            available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
-            for f in available_files:
-                # D-09 — WARN AND SKIP. This route reconstructs keys from
-                # filenames that are ALREADY on disk, so what it sees is
-                # pre-existing data, not a caller mistake. Raising here would
-                # turn "open an old cache directory" into a crash, which is
-                # precisely the outcome the policy split exists to prevent.
-                #
-                # This is DELIBERATELY the opposite of __setstate__'s policy
-                # (D-10, which raises), and the asymmetry is the substance of
-                # the split rather than an inconsistency: a rescan that raised
-                # would crash on legitimate legacy data, whereas an unpickle
-                # that merely warned would hand back a store silently missing
-                # entries — data loss disguised as success, inside a worker,
-                # which is the hardest class of failure to attribute.
-                #
-                # ACCEPTED COST, chosen with eyes open and recorded in D-09:
-                # the refused file stays on disk, untracked and unreachable,
-                # leaking the same way a nested key leaks today. The migration
-                # note's cache-directory scan snippet (which imports
-                # `is_valid_store_key`) is what makes that leak visible and
-                # actionable rather than silent. Do not "fix" this into a raise.
-                if not paths.is_valid_store_key(f.stem):
-                    logger.warning(
-                        "Skipping cache file %s in cache directory %s: its stem %r is not a legal "
-                        "store key, so it cannot be tracked and the entry is unreachable. The file "
-                        "is left untouched; scan the directory with "
-                        "GSEGUtils.lazy_disk_cache.is_valid_store_key to find every affected entry.",
-                        f.name,
-                        self._cache_dir,
-                        f.stem,
-                    )
-                    continue
-                self._store[f.stem] = None
+        # Scan for existing files. We track any key that has a Phase-2 codec
+        # pair (.npy + .meta.json); legacy .pkl files are intentionally NOT
+        # registered here so __getitem__ surfaces them as a cache miss with
+        # the D-05 INFO log via _load_entry.
+        available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
+        for f in available_files:
+            # D-09 — WARN AND SKIP. This route reconstructs keys from
+            # filenames that are ALREADY on disk, so what it sees is
+            # pre-existing data, not a caller mistake. Raising here would
+            # turn "open an old cache directory" into a crash, which is
+            # precisely the outcome the policy split exists to prevent.
+            #
+            # This is DELIBERATELY the opposite of __setstate__'s policy
+            # (D-10, which raises), and the asymmetry is the substance of
+            # the split rather than an inconsistency: a rescan that raised
+            # would crash on legitimate legacy data, whereas an unpickle
+            # that merely warned would hand back a store silently missing
+            # entries — data loss disguised as success, inside a worker,
+            # which is the hardest class of failure to attribute.
+            #
+            # ACCEPTED COST, chosen with eyes open and recorded in D-09:
+            # the refused file stays on disk, untracked and unreachable,
+            # leaking the same way a nested key leaks today. The migration
+            # note's cache-directory scan snippet (which imports
+            # `is_valid_store_key`) is what makes that leak visible and
+            # actionable rather than silent. Do not "fix" this into a raise.
+            #
+            # D-22 (Plan 14-10) extends that accepted cost to ONE MORE CLASS of
+            # file rather than changing the policy. Two halves, and both are
+            # needed:
+            #
+            #   1. The key is derived by stripping the artefact suffix off the
+            #      file NAME, not with `Path.stem`. `Path('.npy').stem` is
+            #      '.npy' — a leading dot reads as a name, not an extension —
+            #      which is a legal-looking key the builders can never rebuild,
+            #      so the store used to advertise through `keys()` an entry it
+            #      could never load. The published scan snippet meanwhile
+            #      reported '' for that same byte on disk. One file, two keys,
+            #      neither of them the other: the doc/code drift the snippet's
+            #      design exists to prevent, moved from the RULE to the
+            #      DERIVATION.
+            #
+            #   2. The derived key must rebuild the file it came from, checked
+            #      through the shared builder. Half one alone makes the property
+            #      true by COINCIDENCE of the current suffix vocabulary; the
+            #      rebuild is what makes it an invariant. That is the same
+            #      filter-versus-invariant distinction this phase draws about
+            #      paths, applied to keys.
+            #
+            # ORDERING, which is what keeps D-09's prohibition intact: check the
+            # cheap predicate FIRST — it cannot raise, and it is what makes the
+            # warning fire for the shapes D-09 already covered. Only then
+            # rebuild, and compute the rebuild inside a handler, because the
+            # shared builder RAISES for a refused key and can raise a
+            # containment error on an odd directory. A round-trip check that
+            # propagated would violate the very policy it is being added under.
+            key = f.name[: -len(self._DBNDArrayFileExt)]
+            skip_reason: Optional[str] = None
+            if not paths.is_valid_store_key(key):
+                skip_reason = "the key derived from its name is not a legal store key"
+            else:
+                try:
+                    rebuilt = paths.get_npy_path(self._cache_dir, key)
+                except paths.StoreKeyError as exc:
+                    skip_reason = f"the shared path builder refuses the key derived from its name ({exc})"
+                else:
+                    if rebuilt != f:
+                        skip_reason = "the key derived from its name does not rebuild this file"
+
+            if skip_reason is not None:
+                # One call site, not two, with the reason interpolated: a
+                # downstream grepping its logs has one message shape to match.
+                logger.warning(
+                    "Skipping cache file %s in cache directory %s: %s (derived key %r), so it "
+                    "cannot be tracked and the entry is unreachable. The file is left untouched; "
+                    "scan the directory with GSEGUtils.lazy_disk_cache.is_valid_store_key to find "
+                    "every affected entry.",
+                    f.name,
+                    self._cache_dir,
+                    skip_reason,
+                    key,
+                )
+                continue
+            self._store[key] = None
 
     def _check_T(self, value: object) -> T:
         if not isinstance(value, LazyDiskCache):
