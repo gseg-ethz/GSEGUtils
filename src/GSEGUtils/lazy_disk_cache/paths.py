@@ -230,17 +230,12 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     Clauses are evaluated in a **fixed order**, so a key violating several
     always reports the same one:
 
-    1. ``CLAUSE_RESERVED`` — the key is ``''``, ``'.'`` or ``'..'``, **or** its
-       pre-dot stem upper-cases to a reserved Win32 device name (D-20). The stem
-       test is what refuses ``con.npy`` and ``COM1.dat`` as well as bare ``CON``:
-       on Win32 a device name is still the device with a suffix attached. The
-       stem is right-stripped of ASCII spaces **when the key contains a dot**, so
-       ``CON .txt`` is refused too (D-23); see :func:`_device_stem` for why that
-       condition is a rule rather than an optimisation. It is
-       reported under this clause rather than a new one because the wording
-       already reads as "empty or a reserved path name", which describes a device
-       name exactly, and reusing it keeps the published clause vocabulary stable
-       for every case that already used it.
+    1. ``CLAUSE_RESERVED`` — **the exact reserved keys, first.** The key is
+       ``''``, ``'.'`` or ``'..'``. This is one *half* of ``CLAUSE_RESERVED``:
+       the reserved **device-name** half is clause 5 below, held at a different
+       position on purpose (D-24). A reader who greps for one occurrence of
+       ``CLAUSE_RESERVED`` and assumes it is the whole clause will get the
+       evaluation order wrong.
     2. ``CLAUSE_CONTROL`` — the key contains a character below ``\x20``, or
        ``\x7f``. This covers newline and NUL.
     3. ``CLAUSE_ABSOLUTE`` — the key has a non-empty ``anchor`` or ``drive``
@@ -267,12 +262,55 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
          as well as by character — ``PurePosixPath`` reads it as one harmless
          segment while ``PureWindowsPath`` reads it as three.
 
-    5. ``CLAUSE_TRAILING`` — the key's trailing run is ASCII spaces or ASCII
-       dots (D-20). Evaluated **last**, after the separator test, and the
-       position is load-bearing: ``'a/'`` and ``'a\'`` are already refused by
-       clause 4 and existing tests assert *that* clause, so any earlier
-       placement would silently repoint a currently-refused key onto a new
-       clause.
+    5. ``CLAUSE_RESERVED`` **again — the reserved-device-name stem test.** The
+       key's pre-dot stem upper-cases to a member of :data:`_WIN_DEVICE_NAMES`
+       (D-20, widened by D-23). The stem test is what refuses ``con.npy`` and
+       ``COM1.dat`` as well as bare ``CON``: on Win32 a device name is still the
+       device with a suffix attached. The stem is right-stripped of ASCII spaces
+       **when the key contains a dot**, so ``CON .txt`` is refused too; see
+       :func:`_device_stem` for why that condition is a rule and not an
+       optimisation.
+
+       It reports ``CLAUSE_RESERVED`` rather than a clause of its own because
+       that wording — "is empty or a reserved path name" — already describes a
+       device name exactly, and because a new ``CLAUSE_DEVICE`` constant would
+       repoint the clause of **every** key the device set already covers
+       (``CON``, ``nul``, ``PRN``, ``AUX``, ``lpt9``, ``con.npy``,
+       ``COM1.dat``). That is a second published-vocabulary change in the same
+       round, and it is precisely the repointing this relocation exists to
+       prevent — applied to keys refused only one round ago. Two positions for
+       one constant is the deliberate alternative.
+    6. ``CLAUSE_TRAILING`` — the key's trailing run is ASCII spaces or ASCII
+       dots (D-20). Evaluated **last**.
+
+    **The rule the last two positions are really asserting, generalised (D-24).**
+    The original argument here read as a fact about one clause: the trailing test
+    is last because ``'a/'`` and ``'a\'`` are already refused by clause 4 and
+    existing tests assert *that* clause, so any earlier placement would silently
+    repoint a currently-refused key. That argument is correct and it is a fact
+    about a **pair** of late positions, 5 and 6, both held for the same reason:
+
+        *a clause added later must be placed so that no key already refused
+        changes the clause it reports* — because BC-GSEG-006 publishes the clause
+        strings as a grep target, so a repointed clause makes a correct
+        downstream grep start missing keys it used to find.
+
+    Applied here, that rule fixes both boundaries of position 5, and a reader who
+    knows only "put new clauses last" gets the second one wrong:
+
+    * The device test runs **after** the separator test (and after control and
+      absolute), so ``con.a/b``, ``nul.x\n``, ``aux.C:evil``,
+      ``com1.\\server\share\x`` and ``lpt1.a/`` keep reporting the clauses they
+      reported before the device half existed.
+    * It runs **before** the trailing test, so a device name that also ends in a
+      dot — ``con.``, ``com1. `` — keeps reporting ``CLAUSE_RESERVED``. Moving
+      the device test to genuinely last repoints those two the other way.
+
+    ↻ **CORRECTED by Plan 14-13 (D-24, § WR-05).** The previous round widened
+    clause 1 while it sat **first**, which repointed the five keys named above —
+    against this very docstring's promise. This is the correction of that, not a
+    note that the repointing was intended. The original clause-5 argument is
+    generalised above rather than erased.
 
     **Leading and interior dots are legal; only a trailing run is refused**
     (D-06 as amended by D-20). ``.hidden``, ``foo.bar``, ``z1.2345678`` and
@@ -281,14 +319,14 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     pass before D-20 and no longer does; that is the amendment, not a
     regression.
 
-    Clause 5 has a **wider consequence than the enumerated cases**, which is
+    Clause 6 has a **wider consequence than the enumerated cases**, which is
     stated here rather than left to be discovered downstream: because it strips
     a trailing *run*, a key consisting entirely of dots or spaces — ``'...'``,
     a lone ``' '`` — is refused too.
 
     **Two threats, not one, and the second is why the first argument survives
     unchanged.** The paragraph below is the *escape* argument and it is still
-    correct. Clauses 1 (device names), 3 (colon) and 5 (trailing run) address a
+    correct. Clauses 3 (colon), 5 (device names) and 6 (trailing run) address a
     **different** threat — *collision*:
 
     * Win32 strips trailing dots and spaces from a filename, so ``'a'``,
@@ -426,7 +464,10 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
             "key, and this function will not guess which of its components was meant."
         )
 
-    if key in _RESERVED_KEYS or _device_stem(key).upper() in _WIN_DEVICE_NAMES:
+    # Clause 1: the exact reserved keys only. The device-name half of this same
+    # clause constant is clause 5, below — see the docstring for why the two
+    # halves are held at two positions.
+    if key in _RESERVED_KEYS:
         _refuse(key, cache_dir, CLAUSE_RESERVED)
 
     if any(ord(char) < 32 or char == _DEL_CHAR for char in key):
@@ -440,8 +481,19 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     if any(sep in key for sep in _SEPARATORS) or len(posix.parts) != 1 or len(windows.parts) != 1:
         _refuse(key, cache_dir, CLAUSE_SEPARATOR)
 
-    # Last, deliberately: see clause 5 above. Compares against the whole key
-    # rather than testing emptiness, so ``'a.'`` is refused as well as ``'...'``.
+    # Clause 5, relocated here by D-24 — after control/absolute/separator so the
+    # five keys the round-2 widening repointed report their original clauses
+    # again, and *before* the trailing test so ``con.`` and ``com1. `` keep
+    # reporting this one. It reuses CLAUSE_RESERVED deliberately: a new
+    # CLAUSE_DEVICE constant would repoint every key the device set already
+    # covered, which is the same defect this move exists to remove.
+    if _device_stem(key).upper() in _WIN_DEVICE_NAMES:
+        _refuse(key, cache_dir, CLAUSE_RESERVED)
+
+    # Clause 6, last: see the docstring's placement rule. Compares against the
+    # whole key rather than testing emptiness, so ``'a.'`` is refused as well as
+    # ``'...'``. The stem strip above must never be folded into this test — this
+    # one is about the key's own trailing run.
     if key.rstrip(_TRAILING_CHARS) != key:
         _refuse(key, cache_dir, CLAUSE_TRAILING)
 
