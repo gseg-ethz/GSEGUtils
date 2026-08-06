@@ -35,6 +35,7 @@ from types import MappingProxyType
 from typing import (
     Any,
     Callable,
+    Final,
     Iterator,
     Mapping,
     MutableMapping,
@@ -151,6 +152,28 @@ class Factory[T: LazyDiskCache](Protocol):
 
 
 type Validator[T] = Callable[[object], TypeGuard[T]]
+
+
+# ---------------------------------------------------------------------------
+# Phase-14 pop sentinel (D-25)
+# ---------------------------------------------------------------------------
+
+#: Distinguishes "no default was supplied" from ``default=None`` in
+#: :meth:`DiskBackedStore.pop`.
+#:
+#: ``None`` cannot serve as that marker, and this is a property of *this* store
+#: rather than a stylistic preference: the entry mapping is typed
+#: ``dict[str, Optional[T]]`` — ``None`` is what an *offloaded* entry looks like
+#: — so a caller writing ``store.pop(key, None)`` is supplying a perfectly
+#: legitimate default and must stay distinguishable from a caller writing
+#: ``store.pop(key)``. Encoding "missing" as ``None`` would silently convert the
+#: no-default form into the defaulting one and stop ``pop(key)`` raising, which
+#: is the half of D-25 that is deliberately *not* changing.
+#:
+#: Annotated ``Any`` so it can be the default of a parameter annotated
+#: ``T | D``. That is sound rather than a hole: the object is never returned and
+#: never compared as a value — it is only ever tested with ``is``.
+_POP_DEFAULT_MISSING: Final[Any] = object()
 
 
 class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
@@ -423,10 +446,19 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         The catch tuple ``(KeyError, StoreKeyError)`` is therefore deliberate.
         It preserves D-11's shape rather than weakening it: ``__contains__`` is
         an explicit dict-backed membership test, so ``'../victim' in store`` is
-        ``False`` today and stays ``False``; with this override the two
+        ``False`` today and stays ``False``; with this override the **three**
         interrogative read routes agree (membership is ``False``, ``get``
-        returns the default) while the subscript still raises. No illegal key
-        reaches :meth:`_load_entry` by any route.
+        returns the default, and :meth:`pop` returns the default when one was
+        supplied) while the subscript still raises. No illegal key reaches
+        :meth:`_load_entry` by any route.
+
+        ↻ **CORRECTED by Plan 14-14 (D-25, § WR-01).** That sentence used to say
+        *two*, and the miscount was not a typo — it was the defect. ``pop``
+        reaches the subscript by exactly this route and stopped agreeing the
+        moment D-11 and D-12 landed, one accessor over from the change this
+        docstring argues for, with nobody deciding it. The surrounding argument
+        is unchanged because it was correct; only its enumeration was short. See
+        :meth:`pop`.
 
         The rejected alternative was widening :meth:`__getitem__` to raise
         :class:`KeyError` instead, so the inherited ``get`` would keep working.
@@ -495,6 +527,110 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             raise
         except (KeyError, paths.StoreKeyError):
             return default
+
+    @overload
+    def pop(self, key: str, /) -> T: ...
+
+    @overload
+    def pop[D](self, key: str, /, default: T | D) -> T | D: ...
+
+    def pop[D](self, key: str, /, default: T | D = _POP_DEFAULT_MISSING) -> T | D:
+        """Remove ``key`` and return its entry, or ``default`` if it is absent or illegal.
+
+        **This override is not redundant with the inherited method, for the
+        identical reason :meth:`get` is not — and it is here because the phase
+        broke this accessor without noticing.**
+        :class:`~typing.MutableMapping`'s ``pop`` is
+        ``try: value = self[key] except KeyError: return default``, so the moment
+        D-11 made :meth:`__getitem__` validate and D-12 made the refusal a
+        :class:`ValueError` rather than a :class:`KeyError`, ``pop`` stopped
+        catching it: ``store.pop('../victim', None)`` began **raising** where it
+        previously returned ``None``. That is the same mechanism, one accessor
+        over from the one it was diagnosed on. D-25 restores it, so every
+        *defaulting or interrogative read* route agrees again — membership
+        answers ``False``, :meth:`get` returns its default, and this returns its
+        default.
+
+        **Only the defaulting form is restored.** ``pop(key)`` with no default
+        raises on a miss in every mapping, and for an illegal key it raises
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, consistent with the
+        subscript (D-11/D-12) and with :meth:`~typing.MutableMapping.setdefault`.
+        Widening the fix to the bare form would make ``pop`` the one mapping
+        route that answers a miss with ``None``.
+
+        **Why** :meth:`~typing.MutableMapping.setdefault` **is deliberately left
+        raising**, stated here rather than left to be inferred from which method
+        happens to be overridden. ``setdefault`` travels the same subscript and
+        would move the same way — and it is a **write** route: it *inserts*, and
+        refusing an illegal key at a write route is the whole point of this
+        phase. A ``setdefault('../victim', entry)`` that returned its default
+        would answer as though the key were fine and then be expected to have
+        stored something under it. So the two accessors diverge **on purpose**;
+        a reader who finds one overridden and the other not is looking at a
+        decision, not an oversight. It is pinned by
+        ``test_route_setdefault_still_raises_because_it_is_a_write_route``.
+
+        **The containment carve-out, and why the handler is ordered.** Exactly as
+        in :meth:`get`:
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreContainmentError` is a *subclass*
+        of :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, so the broader catch
+        below would swallow it too — the library's own per-item handler doing
+        what the published contract page tells consumers not to do. A refused key
+        is evidence about *the caller's key*; a containment violation is evidence
+        about *the environment*, and degrading it into a default turns an attack
+        signal into an ordinary cache miss inside the caller's loop. The subclass
+        is therefore re-raised **before** the broader clause, and the order is
+        the entire mechanism: a subclass caught after its base is never reached,
+        so inverting these two clauses silently restores the swallow in a second
+        place.
+
+        **The delete is preserved, and it is what keeps this a** ``pop``. On
+        success the key is removed through :meth:`__delitem__` before the value
+        is returned. Losing that step would turn a write route into a read and
+        leave this method a second :meth:`get` under another name; it is asserted
+        directly rather than assumed.
+
+        Parameters
+        ----------
+        key : str
+            The store key to remove.
+        default : optional
+            Returned when ``key`` is absent from the store *or* refused by the
+            lexical rule. When **no** default is supplied the refusal or the
+            lookup error propagates instead; the two cases are told apart by
+            :data:`_POP_DEFAULT_MISSING`, because ``None`` is a legitimate
+            caller-supplied default for an ``Optional``-valued store.
+
+        Returns
+        -------
+        T or default
+            The removed entry, or ``default``.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key and no default
+            was supplied (STORE-01, D-11/D-12).
+        KeyError
+            If ``key`` is legal but absent and no default was supplied.
+        StoreContainmentError
+            If the path built for ``key`` would resolve outside the cache
+            directory. Deliberately **not** converted into ``default``, however
+            the call was made (WR-03).
+        """
+        try:
+            value = self[key]
+        except paths.StoreContainmentError:
+            # Environment evidence, not a bad key — never swallowed by a read.
+            # Must stay ABOVE the tuple below: it is a subclass of one of its
+            # members, so a handler ordered the other way never reaches here.
+            raise
+        except (KeyError, paths.StoreKeyError):
+            if default is _POP_DEFAULT_MISSING:
+                raise
+            return default
+        del self[key]
+        return value
 
     def __setitem__(self, key: str, value: T) -> None:
         """Validate ``key`` lexically and ``value`` structurally, then store in memory.
