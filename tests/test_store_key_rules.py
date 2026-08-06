@@ -18,6 +18,7 @@ escapes readably), and the case lists hoisted to module-level constants so a
 later group can reuse them rather than restate them.
 """
 
+import ast
 import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import cast
@@ -1044,4 +1045,221 @@ def test_validator_refuses_a_non_str_with_a_message_naming_the_received_type(val
     assert repr(value) in message, f"the refusal message does not carry repr({value!r}): {message!r}"
     assert not isinstance(excinfo.value, StoreContainmentError), (
         "a non-str key reported as a containment failure; it is a key-shape refusal, not environment evidence"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plan 14-15 Task 2: the contract page's key literals, checked against the
+# shipped rule rather than against a reviewer's one-off probe
+#
+# Round 2's reviewer verified every key literal on ``docs/source/LazyDiskCache.rst``
+# against ``is_valid_store_key`` by hand. Nothing in the repository did that, so
+# D-23's widening could have turned a page example from legal to illegal with a
+# green build — the strict docs build only fails in the *other* direction (a
+# broken reference), and the docs member allowlist means an omission is silent.
+# The probe is shipped here so doc/rule drift becomes a red build.
+# ---------------------------------------------------------------------------
+
+#: The published contract page, located exactly as ``tests/test_store_containment.py``
+#: locates it, so the two modules cannot end up reading different copies.
+CONTRACT_PAGE: Path = Path(__file__).resolve().parents[1] / "docs" / "source" / "LazyDiskCache.rst"
+
+#: The RST comment that opens a key-literal group on the page. The page carries
+#: one of these immediately above every construct this module parses, and each
+#: names this test — the reverse pointer is what stops a future editor
+#: restructuring a table into something the parser cannot see.
+_PAGE_MARKER = re.compile(r"^\.\.\s+CONTRACT-PAGE-KEYS:\s*(?P<group>[A-Z0-9-]+)\s*$")
+
+#: Extraction floors, one per partition, measured against the page as Plan 14-15
+#: shipped it. They exist because an agreement test whose parser matches nothing
+#: passes every assertion it makes — zero of them — and reports success. Round 2's
+#: own standard, that a test which cannot fail is not evidence, applies to the
+#: parser and not only to the rule.
+_MIN_LEGAL_PAGE_LITERALS: int = 6
+_MIN_REFUSED_PAGE_LITERALS: int = 29
+
+#: The shapes D-23 added to the device set. The page presented a strict subset of
+#: the refused device names before Plan 14-15; ``CON .txt`` is the one a reader is
+#: most likely to take for a typo, which is exactly why it has to be on the page.
+_WIDENED_DEVICE_SHAPES_THE_PAGE_MUST_SHOW: tuple[str, ...] = (
+    "COM0",
+    "LPT0",
+    "CONIN$",
+    "CONOUT$",
+    "com¹",
+    "CON .txt",
+)
+
+
+def _inline_literals(text: str) -> list[str]:
+    """Return the contents of every ``double-backtick`` inline literal in ``text``.
+
+    Deliberately refuses to span a newline: every key literal on the page sits on
+    one line, and allowing a match across lines would silently pair the opening
+    delimiter of one literal with the closing delimiter of another.
+    """
+    return re.findall(r"``([^`\n]+)``", text)
+
+
+def _quoted_keys(text: str) -> list[str]:
+    r"""Return the key each *double-quoted* inline literal in ``text`` denotes.
+
+    **The partitioning rule, stated once so the page can be written to it.** A key
+    literal on the contract page is written as a double-quoted Python string inside
+    an inline literal — ``"foo."``, ``"CON .txt"``, ``"x\ny"``. Anything else in an
+    inline literal (a clause name, a character class such as ``\x20``, a bare ``/``,
+    a module name) is *not* a key and is skipped. That one rule is what lets this
+    parser read prose tables without a hand-maintained list, and it is why a cell
+    may mention non-key literals freely.
+
+    The quoted form is evaluated with :func:`ast.literal_eval`, so the page's
+    escapes mean what they mean in Python: ``"x\ny"`` is a key containing a real
+    newline and ``"\\\\server\\share\\x"`` is a UNC path, rather than each being
+    the backslashes it is spelled with.
+    """
+    keys: list[str] = []
+    for raw in _inline_literals(text):
+        if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+            keys.append(cast(str, ast.literal_eval(raw)))
+    return keys
+
+
+def _code_block_after(lines: list[str], start: int) -> list[str]:
+    """Return the body lines of the first ``code-block`` directive at or after ``start``."""
+    index = start
+    while index < len(lines) and not lines[index].lstrip().startswith(".. code-block::"):
+        index += 1
+    if index == len(lines):
+        return []
+    directive_indent = len(lines[index]) - len(lines[index].lstrip())
+    body: list[str] = []
+    for line in lines[index + 1 :]:
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= directive_indent:
+            break
+        body.append(line.strip())
+    return body
+
+
+def _list_table_rows(lines: list[str], start: int) -> list[list[str]]:
+    """Parse the first ``list-table`` directive at or after ``start`` into rows of cells.
+
+    A row opens with ``* - `` and each further cell of that row with ``- `` at two
+    columns further in; anything else indented under the directive is a
+    continuation of the cell currently open. Returned rows include the header row,
+    because ``:header-rows: 1`` is the page's convention and dropping it here would
+    hide a table that lost its header.
+    """
+    index = start
+    while index < len(lines) and not lines[index].lstrip().startswith(".. list-table::"):
+        index += 1
+    if index == len(lines):
+        return []
+    directive_indent = len(lines[index]) - len(lines[index].lstrip())
+    rows: list[list[str]] = []
+    row_indent: int | None = None
+    for line in lines[index + 1 :]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= directive_indent:
+            break
+        stripped = line.strip()
+        if stripped.startswith("* - "):
+            row_indent = indent
+            rows.append([stripped[4:]])
+        elif rows and row_indent is not None and indent == row_indent + 2 and stripped.startswith("- "):
+            rows[-1].append(stripped[2:])
+        elif rows:
+            rows[-1][-1] += " " + stripped
+    return rows
+
+
+def _extract_page_key_literals() -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``(legal, refused)``, each mapping a page key literal to its page group.
+
+    The group name is carried through so a failure can name the section of the page
+    to edit — whoever trips this test is editing prose, not the rule, and needs the
+    line rather than the verdict.
+    """
+    lines = CONTRACT_PAGE.read_text(encoding="utf-8").splitlines()
+    legal: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for index, line in enumerate(lines):
+        match = _PAGE_MARKER.match(line.strip())
+        if match is None:
+            continue
+        group = match.group("group")
+        if group == "LEGAL-CODE-BLOCK":
+            for body_line in _code_block_after(lines, index):
+                tokens = body_line.split()
+                if tokens:
+                    legal.setdefault(tokens[0], group)
+        elif group.startswith("REFUSED-TABLE-COLUMN-"):
+            column = int(group.rsplit("-", 1)[1]) - 1
+            for row in _list_table_rows(lines, index)[1:]:
+                if column < len(row):
+                    for key in _quoted_keys(row[column]):
+                        refused.setdefault(key, group)
+    return legal, refused
+
+
+def test_contract_page_key_literals_agree_with_the_shipped_rule() -> None:
+    """Plan 14-15 / STORE-01 / T-14-67: the published grammar agrees with the shipped one.
+
+    Every key literal the contract page presents as legal is accepted by
+    :func:`is_valid_store_key`, and every literal it presents as refused is refused.
+    The page is the document a consumer composes keys against; a page that
+    advertises a legal key the rule refuses is the same drift the importing scan
+    snippet was written to prevent, moved from the rule to the examples.
+
+    The two floor assertions come first on purpose. They are assertions about the
+    *parser*, not about the page: a regex that silently matches nothing would make
+    every agreement assertion below vacuous and this test green.
+    """
+    legal, refused = _extract_page_key_literals()
+
+    assert len(legal) >= _MIN_LEGAL_PAGE_LITERALS, (
+        f"extracted only {len(legal)} 'legal' key literals from {CONTRACT_PAGE.name} "
+        f"(floor {_MIN_LEGAL_PAGE_LITERALS}) — the parser has stopped seeing the page. "
+        f"Check the '.. CONTRACT-PAGE-KEYS: LEGAL-CODE-BLOCK' marker and the code block "
+        f"below it. Extracted: {sorted(legal)}"
+    )
+    assert len(refused) >= _MIN_REFUSED_PAGE_LITERALS, (
+        f"extracted only {len(refused)} 'refused' key literals from {CONTRACT_PAGE.name} "
+        f"(floor {_MIN_REFUSED_PAGE_LITERALS}) — the parser has stopped seeing the page. "
+        f"Check the '.. CONTRACT-PAGE-KEYS: REFUSED-TABLE-COLUMN-*' markers and that every "
+        f"key literal in those columns is written as a double-quoted string. "
+        f"Extracted: {sorted(refused)}"
+    )
+
+    for key, group in sorted(legal.items()):
+        assert is_valid_store_key(key), (
+            f"{CONTRACT_PAGE.name} presents {key!r} as a legal key (page group {group}), "
+            f"but the shipped rule refuses it — the page advertises a key the library "
+            f"will not accept"
+        )
+    for key, group in sorted(refused.items()):
+        assert not is_valid_store_key(key), (
+            f"{CONTRACT_PAGE.name} presents {key!r} as a refused key (page group {group}), "
+            f"but the shipped rule accepts it — the page documents a refusal the library "
+            f"does not perform"
+        )
+
+
+def test_contract_page_presents_every_shape_the_widened_device_rule_refuses() -> None:
+    """Plan 14-15 / STORE-01 / § WR-04: the page's device examples are not a strict subset.
+
+    Agreement alone cannot catch this. Every device example the page carried before
+    Plan 14-15 was *correct*; the defect was that it was **short**, and a reader
+    composing ``CONIN$`` or ``CON .txt`` would have read the page as permission.
+    An omission is invisible to an agreement check, so it needs its own assertion.
+    """
+    _, refused = _extract_page_key_literals()
+    missing = [key for key in _WIDENED_DEVICE_SHAPES_THE_PAGE_MUST_SHOW if key not in refused]
+    assert not missing, (
+        f"{CONTRACT_PAGE.name} does not present these refused device shapes: {missing!r}. "
+        f"They are refused by the shipped rule (D-23) and the page's device row is the "
+        f"place a consumer looks before composing a key."
     )
