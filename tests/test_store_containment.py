@@ -2092,10 +2092,29 @@ def test_route_setstate_refuses_a_non_path_cache_dir_before_updating_the_instanc
     would otherwise be rendered into a message before anything noticed it was
     malformed.
 
-    The two legal shapes are asserted in the same function so the guard cannot
-    be over-tight. A store with no configured cache path is a supported
-    configuration, and a guard that broke it would be a regression rather than a
-    fix — which is exactly the failure mode a raise-only test would miss.
+    ↻ **CORRECTED by Plan 14-14 (§ WR-03).** This test used to end by asserting
+    that an *absent* base and an *explicitly-``None``* base were both accepted,
+    on the stated grounds that "a store with no configured cache path is a
+    supported configuration and a guard that broke it would be a regression."
+    The configuration is genuinely supported; it simply **does not produce
+    either shape**. ``__init__`` assigns a ``Path`` on *both* of its branches —
+    the no-cache-path arm falls back to ``Path(tempfile.mkdtemp())`` — so the
+    carve-out protected nothing real while admitting a state the constructor
+    cannot produce, after which the store accepted keys and died on the first
+    path build with a bare ``TypeError``. Both shapes are refusals now.
+
+    Worse, the ``absent_base`` half was **vacuous**: deleting the key from the
+    state dictionary and then calling ``__dict__.update`` does not *remove* an
+    attribute, so the victim kept the ``Path`` its own constructor assigned and
+    the sub-case asserted nothing at all. That is why the absent-base case below
+    asserts the state genuinely lacks the key before handing it over — the
+    vacuity is checked for rather than assumed away.
+
+    The over-tightness control did not disappear with the carve-out; it moved to
+    the configuration that actually needs it. See
+    ``test_route_setstate_ordinary_round_trips_still_work_under_every_configuration``
+    and the closing assertion of
+    ``test_route_setstate_refuses_a_cache_dir_shape_init_cannot_produce``.
 
     **Scope, recorded so it is not re-litigated.** No ``expected_cache_dir``
     parameter is added. The review offered one; the user declined the extra
@@ -2119,16 +2138,135 @@ def test_route_setstate_refuses_a_non_path_cache_dir_before_updating_the_instanc
     assert isinstance(victim.cache_dir, Path), "a non-Path containment base was installed"
     assert "legal_key" not in victim.store, "the hostile state's keys were installed anyway"
 
-    # ... and neither legal shape is refused.
+    # ... and so are the two shapes that used to be carved out, because
+    # ``__init__`` can produce neither of them.
     absent_base: dict[str, Any] = dict(donor.__dict__)
     del absent_base["_cache_dir"]
     absent_base["_store"] = {}
-    make_store(tmp_cache_dir).__setstate__(absent_base)
+    assert "_cache_dir" not in absent_base, (
+        "the absent-base case does not actually present an absent base; that is the vacuity WR-03 "
+        "found in this test's predecessor"
+    )
+    with pytest.raises(StoreKeyError, match="cache directory"):
+        make_store(tmp_cache_dir).__setstate__(absent_base)
 
     explicit_none: dict[str, Any] = dict(donor.__dict__)
     explicit_none["_cache_dir"] = None
     explicit_none["_store"] = {}
-    make_store(tmp_cache_dir).__setstate__(explicit_none)
+    with pytest.raises(StoreKeyError, match="cache directory"):
+        make_store(tmp_cache_dir).__setstate__(explicit_none)
+
+
+def test_route_setstate_refuses_a_cache_dir_shape_init_cannot_produce(
+    make_store: MakeStoreFn, tmp_cache_dir: Path, tmp_path: Path
+) -> None:
+    """Plan 14-14 / WR-03 / D-21 as tightened / T-14-60.
+
+    **The whole argument in one sentence:** ``__init__`` assigns a ``Path`` on
+    *both* of its cache-directory branches — a configured one, or
+    ``Path(tempfile.mkdtemp())`` when none was configured — so a pickled state
+    presenting anything else is malformed or legacy **by construction**, and
+    ``__setstate__`` refuses it rather than installing it.
+
+    D-21's original carve-out let an absent or explicitly-``None`` base through
+    on the grounds that a store with no configured cache path is supported. It
+    is supported, and it produces a ``Path``. So the carve-out protected no real
+    configuration while admitting a state the constructor forbids, after which
+    the store **accepted keys, tracked them**, and died at the first path build
+    with a bare ``TypeError``:
+
+        ``TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'``
+
+    That is the untyped-crash class this phase replaced with typed refusals
+    everywhere else, reached through the one route that could still produce it —
+    and while it lasted, ``cache_dir`` returned ``None`` under a ``-> Path``
+    annotation that mypy cannot see through a deserialization boundary.
+
+    **The "left unmodified" half is not decoration.** Asserting only that the
+    call raised would be satisfied by a guard placed *after*
+    ``__dict__.update``, which is the partially-restored store — a silently
+    short store by another name — that D-10 exists to prevent. Every refused
+    shape is therefore checked against a full before/after snapshot of the
+    target's attributes.
+
+    The closing assertion is the positive statement of the same guarantee, and
+    it is the over-tightness control the carve-out used to be: a store built
+    with **no configured cache path** round-trips, and its restored
+    cache-directory accessor returns a ``Path``.
+    """
+    donor = make_store(tmp_cache_dir)
+    shapes: dict[str, dict[str, Any]] = {}
+
+    a_string: dict[str, Any] = dict(donor.__dict__)
+    a_string["_cache_dir"] = str(tmp_path / "elsewhere")
+    a_string["_store"] = {}
+    shapes["a string"] = a_string
+
+    explicit_none: dict[str, Any] = dict(donor.__dict__)
+    explicit_none["_cache_dir"] = None
+    explicit_none["_store"] = {}
+    shapes["explicitly None"] = explicit_none
+
+    absent: dict[str, Any] = dict(donor.__dict__)
+    del absent["_cache_dir"]
+    absent["_store"] = {}
+    assert "_cache_dir" not in absent, "the absent-base state still carries the key, so this case tests nothing"
+    shapes["absent"] = absent
+
+    for label, state in shapes.items():
+        victim = make_store(tmp_cache_dir)
+        before = dict(victim.__dict__)
+        with pytest.raises(StoreKeyError, match="cache directory"):
+            victim.__setstate__(state)
+        assert dict(victim.__dict__) == before, (
+            f"__setstate__ modified the instance before refusing a {label} containment base; a "
+            "partially restored store is the failure this guard exists to prevent"
+        )
+        assert isinstance(victim.cache_dir, Path), (
+            f"the {label} base was installed, so cache_dir now falsifies its own -> Path annotation"
+        )
+
+    # The over-tightness control, stated positively: the configuration the old
+    # carve-out claimed to protect really is supported, and it really does carry
+    # a Path across the boundary.
+    fallback_store = _store_with_cache_path(None, fallback_root=tmp_path)
+    revived: DiskBackedStore[DiskBackedNDArray] = pickle.loads(pickle.dumps(fallback_store))
+    assert isinstance(revived.cache_dir, Path), (
+        "a store built without a configured cache path no longer restores a Path — the guard is "
+        "over-tight, which is a regression rather than a fix"
+    )
+
+
+def test_route_setstate_reports_the_base_before_the_keys(make_store: MakeStoreFn, tmp_cache_dir: Path) -> None:
+    """Plan 14-14 / WR-03 / D-21 — the *placement*, not merely the presence.
+
+    A pickled state carrying **both** a malformed containment base and an
+    illegal key must report the **base**. That is what the guard's position
+    ahead of the per-key loop buys, and it is a concrete requirement rather than
+    tidiness: the refusal message for a bad key interpolates the incoming base,
+    so a guard placed after the loop renders a malformed base into a message
+    before anything has noticed it is malformed.
+
+    Written up front rather than added only if a mutation happened to survive. A
+    control that is authored in response to its own mutation is the deletable
+    shape round-1 CR-01 was, and the phase has now met it twice.
+    """
+    donor = make_store(tmp_cache_dir)
+    both_wrong: dict[str, Any] = dict(donor.__dict__)
+    both_wrong["_cache_dir"] = None
+    both_wrong["_store"] = {ILLEGAL_KEY: None}
+
+    victim = make_store(tmp_cache_dir)
+    with pytest.raises(StoreKeyError) as excinfo:
+        victim.__setstate__(both_wrong)
+
+    message = str(excinfo.value)
+    assert "cache directory" in message, (
+        f"the base was not what was reported; the per-key loop ran first and reported the key instead: {message!r}"
+    )
+    assert "Invalid store key" not in message, (
+        f"the key was reported ahead of the malformed base, so the guard sits below the per-key loop: {message!r}"
+    )
 
 
 @pytest.mark.parametrize("enable_caching", [True, False], ids=["caching-on", "caching-off"])
