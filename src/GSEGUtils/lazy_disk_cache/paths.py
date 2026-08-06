@@ -47,13 +47,9 @@ __all__ = [
     "get_meta_tmp_path",
 ]
 
-import logging
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Final, NoReturn, Optional
-
-logger = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Phase-14 exception hierarchy (D-12)
@@ -177,6 +173,22 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     perfectly well-typed :class:`str`, so adding it would read as the rule while
     enforcing nothing.
 
+    That reasoning stands unchanged. The explicit non-``str`` guard below is not
+    a reversal of it — it is its **replacement for the type axis specifically**.
+    Leaving the decorator off answered the value axis correctly and left the
+    type axis with no answer at all, which is a defect on a *published*
+    predicate: :func:`is_valid_store_key` documents a :class:`bool` return, and
+    a non-``str`` used to escape it as a bare :exc:`TypeError` from the
+    control-character scan. One explicit guard answers the type axis at the one
+    place the predicate can honour its documented return type, without importing
+    a decorator that would overstate what is being checked.
+
+    The guard is the **first** statement of this function, ahead of the
+    reserved-name membership test, and the position is load-bearing rather than
+    stylistic: ``key in _RESERVED_KEYS`` raises ``TypeError: unhashable type``
+    for an unhashable argument, so a guard placed after it would leave one input
+    class still escaping as exactly the bare :exc:`TypeError` this fixes.
+
     Parameters
     ----------
     key : str
@@ -194,12 +206,29 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     Raises
     ------
     StoreKeyError
-        If ``key`` violates any clause of the rule. ``StoreKeyError`` subclasses
-        :class:`ValueError` (D-12), so every existing ``except ValueError``
-        still catches it, and it is deliberately *not* a :class:`KeyError` —
+        If ``key`` is not a :class:`str` at all, or if it violates any clause of
+        the rule. ``StoreKeyError`` subclasses :class:`ValueError` (D-12), so
+        every existing ``except ValueError`` still catches it, and it is
+        deliberately *not* a :class:`KeyError` —
         :meth:`DiskBackedStore.add_data_to_store` already raises that one for
-        "key exists".
+        "key exists". The non-``str`` refusal names the received type and
+        carries a ``repr`` of the value, and deliberately reports **no**
+        ``CLAUSE_*``: the clause vocabulary describes how a key is *shaped*, and
+        a value that is not a ``str`` is not a key at all.
     """
+    # Widened to ``object`` before the test so the type checker does not discard
+    # the branch as statically unreachable. It *is* statically unreachable and
+    # entirely reachable at runtime — a caller who ignores the annotation is the
+    # case this guard exists for, and a path-typed identifier fed straight into
+    # the published pre-check is the real reported shape.
+    supplied: object = key
+    if not isinstance(supplied, str):
+        raise StoreKeyError(
+            f"Invalid store key {supplied!r}: a store key must be a str, but got "
+            f"{type(supplied).__name__}. Convert it explicitly — a path-typed identifier is not a "
+            "key, and this function will not guess which of its components was meant."
+        )
+
     if key in _RESERVED_KEYS:
         _refuse(key, cache_dir, CLAUSE_RESERVED)
 
@@ -227,10 +256,20 @@ def is_valid_store_key(key: str) -> bool:
     Downstreams can also use it to pre-check a composed feature name *before* it
     becomes a key, or to decide per-tile without catching an exception.
 
+    **The predicate is total: every argument produces a** :class:`bool`. A
+    non-``str`` is refused by :func:`validate_store_key`'s own type guard as a
+    :exc:`StoreKeyError`, which this function already catches, so nothing
+    escapes as an exception — there is deliberately no second guard here. That
+    totality is what lets a downstream pre-check a path-typed identifier without
+    wrapping the call, which is the shape the "decide per-tile without catching
+    an exception" guidance above was written for.
+
     Parameters
     ----------
     key : str
-        The candidate store key, exactly as the caller supplied it.
+        The candidate store key, exactly as the caller supplied it. Annotated
+        ``str`` because that is the supported call, but a caller who ignores the
+        annotation gets ``False`` rather than a :exc:`TypeError`.
 
     Returns
     -------
@@ -262,11 +301,11 @@ def is_valid_store_key(key: str) -> bool:
 # ``_purge_cache_pair`` dead branch is STORE-06 and belongs to Phase 15. The
 # move is what makes that fix a one-liner rather than a refactor.
 
-NPY_SUFFIX: str = ".npy"
-META_SUFFIX: str = ".meta.json"
-LEGACY_PICKLE_SUFFIX: str = ".pkl"
-MEMMAP_SUFFIX: str = ".dat"
-TMP_SUFFIX: str = ".tmp"
+NPY_SUFFIX: Final[str] = ".npy"
+META_SUFFIX: Final[str] = ".meta.json"
+LEGACY_PICKLE_SUFFIX: Final[str] = ".pkl"
+MEMMAP_SUFFIX: Final[str] = ".dat"
+TMP_SUFFIX: Final[str] = ".tmp"
 
 
 # ---------------------------------------------------------------------------
