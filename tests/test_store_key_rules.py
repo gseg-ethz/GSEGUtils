@@ -29,6 +29,7 @@ from GSEGUtils.lazy_disk_cache.paths import (
     CLAUSE_CONTROL,
     CLAUSE_RESERVED,
     CLAUSE_SEPARATOR,
+    CLAUSE_TRAILING,
     StoreContainmentError,
     StoreKeyError,
     is_valid_store_key,
@@ -70,6 +71,43 @@ FULLWIDTH_DOTS_KEY: str = "\uff0e\uff0e"
 #: separator, not for its dots.
 FULLWIDTH_SEPARATOR_KEY: str = "\uff0e\uff0e/victim"
 
+#: Reserved Win32 device names (Plan 14-09 / D-20 / WR-05). Matched on the
+#: **pre-dot stem**, upper-cased, so an extension-bearing device name is caught
+#: too — on Win32 ``con.npy`` is still the console with a suffix attached, and a
+#: write to it is discarded while a read comes back empty.
+#:
+#: ``lpt9`` is lower-case and ``con.npy`` mixed with an extension on purpose:
+#: between them they pin that the match is case-insensitive *and* stem-based,
+#: which a set-membership test over the raw key would fail.
+WIN_DEVICE_KEYS: tuple[str, ...] = ("CON", "NUL", "PRN", "AUX", "lpt9", "con.npy", "COM1.dat")
+
+#: Keys whose trailing run is spaces or dots (Plan 14-09 / D-20 / WR-05). Win32
+#: strips both, so ``'a'``, ``'a '`` and ``'a.'`` become **one file** — two
+#: distinct store keys silently overwriting one artefact.
+#:
+#: ``'...'`` and ``' '`` are not among the keys D-20 enumerates and are here
+#: because they are a *wider consequence* of the rule as written: stripping the
+#: trailing run empties them entirely. Discovering that from a downstream rather
+#: than from this list is exactly the outcome the list exists to prevent.
+TRAILING_KEYS: tuple[str, ...] = ("foo.", "a ", "x.", "...", " ")
+
+#: An NTFS alternate-data-stream name (Plan 14-09 / D-20 / WR-05). It needs its
+#: own case because :class:`~pathlib.PureWindowsPath` detects only *single-letter*
+#: drives: ``PureWindowsPath('ab:cd').drive`` is ``''``, so the pre-existing
+#: ``anchor``/``drive`` test does not catch it and no amount of tightening that
+#: test would. Reported under the absolute clause, which already covers
+#: drive-relative constructs.
+COLON_KEY: str = "ab:cd"
+
+#: The D-20 collision additions with their clauses. Kept as its own list so the
+#: widening is legible as one decision rather than scattered through
+#: :data:`REFUSED_KEYS`, and so the group-subset guard can name it.
+WIN_COLLISION_KEYS: list[tuple[str, str]] = [
+    *[(key, CLAUSE_RESERVED) for key in WIN_DEVICE_KEYS],
+    *[(key, CLAUSE_TRAILING) for key in TRAILING_KEYS],
+    (COLON_KEY, CLAUSE_ABSOLUTE),
+]
+
 #: Every key the rule must refuse, paired with the clause it must report under
 #: the validator's fixed evaluation order. One list serves the refusal groups,
 #: Task 2's predicate-agreement group and Task 2's message assertions — which
@@ -85,17 +123,23 @@ REFUSED_KEYS: list[tuple[str, str]] = [
     ("x\n", CLAUSE_CONTROL),
     ("x\x00y", CLAUSE_CONTROL),
     (FULLWIDTH_SEPARATOR_KEY, CLAUSE_SEPARATOR),
+    *WIN_COLLISION_KEYS,
 ]
 
 #: Every key the rule must accept. This is the over-tight-allowlist regression
 #: guard and it protects a cross-repo contract: pc2img treats feature names as
 #: simultaneously public API and cache key, so an allowlist drawn around
 #: today's grammar makes the next legitimate feature name a break.
+#:
+#: ↻ AMENDED by Plan 14-09 (D-20, which amends locked D-06): ``'foo.'`` used to
+#: be a member of this tuple and is now in :data:`TRAILING_KEYS` instead. That
+#: move is the *point* of the widening and it makes Phase 14 unambiguously
+#: breaking — **do not restore it**. Leading dots are unaffected: ``.hidden`` is
+#: still here, because the rule refuses a trailing dot, not a dot.
 ACCEPTED_KEYS: tuple[str, ...] = (
     ".hidden",
     "foo.bar",
     "z1.2345678",
-    "foo.",
     "a.npy",
     "rrim_pack_(range,r16,d8,z1e-05)",
     "norm_(range,2,98)",
@@ -144,6 +188,9 @@ def test_refused_key_groups_are_all_present_in_the_master_list() -> None:
         ("DEGENERATE_KEYS", DEGENERATE_KEYS),
         ("WINDOWS_TRAVERSAL_KEY", (WINDOWS_TRAVERSAL_KEY,)),
         ("FULLWIDTH_SEPARATOR_KEY", (FULLWIDTH_SEPARATOR_KEY,)),
+        ("WIN_DEVICE_KEYS", WIN_DEVICE_KEYS),
+        ("TRAILING_KEYS", TRAILING_KEYS),
+        ("COLON_KEY", (COLON_KEY,)),
     ):
         missing = sorted(set(group) - master)
         assert not missing, f"{group_name} carries keys absent from REFUSED_KEYS: {missing!r}"
@@ -276,6 +323,93 @@ def test_degenerate_trailing_separators_survive_pathlib_normalisation() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Group 4b — Win32 / APFS collision shapes (Plan 14-09 / D-20 / WR-05,
+#            T-14-31, T-14-32)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("key", "clause"), WIN_COLLISION_KEYS)
+def test_win32_collision_shaped_key_is_refused(key: str, clause: str) -> None:
+    r"""Plan 14-09 / STORE-01 / D-20: collision shapes are refused, not only escape shapes.
+
+    The rule already imported :class:`~pathlib.PureWindowsPath` to refuse
+    ``..\..\x``, ``C:evil`` and UNC *on Linux*, so Win32 was inside the threat
+    model by construction — but it stopped at **escape**. These keys are
+    **collisions**, a different threat: two distinct keys collapsing onto one
+    artefact, which is the sanitise-rather-than-reject failure this phase set
+    out to avoid.
+
+    * A **trailing space or dot** is stripped by Win32, so ``'a'``, ``'a '`` and
+      ``'a.'`` become one file and one silently overwrites the other's data.
+    * A **device name** routes the write to a character device: writes are
+      discarded and reads come back empty. It is still the device with a suffix
+      attached, so ``con.npy`` is refused too.
+    * A **colon** opens an NTFS alternate data stream, hiding bytes outside the
+      visible artefact.
+
+    None of these is an escape, and the containment layer cannot see any of them
+    — they are all lexically inside the cache directory. The lexical rule is the
+    only layer that can refuse them.
+    """
+    with pytest.raises(StoreKeyError, match=re.escape(clause)):
+        validate_store_key(key, _CACHE_DIR)
+    assert not is_valid_store_key(key), f"the predicate accepted the collision-shaped key {key!r}"
+
+
+def test_widening_refuses_a_trailing_dot_but_not_a_leading_or_interior_one() -> None:
+    """Plan 14-09 / STORE-01 / D-20 (amending D-06): the rule refuses trailing dots, not dots.
+
+    The obvious reading of "dots are now restricted" is wrong, and this test is
+    what makes the boundary observable rather than a docstring claim. D-06 made
+    **all** dots legal except the exact ``.`` and ``..``; D-20 removes exactly
+    one case from that — the trailing run — and leaves leading and interior dots
+    untouched.
+
+    The paired assertions are the point: the same stem is legal with the dot in
+    front and refused with the dot behind. A future "simplification" that
+    refused dots generally would fail here rather than in a downstream's feature
+    name.
+    """
+    for legal in (".hidden", ".x", "foo.bar", "z1.2345678", "a.npy"):
+        validate_store_key(legal, _CACHE_DIR)  # must not raise
+        assert is_valid_store_key(legal), f"the widening refused the legal dotted key {legal!r}"
+
+    for refused in ("hidden.", "x.", "foo.bar.", "a.npy."):
+        with pytest.raises(StoreKeyError, match=re.escape(CLAUSE_TRAILING)):
+            validate_store_key(refused, _CACHE_DIR)
+        assert not is_valid_store_key(refused), f"the predicate accepted the trailing-dot key {refused!r}"
+
+
+def test_widening_does_not_change_the_clause_reported_by_an_already_refused_key() -> None:
+    r"""Plan 14-09 / STORE-01 / D-20: evaluation order is preserved for every pre-existing refusal.
+
+    The trailing test is placed **last**, after the separator test, and that
+    position is load-bearing rather than tidy. ``'a/'`` and ``'a\'`` are already
+    refused by the separator clause and existing tests assert *that* clause; a
+    trailing test placed earlier would silently repoint them. ``'.'`` and
+    ``'..'`` end in dots and would likewise be re-reported under the new clause
+    from any position ahead of the reserved test.
+
+    This test pins the three keys that would move if the order were changed,
+    independently of the parametrised groups that would also catch it — because
+    a reordering is exactly the kind of edit that comes with "and update the
+    expected clauses" attached.
+    """
+    for key, clause in (
+        ("a/", CLAUSE_SEPARATOR),
+        ("a\\", CLAUSE_SEPARATOR),
+        ("..", CLAUSE_RESERVED),
+        (".", CLAUSE_RESERVED),
+    ):
+        with pytest.raises(StoreKeyError, match=re.escape(clause)) as excinfo:
+            validate_store_key(key, _CACHE_DIR)
+        assert CLAUSE_TRAILING not in str(excinfo.value), (
+            f"{key!r} is now reported under the trailing clause; the new test ran ahead of "
+            f"the {clause!r} test and changed a pre-existing refusal"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Group 5 — the accepted set (D-06, T-14-08)
 # ---------------------------------------------------------------------------
 
@@ -377,6 +511,9 @@ CLAUSE_REPRESENTATIVES: list[tuple[str, str]] = [
     ("x\n", CLAUSE_CONTROL),
     ("/etc/passwd", CLAUSE_ABSOLUTE),
     ("../victim", CLAUSE_SEPARATOR),
+    # Plan 14-09 / D-20: added so the D-13 three-element assertion covers the
+    # whole clause vocabulary rather than the pre-widening subset.
+    ("foo.", CLAUSE_TRAILING),
 ]
 
 
