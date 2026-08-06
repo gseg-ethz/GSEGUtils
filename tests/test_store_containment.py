@@ -1498,9 +1498,12 @@ def test_route_rescan_requires_the_derived_key_to_rebuild_its_own_file(
     assert "ordinary" in store.keys(), "the rescan adopted nothing, so the negative assertion proves nothing"
     assert drifting.exists(), "the rescan deleted a file it should only skip"
 
-    assert any(drifting.name in message and repr("drifting") in message for message in _warning_messages(caplog)), (
-        "no WARNING named the skipped file together with the key that was derived for it"
-    )
+    # ``repr`` on both halves, matching the message (D-13 / Plan 14-12). This
+    # name needs no escaping so a raw match would also pass; it is written this
+    # way so the two rescan assertions agree about what the message contains.
+    assert any(
+        repr(drifting.name) in message and repr("drifting") in message for message in _warning_messages(caplog)
+    ), "no WARNING named the skipped file together with the key that was derived for it"
 
 
 def test_route_rescan_survives_a_builder_that_refuses_during_the_round_trip(
@@ -1701,7 +1704,12 @@ def test_rescan_and_the_published_snippet_derive_the_same_key_for_every_seeded_f
                 f"the store adopted {expected!r}, which the published rule refuses — the reopen "
                 "scan and the published scan disagree about this file"
             )
-            assert any(artefact.name in message and repr(expected) in message for message in messages), (
+            # The filename is matched through ``repr`` because the message
+            # renders it that way (D-13, extended to this call site by Plan
+            # 14-12 / CR-01). A raw-substring match was correct until then and
+            # goes red for exactly one seeded file — ``evil\..\x.npy``, whose
+            # backslashes ``repr`` doubles — which is the escaping working.
+            assert any(repr(artefact.name) in message and repr(expected) in message for message in messages), (
                 f"no WARNING named {artefact.name!r} together with the key {expected!r} the snippet "
                 f"derives for it; captured warnings were {messages!r}"
             )

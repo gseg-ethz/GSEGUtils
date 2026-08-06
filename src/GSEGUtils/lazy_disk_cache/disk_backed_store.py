@@ -302,13 +302,44 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             if skip_reason is not None:
                 # One call site, not two, with the reason interpolated: a
                 # downstream grepping its logs has one message shape to match.
+                #
+                # D-13 (Plan 14-12, CR-01) — EVERY UNTRUSTED COMPONENT OF THAT
+                # SHAPE IS QUOTED, and this is the message where the rule
+                # actually bites. It is the ONLY one in this subsystem whose
+                # input is genuinely untrusted: it renders names read off the
+                # cache directory, written by whoever can write into it, and a
+                # newline is a legal POSIX filename character. The derived key
+                # beside it was already `%r`; the filename was not, which is
+                # what makes the omission an oversight rather than a policy.
+                #
+                # The failure mode is not a garbled line but a WELL-FORMED
+                # FORGED RECORD: the reproduction planted a filename that made
+                # one `logger.warning` call emit three lines, the second reading
+                # "WARNING:all clear, 0 files skipped" while a file was in fact
+                # being skipped. That is worse here than anywhere else in the
+                # module precisely because D-09 chose warn-and-skip — the log is
+                # the ONLY signal this policy leaves the reader, and BC-GSEG-006
+                # tells downstreams to grep it.
+                #
+                # `str(self._cache_dir)` rather than the `Path`, so `%r` renders
+                # the path TEXT quoted rather than the `PosixPath(...)`
+                # constructor repr — the shape `_refuse` already established with
+                # `repr(str(cache_dir))`, so the two messages read alike.
+                #
+                # `skip_reason` is checked rather than assumed: two of its three
+                # values are module-owned literals, and the third interpolates a
+                # `StoreKeyError` built by `_refuse`, which already applies
+                # `repr` to both the key and the cache directory — so it is safe
+                # transitively rather than by construction. The regression test
+                # asserts the WHOLE emitted record is single-line, which covers
+                # that branch whatever produced it.
                 logger.warning(
-                    "Skipping cache file %s in cache directory %s: %s (derived key %r), so it "
+                    "Skipping cache file %r in cache directory %r: %s (derived key %r), so it "
                     "cannot be tracked and the entry is unreachable. The file is left untouched; "
                     "scan the directory with GSEGUtils.lazy_disk_cache.is_valid_store_key to find "
                     "every affected entry.",
                     f.name,
-                    self._cache_dir,
+                    str(self._cache_dir),
                     skip_reason,
                     key,
                 )
