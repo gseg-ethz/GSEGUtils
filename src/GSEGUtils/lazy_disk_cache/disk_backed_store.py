@@ -963,7 +963,16 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
     @property
     def cache_dir(self) -> Path:
-        """Return the directory where offloaded codec pairs are written."""
+        """Return the directory where offloaded codec pairs are written.
+
+        The ``-> Path`` annotation is **enforced**, including across the one
+        route that could falsify it. :meth:`__init__` assigns a ``Path`` on both
+        of its branches, and since Plan 14-14 (§ WR-03) :meth:`__setstate__`
+        refuses any pickled containment base that is not one — absent and
+        ``None`` included — so this accessor cannot return a value the
+        annotation forbids. Before that it could, and a type checker had no way
+        to see it happen.
+        """
         return self._cache_dir
 
     def keys(self) -> list[str]:
@@ -1179,8 +1188,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         ------
         StoreKeyError
             If the pickled state carries a key the STORE-01 lexical rule
-            refuses (D-10), **or** if it carries a ``_cache_dir`` that is
-            present and is not a :class:`~pathlib.Path` (D-21).
+            refuses (D-10), **or** if its ``_cache_dir`` is not a
+            :class:`~pathlib.Path` — absent and ``None`` included, since
+            :meth:`__init__` can produce neither (D-21 as tightened by § WR-03).
 
         Notes
         -----
@@ -1252,6 +1262,15 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         malformed base would otherwise be rendered into a message before anything
         noticed it was malformed.
 
+        ↻ **TIGHTENED by Plan 14-14 (§ WR-03).** As first shipped the guard
+        carved out an absent or explicitly-``None`` base, to protect the
+        no-cache-path configuration. That configuration produces a
+        ``mkdtemp`` :class:`~pathlib.Path`, never ``None``, so the carve-out
+        protected nothing while admitting a state :meth:`__init__` cannot
+        produce — after which the store accepted keys and died on the first path
+        build with a bare :exc:`TypeError`. The test is now a single positive
+        one: the base must **be** a :class:`~pathlib.Path`.
+
         **What that guard buys, and what it does not.** It catches *malformed or
         legacy state* — which is the case D-10 actually names. It does **not**
         defend against a hostile pickle: unpickling untrusted data is
@@ -1275,11 +1294,45 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         # store with no configured cache path is a supported configuration and
         # this guard must not break it. Only a *present, non-Path* base is
         # refused.
-        if incoming_cache_dir is not None and not isinstance(incoming_cache_dir, Path):
+        #
+        # ↻ CORRECTED by Plan 14-14 (§ WR-03). The sentence above is kept rather
+        # than deleted, because half of it is true and the half that is not is
+        # the instructive part. A store with no configured cache path IS a
+        # supported configuration — and it does NOT produce either of the shapes
+        # the carve-out admitted: `__init__` assigns a `Path` on BOTH of its
+        # branches, falling back to `Path(tempfile.mkdtemp())` when
+        # `config.cache_path` is `None`. So the carve-out protected no real
+        # configuration while admitting a state the constructor cannot produce.
+        #
+        # What that bought, measured rather than argued: the store accepted keys,
+        # tracked them, and then died at the first path build with
+        # `TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'` —
+        # the untyped-crash class this phase replaced with typed refusals
+        # everywhere else — while `cache_dir` returned `None` under a `-> Path`
+        # annotation no type checker can see through a pickle.
+        #
+        # The test is therefore a single POSITIVE type test: absent, `None` and
+        # every other non-`Path` value are refused alike, because `__init__` can
+        # produce none of them. The configuration that genuinely needs protecting
+        # is the no-cache-path store, which carries a `Path` like any other and
+        # is covered by
+        # `test_route_setstate_ordinary_round_trips_still_work_under_every_configuration`
+        # and by the closing assertion of
+        # `test_route_setstate_refuses_a_cache_dir_shape_init_cannot_produce`.
+        #
+        # The guard stays AHEAD of the per-key loop, and that placement is a
+        # requirement rather than tidiness: the refusal message for a bad key
+        # interpolates the incoming base, so a guard below the loop would render
+        # a malformed base into a message before anything noticed it was
+        # malformed. Pinned by `test_route_setstate_reports_the_base_before_the_keys`.
+        if not isinstance(incoming_cache_dir, Path):
             raise paths.StoreKeyError(
                 f"Invalid pickled cache directory {incoming_cache_dir!r}: the restored containment "
-                f"base must be a pathlib.Path, but got {type(incoming_cache_dir).__name__}. This is "
-                "malformed or legacy pickled state; nothing has been restored."
+                f"base must be a pathlib.Path, but got {type(incoming_cache_dir).__name__}. "
+                "__init__ assigns a Path on both of its branches — a configured cache_path, or a "
+                "tempfile.mkdtemp() fallback — so no store this codebase constructs can present "
+                "this shape. That makes it malformed or legacy pickled state; nothing has been "
+                "restored."
             )
         for incoming_key in incoming_store:
             paths.validate_store_key(incoming_key, incoming_cache_dir)
