@@ -9,7 +9,7 @@ builder-containment and symlink tests; Plan 14-07 extends it with the migration
 snippet's round-trip.
 
 The point of this file is the *differences* between the routes. Four distinct
-policies apply to six routes, and each difference is a decision:
+policies apply to eight routes, and each difference is a decision:
 
 ===================== ============================================== ======
 Route                 Policy                                         Basis
@@ -17,20 +17,33 @@ Route                 Policy                                         Basis
 ``__setitem__``       raise, with no filesystem syscall              SC-1
 ``add_data_to_store`` raise, unconditionally                         SC-1
 ``__getitem__``       raise, before ``_load_entry`` touches disk     D-11
-``get``               return the default                            D-11a
+``get``               return the default                             D-11a
 ``__init__`` rescan   warn and skip, leaving the file untouched      D-09
 ``__setstate__``      raise, never a silently short store            D-10
 ``store`` property    not a write route at all — a read-only view    D-19
+``__getstate__``      not a write route at all — a detached snapshot D-19
 ===================== ============================================== ======
 
-The last row is the odd one out on purpose, and the difference is the decision:
-the other six routes *validate* a write, while the ``store`` property has no
-write to validate. Plan 14-08 closed it structurally rather than adding a
-seventh validation site, so SC-1's "every route" is an invariant rather than an
-enumeration of the routes someone remembered.
+The last two rows are the odd ones out on purpose, and the difference is the
+decision: the other six routes *validate* a write, while these two have no
+write to validate. Plan 14-08 closed the ``store`` property structurally rather
+than adding a seventh validation site, so SC-1's "every route" is an invariant
+rather than an enumeration of the routes someone remembered.
+
+The final row is that same argument **finished**, and it is here because the
+enumeration was not the whole set of protocol routes. Plan 14-08's structural
+closure was premature as stated: ``__getstate__``'s shallow
+``self.__dict__.copy()`` still aliased the entry mapping, so the snapshot it
+returned was a live write route into ``_store`` through a public protocol
+method — and ``copy.copy(store)``, which travels the same protocol, handed back
+a store sharing the original's key set. Plan 14-12 detaches the snapshot
+(CR-02). A claim quantified over "every route" that is maintained by
+enumerating routes degrades silently at the next route somebody adds, which is
+precisely how this one was missed.
 """
 
 import ast
+import copy
 import inspect
 import os
 import pickle
@@ -1413,6 +1426,73 @@ def test_route_store_property_is_a_read_only_view_not_a_write_route(
     assert list(view) == ["legal_key"]
     assert view["legal_key"] is store._store["legal_key"]
     assert dict(view) == dict(store._store)
+
+
+def test_route_getstate_hands_out_a_detached_copy_of_the_entry_mapping(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-12 / CR-02 / SC-1 / D-19 completed / T-14-50 / T-14-51.
+
+    **The other half of the test directly above, and separating them is how
+    this one went unnoticed for a round.** D-19 argued the ``store`` property
+    was closed *structurally* — "there is no write to validate, so there is no
+    site to forget" — but :meth:`~DiskBackedStore.__getstate__` took a
+    **shallow** ``self.__dict__.copy()``, so ``state['_store'] is self._store``:
+    a second live route into the same mapping, through a public protocol
+    method, and therefore a write route SC-1's *every route* quantifier covers.
+    The counterexample was the very line ``__setstate__``'s Notes block quoted
+    as evidence.
+
+    The second half has nothing to do with keys and is plainer:
+    ``copy.copy`` routes through ``__reduce_ex__`` → ``__getstate__`` →
+    ``__setstate__``, so a shallow entry mapping made two nominally independent
+    stores one store — insert into the copy and the original grew the key. On a
+    class explicitly designed to travel through joblib/loky, that is a
+    data-integrity defect rather than a curiosity.
+
+    **The behavioural assertions are not decoration.** An identity-only test is
+    satisfied by a ``__getstate__`` that "detached" by handing back an empty
+    dict — a silently short store, which is the failure D-10 exists to prevent.
+    So the detached mapping must also compare *equal* to the original, and the
+    over-tightness control lives in
+    ``test_route_setstate_ordinary_round_trips_still_work_under_every_configuration``.
+
+    The detachment is at the **mapping** level only: the entry values are still
+    the same objects, asserted here so the docstring's claim is pinned to
+    exactly what it says and no more.
+    """
+    store = make_store(tmp_cache_dir)
+    store["legal_key"] = _entry()
+    baseline = store.keys()
+    assert baseline == ["legal_key"]
+
+    # -- the __getstate__ route ------------------------------------------
+    state = store.__getstate__()
+    assert state["_store"] is not store._store, (
+        "__getstate__ handed out the internal mapping itself; the write route CR-02 reported is "
+        "still open, one accessor over from the one D-19 closed"
+    )
+    assert state["_store"] == store._store, (
+        "the snapshot's mapping does not compare equal to the store's own — a snapshot that "
+        "detached by dropping entries is a silently short store, not a fix"
+    )
+    assert state["_store"]["legal_key"] is store._store["legal_key"], (
+        "the detachment reached the values; it is a mapping-level copy, not a deep copy"
+    )
+
+    state["_store"][ILLEGAL_KEY] = None
+    assert store.keys() == baseline, (
+        f"writing {ILLEGAL_KEY!r} through the snapshot changed the store's key set to {store.keys()!r}"
+    )
+
+    # -- the copy.copy route ---------------------------------------------
+    shallow = copy.copy(store)
+    assert shallow._store is not store._store, (
+        "copy.copy(store) shares its entry mapping with the original; two nominally independent stores are one store"
+    )
+    shallow["another_legal_key"] = _entry()
+    assert store.keys() == baseline, f"inserting into a shallow copy changed the original's key set to {store.keys()!r}"
+    assert "another_legal_key" in shallow.keys(), "the copy did not take the insert either, so it is simply broken"
 
 
 # ---------------------------------------------------------------------------
