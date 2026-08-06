@@ -71,15 +71,47 @@ FULLWIDTH_DOTS_KEY: str = "\uff0e\uff0e"
 #: separator, not for its dots.
 FULLWIDTH_SEPARATOR_KEY: str = "\uff0e\uff0e/victim"
 
-#: Reserved Win32 device names (Plan 14-09 / D-20 / WR-05). Matched on the
-#: **pre-dot stem**, upper-cased, so an extension-bearing device name is caught
-#: too — on Win32 ``con.npy`` is still the console with a suffix attached, and a
-#: write to it is discarded while a read comes back empty.
+#: The six keys § WR-04 **measured as accepted** on this host against the Plan
+#: 14-09 device set, closed by Plan 14-13 / D-23. Kept as its own tuple so the
+#: dedicated group below reads as the closure of a reproduced finding rather than
+#: as a generic list of extra names.
+WR04_ACCEPTED_DEVICE_KEYS: tuple[str, ...] = ("COM0", "LPT0", "CONIN$", "CONOUT$", "com¹", "CON .txt")
+
+#: The fullwidth spelling of a device name — U+FF23 U+FF2F U+FF2E, ``ＣＯＮ``
+#: (Plan 14-13 / D-23). It is **accepted**, and that acceptance is the standing
+#: proof that a rule which now compares against a *name list* still folds
+#: nothing: ``'ＣＯＮ'.upper()`` is ``'ＣＯＮ'``, which stays outside the ASCII
+#: set. On Win32 it is an ordinary filename and not the console device, so
+#: accepting it is correct rather than an oversight. Same role for the device
+#: clause that :data:`FULLWIDTH_DOTS_KEY` plays for the dot clauses.
+FULLWIDTH_DEVICE_KEY: str = "ＣＯＮ"
+
+#: Reserved Win32 device names (Plan 14-09 / D-20 / WR-05, widened by Plan 14-13
+#: / D-23). Matched on the **pre-dot stem**, upper-cased, so an
+#: extension-bearing device name is caught too — on Win32 ``con.npy`` is still
+#: the console with a suffix attached, and a write to it is discarded while a
+#: read comes back empty.
 #:
 #: ``lpt9`` is lower-case and ``con.npy`` mixed with an extension on purpose:
 #: between them they pin that the match is case-insensitive *and* stem-based,
 #: which a set-membership test over the raw key would fail.
-WIN_DEVICE_KEYS: tuple[str, ...] = ("CON", "NUL", "PRN", "AUX", "lpt9", "con.npy", "COM1.dat")
+#:
+#: D-23's additions follow: the six § WR-04 keys, plus ``COM²`` and ``lpt³`` so
+#: the superscript forms are covered in both cases. The superscript entries are
+#: **exact characters, not a case fold** — ``'¹'.upper()`` is ``'¹'`` — which is
+#: what keeps the widening inside D-05's no-normalisation rule.
+WIN_DEVICE_KEYS: tuple[str, ...] = (
+    "CON",
+    "NUL",
+    "PRN",
+    "AUX",
+    "lpt9",
+    "con.npy",
+    "COM1.dat",
+    *WR04_ACCEPTED_DEVICE_KEYS,
+    "COM²",
+    "lpt³",
+)
 
 #: Keys whose trailing run is spaces or dots (Plan 14-09 / D-20 / WR-05). Win32
 #: strips both, so ``'a'``, ``'a '`` and ``'a.'`` become **one file** — two
@@ -108,6 +140,28 @@ WIN_COLLISION_KEYS: list[tuple[str, str]] = [
     (COLON_KEY, CLAUSE_ABSOLUTE),
 ]
 
+#: The two families whose **opposite pulls** fix the shape of the device clause's
+#: stem strip (Plan 14-13 / D-23 / D-24). Neither was in :data:`REFUSED_KEYS`
+#: before, which is exactly why an unconditional strip would have repointed three
+#: of them with nothing going red.
+#:
+#: * ``'com1 '``, ``'con '``, ``'nul  '`` — a device stem followed by the key's
+#:   **own** trailing run. They report the *trailing* clause and must keep doing
+#:   so. An **unconditional** ``rstrip(' ')`` on the stem turns each of them into
+#:   a device stem and repoints them onto the reserved clause. The strip is
+#:   therefore conditional on the key containing a ``'.'``: interior spaces are
+#:   the device clause's business, trailing spaces are clause 5's.
+#: * ``'con.'``, ``'com1. '`` — a device stem that *also* ends in a trailing run.
+#:   They report the *reserved* clause and must keep doing so, which is what
+#:   forbids the naive "just put the device test last" placement.
+DEVICE_STEM_BOUNDARY_KEYS: list[tuple[str, str]] = [
+    ("com1 ", CLAUSE_TRAILING),
+    ("con ", CLAUSE_TRAILING),
+    ("nul  ", CLAUSE_TRAILING),
+    ("con.", CLAUSE_RESERVED),
+    ("com1. ", CLAUSE_RESERVED),
+]
+
 #: Every key the rule must refuse, paired with the clause it must report under
 #: the validator's fixed evaluation order. One list serves the refusal groups,
 #: Task 2's predicate-agreement group and Task 2's message assertions — which
@@ -124,6 +178,7 @@ REFUSED_KEYS: list[tuple[str, str]] = [
     ("x\x00y", CLAUSE_CONTROL),
     (FULLWIDTH_SEPARATOR_KEY, CLAUSE_SEPARATOR),
     *WIN_COLLISION_KEYS,
+    *DEVICE_STEM_BOUNDARY_KEYS,
 ]
 
 #: Every key the rule must accept. This is the over-tight-allowlist regression
@@ -144,6 +199,10 @@ ACCEPTED_KEYS: tuple[str, ...] = (
     "rrim_pack_(range,r16,d8,z1e-05)",
     "norm_(range,2,98)",
     FULLWIDTH_DOTS_KEY,
+    # Plan 14-13 / D-23: the widening's *positive* boundary, pinned in the same
+    # place as its negative one. Do not remove it when the device list is next
+    # extended — it is what proves the list is compared, not folded into.
+    FULLWIDTH_DEVICE_KEY,
 )
 
 #: Lookup from a refused key to the clause it must report.
@@ -189,8 +248,10 @@ def test_refused_key_groups_are_all_present_in_the_master_list() -> None:
         ("WINDOWS_TRAVERSAL_KEY", (WINDOWS_TRAVERSAL_KEY,)),
         ("FULLWIDTH_SEPARATOR_KEY", (FULLWIDTH_SEPARATOR_KEY,)),
         ("WIN_DEVICE_KEYS", WIN_DEVICE_KEYS),
+        ("WR04_ACCEPTED_DEVICE_KEYS", WR04_ACCEPTED_DEVICE_KEYS),
         ("TRAILING_KEYS", TRAILING_KEYS),
         ("COLON_KEY", (COLON_KEY,)),
+        ("DEVICE_STEM_BOUNDARY_KEYS", tuple(key for key, _ in DEVICE_STEM_BOUNDARY_KEYS)),
     ):
         missing = sorted(set(group) - master)
         assert not missing, f"{group_name} carries keys absent from REFUSED_KEYS: {missing!r}"
@@ -354,6 +415,71 @@ def test_win32_collision_shaped_key_is_refused(key: str, clause: str) -> None:
     with pytest.raises(StoreKeyError, match=re.escape(clause)):
         validate_store_key(key, _CACHE_DIR)
     assert not is_valid_store_key(key), f"the predicate accepted the collision-shaped key {key!r}"
+
+
+@pytest.mark.parametrize("key", WR04_ACCEPTED_DEVICE_KEYS)
+def test_widened_device_list_refuses_every_reserved_name_the_contract_page_claims(key: str) -> None:
+    """Plan 14-13 / STORE-01 / D-23 / WR-04: the denylist covers the list the documentation appeals to.
+
+    D-20 widened the rule to Win32 collision semantics and both the contract page
+    and ``validate_store_key``'s residual paragraph presented the device axis as
+    closed. § WR-04 measured six keys **accepted** against that set. Each is here
+    with its reason:
+
+    * ``COM0`` and ``LPT0`` — Microsoft's *Naming Files, Paths, and Namespaces*
+      reserved list, the list the code's own comment appeals to, runs the digit
+      from ``0``; the shipped comprehensions started at ``1``.
+    * ``CONIN$`` and ``CONOUT$`` — reserved console names on the same list.
+    * ``com¹`` — the superscript ``COM``/``LPT`` forms are on that list too, and
+      they are matched as **exact characters**, so the lower-case spelling here
+      pins that the existing ``.upper()`` reaches them.
+    * ``CON .txt`` — Win32 strips trailing spaces from the name component
+      *before* device resolution, so it resolves to the console while passing
+      both the old device test (stem ``'CON '`` upper-cases outside the set) and
+      the trailing test (the key ends in ``t``). It is what the conditional stem
+      strip exists for.
+
+    **What is and is not confirmed here**, per § WR-04's own note: the *acceptance
+    measurements* were reproduced on this Linux host and this test asserts their
+    closure. The Win32 *resolution mechanisms* quoted above cannot be confirmed on
+    a Linux host and are not what this test measures.
+    """
+    with pytest.raises(StoreKeyError, match=re.escape(CLAUSE_RESERVED)):
+        validate_store_key(key, _CACHE_DIR)
+    assert not is_valid_store_key(key), f"the predicate accepted the reserved device name {key!r}"
+
+
+def test_a_device_name_in_a_fullwidth_spelling_is_still_accepted() -> None:
+    """Plan 14-13 / STORE-01 / D-23 / D-05: the device widening folds nothing.
+
+    ``'ＣＯＮ'`` (U+FF23 U+FF2F U+FF2E) NFKC-folds to the refused ``'CON'``.
+    Accepting it unchanged is the *positive* evidence that a rule which now
+    compares against a **name list** still applies no normalisation — the same
+    role :func:`test_no_normalisation_accepts_a_fullwidth_dots_key_unchanged`
+    plays for the dot clauses, and the reason D-23's superscript entries are
+    exact characters rather than a fold.
+
+    The ``.upper()`` assertion is load-bearing rather than decorative: it is the
+    mechanism claim behind the acceptance, and without it the test would still
+    pass if a future edit refused fullwidth keys for some unrelated reason and
+    then someone "fixed" the acceptance by deleting the key.
+
+    Confirmed before the case was written: the key trips no other clause either —
+    no control character, no separator, no colon, no anchor or drive, and no
+    trailing space or dot — so its acceptance is attributable to the device
+    clause and not incidental.
+    """
+    assert FULLWIDTH_DEVICE_KEY.upper() == FULLWIDTH_DEVICE_KEY, (
+        "the fullwidth spelling now upper-cases to something else; the no-fold argument has changed"
+    )
+    assert FULLWIDTH_DEVICE_KEY.upper() != "CON", (
+        "the fullwidth spelling upper-cased into the ASCII device set, which means str.upper() started folding"
+    )
+
+    validate_store_key(FULLWIDTH_DEVICE_KEY, _CACHE_DIR)  # must not raise
+    assert is_valid_store_key(FULLWIDTH_DEVICE_KEY), (
+        "a fullwidth device name was refused, which means the widened rule folded it to 'CON' before validating"
+    )
 
 
 def test_widening_refuses_a_trailing_dot_but_not_a_leading_or_interior_one() -> None:
