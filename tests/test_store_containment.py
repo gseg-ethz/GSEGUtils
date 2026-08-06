@@ -9,7 +9,7 @@ builder-containment and symlink tests; Plan 14-07 extends it with the migration
 snippet's round-trip.
 
 The point of this file is the *differences* between the routes. Four distinct
-policies apply to eight routes, and each difference is a decision:
+policies apply to ten routes, and each difference is a decision:
 
 ===================== ============================================== ======
 Route                 Policy                                         Basis
@@ -18,11 +18,25 @@ Route                 Policy                                         Basis
 ``add_data_to_store`` raise, unconditionally                         SC-1
 ``__getitem__``       raise, before ``_load_entry`` touches disk     D-11
 ``get``               return the default                             D-11a
+``pop(key, default)`` return the default; the bare form raises       D-25
+``setdefault``        raise — it is a write route                    D-25
 ``__init__`` rescan   warn and skip, leaving the file untouched      D-09
 ``__setstate__``      raise, never a silently short store            D-10
 ``store`` property    not a write route at all — a read-only view    D-19
 ``__getstate__``      not a write route at all — a detached snapshot D-19
 ===================== ============================================== ======
+
+The ``pop`` and ``setdefault`` rows are one decision seen from both sides
+(D-25), and they are in the table because the phase *changed* one of them
+without noticing. ``pop`` reaches the subscript by the same route ``get`` does,
+so D-11 and D-12 between them turned ``pop(key, default)`` from returning the
+default into raising — silently, one accessor over from the change that
+motivated the ``get`` override. It is restored. ``setdefault`` moves the same
+way and is **deliberately** left raising, because it *inserts*: refusing an
+illegal key at a write route is the whole point of this phase. The asymmetry is
+a choice, and it is written down in three places — here, in ``pop``'s docstring
+and in the migration note — precisely so the next reader does not read it as an
+oversight and helpfully "finish" it.
 
 The last two rows are the odd ones out on purpose, and the difference is the
 decision: the other six routes *validate* a write, while these two have no
@@ -314,6 +328,108 @@ def test_route_get_is_overridden_on_the_class_not_inherited() -> None:
     stay green with the amendment silently deleted.
     """
     assert "get" in vars(DiskBackedStore), "get is the inherited Mapping.get, which catches only KeyError"
+
+
+# ---------------------------------------------------------------------------
+# route_pop / route_setdefault — the same mechanism as ``get``, one accessor
+# over, and one of them changed silently (Plan 14-14 / D-25 / WR-01)
+# ---------------------------------------------------------------------------
+
+
+def test_route_pop_with_a_default_returns_it_while_the_bare_pop_still_raises(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-14 / STORE-01 / D-25 / WR-01 / T-14-61 / T-14-62.
+
+    **The identical mechanism that motivated the ``get`` override, one accessor
+    over.** ``MutableMapping.pop`` is ``try: value = self[key] except KeyError:
+    return default`` — so the moment D-11 made ``__getitem__`` validate and D-12
+    made the refusal a ``ValueError`` rather than a ``KeyError``, ``pop`` stopped
+    catching it. Measured rather than recalled: at the phase-14 base commit
+    ``10683dc`` ``store.pop('../victim', 'DEF')`` returned ``'DEF'``; at
+    ``56c8306`` the same call raised ``StoreKeyError``. Nobody decided that, and
+    BC-GSEG-006's enumeration of the read-route deltas omits it while sitting
+    next to a paragraph that reassures the reader about ``.get()``.
+
+    **All six behaviours live in one function, deliberately**, on the same
+    "one contract, one test" grounds as the ``get`` sibling above: split across
+    six tests, one half can regress while the others stay green — which is
+    precisely how the original gap went unnoticed.
+
+    The three behaviours that are *not* restored matter as much as the three
+    that are. ``pop(key)`` with no default is a raise-on-miss in every mapping,
+    so it keeps raising and D-25 restores the **defaulting form only**. A
+    successful ``pop`` still **deletes**, which is what keeps this an override of
+    ``pop`` rather than a second ``get`` under a different name. And a
+    containment violation still propagates: ``pop`` reaches the subscript by
+    exactly the route ``get`` does, so inverting its two handler clauses would
+    restore the WR-03 swallow in a second place — a subclass caught after its
+    base is never reached.
+    """
+    store = make_store(tmp_cache_dir)
+    sentinel = object()
+
+    # 1. Illegal key + a supplied default -> the default. This is D-25.
+    assert store.pop(ILLEGAL_KEY, sentinel) is sentinel, (
+        "pop raised for an illegal key despite a supplied default; the defaulting read routes disagree again"
+    )
+
+    # 2. Illegal key, no default -> the refusal type, exactly as the subscript
+    #    gives it. The bare form is a write route on success.
+    with pytest.raises(StoreKeyError, match="Invalid store key"):
+        store.pop(ILLEGAL_KEY)
+
+    # 3. / 4. A legal but absent key keeps ordinary mapping behaviour on both
+    #    forms — the override must not swallow everything.
+    assert store.pop("absent_but_legal", sentinel) is sentinel
+    with pytest.raises(KeyError):
+        store.pop("absent_but_legal")
+
+    # 5. A successful pop returns the entry AND removes it. Asserted on the
+    #    tracked key set before and after, and on the identity of the value,
+    #    because a "fix" that turned the write route into a read would satisfy
+    #    every other assertion here.
+    entry = _entry()
+    store["present"] = entry
+    assert store.keys() == ["present"], "the fixture insert did not take, so the delete assertion proves nothing"
+    popped = store.pop("present")
+    assert popped is entry, "pop returned something other than the stored entry"
+    assert store.keys() == [], "pop returned the entry without deleting it — a write route turned into a read"
+    assert "present" not in store
+
+    # 6. Containment evidence is never degraded into the default (WR-03, in a
+    #    second place). Driven through the module-level ``Sneaky`` helper: the
+    #    lexical layer accepts its characters and the builder inside the load
+    #    path refuses what it actually formats to.
+    with pytest.raises(StoreContainmentError, match=re.escape(paths_mod.CLAUSE_ESCAPES)):
+        store.pop(Sneaky("safe"), sentinel)
+
+
+def test_route_setdefault_still_raises_because_it_is_a_write_route(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-14 / STORE-01 / D-25 — the divergence, pinned as a decision.
+
+    ``setdefault`` reaches the subscript exactly as ``pop`` does, and it is
+    **deliberately left raising**. The asymmetry is the decision rather than the
+    leftover: ``pop`` with a default is an *interrogative read* — it asks whether
+    the store holds a key and accepts "no" for an answer — whereas
+    ``setdefault`` **inserts**, and refusing an illegal key at a write route is
+    the whole point of this phase. A ``setdefault`` that returned its default for
+    ``'../victim'`` would answer as though the key were fine and then be expected
+    to have stored something under it.
+
+    Recorded as its own named test rather than as a sentence inside ``pop``'s,
+    because a reader who finds ``pop`` overridden and ``setdefault`` not must be
+    able to tell a choice from an oversight by grepping the suite.
+    """
+    store = make_store(tmp_cache_dir)
+
+    with pytest.raises(StoreKeyError, match="Invalid store key"):
+        store.setdefault(ILLEGAL_KEY, _entry())
+
+    assert ILLEGAL_KEY not in store, "a refused setdefault still tracked the key"
+    assert store.keys() == [], "the refused setdefault left residue in the store"
 
 
 # ---------------------------------------------------------------------------
