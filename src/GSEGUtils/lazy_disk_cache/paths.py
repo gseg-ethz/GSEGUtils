@@ -73,10 +73,34 @@ CLAUSE_RESERVED: Final[str] = "is empty or a reserved path name"
 CLAUSE_CONTROL: Final[str] = "contains a control character"
 CLAUSE_ABSOLUTE: Final[str] = "is an absolute or drive-relative path"
 CLAUSE_SEPARATOR: Final[str] = "contains a path separator"
+#: Added by D-20. It earns its own constant rather than joining
+#: ``CLAUSE_RESERVED`` because the *reason* is different in kind from every
+#: other clause: the others refuse **escape**, this one refuses **collision**,
+#: and a reader grepping refusal logs needs to be able to tell the two apart.
+CLAUSE_TRAILING: Final[str] = "ends in a space or a dot"
 
 _RESERVED_KEYS: Final[frozenset[str]] = frozenset({"", ".", ".."})
 _SEPARATORS: Final[tuple[str, str]] = ("/", "\\")
 _DEL_CHAR: Final[str] = "\x7f"
+
+#: The reserved Win32 device names (D-20), held in a single case and compared
+#: against the upper-cased **pre-dot stem** of the key. Held upper-case so the
+#: comparison is one ``.upper()`` on the key rather than a scan of the set.
+#:
+#: ``.upper()`` is a case operation over the exact characters supplied, not a
+#: fold to ASCII, so it does not breach the no-normalisation rule: a fullwidth
+#: ``ＣＯＮ`` upper-cases to fullwidth ``ＣＯＮ``, stays out of this set, and is
+#: accepted — which is correct, because on Win32 it is an ordinary filename and
+#: not the console device.
+_WIN_DEVICE_NAMES: Final[frozenset[str]] = frozenset(
+    {"CON", "PRN", "AUX", "NUL"} | {f"COM{digit}" for digit in range(1, 10)} | {f"LPT{digit}" for digit in range(1, 10)}
+)
+
+#: The characters Win32 strips from the end of a filename (D-20). ASCII space
+#: and ASCII full stop **only** — widening this to Unicode whitespace or to the
+#: fullwidth full stop would start folding, and the fullwidth-dots acceptance
+#: test is the standing proof that the rule folds nothing.
+_TRAILING_CHARS: Final[str] = " ."
 
 
 def _refuse(key: str, cache_dir: Optional[Path], clause: str) -> NoReturn:
@@ -105,8 +129,9 @@ def _refuse(key: str, cache_dir: Optional[Path], clause: str) -> NoReturn:
     location = repr(str(cache_dir)) if cache_dir is not None else "<unset>"
     raise StoreKeyError(
         f"Invalid store key {key!r} for cache directory {location}: the key {clause}; "
-        "a store key must be a single path segment — no '/' or '\\', not an absolute or "
-        "drive-relative path, not '', '.' or '..', and free of control characters."
+        "a store key must be a single path segment — no '/', '\\' or ':', not an absolute or "
+        "drive-relative path, not '', '.', '..' or a reserved Win32 device name such as CON or "
+        "COM1, free of control characters, and not ending in a space or a dot."
     )
 
 
@@ -123,13 +148,25 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     Clauses are evaluated in a **fixed order**, so a key violating several
     always reports the same one:
 
-    1. ``CLAUSE_RESERVED`` — the key is ``''``, ``'.'`` or ``'..'``.
+    1. ``CLAUSE_RESERVED`` — the key is ``''``, ``'.'`` or ``'..'``, **or** its
+       pre-dot stem upper-cases to a reserved Win32 device name (D-20). The stem
+       test is what refuses ``con.npy`` and ``COM1.dat`` as well as bare ``CON``:
+       on Win32 a device name is still the device with a suffix attached. It is
+       reported under this clause rather than a new one because the wording
+       already reads as "empty or a reserved path name", which describes a device
+       name exactly, and reusing it keeps the published clause vocabulary stable
+       for every case that already used it.
     2. ``CLAUSE_CONTROL`` — the key contains a character below ``\x20``, or
        ``\x7f``. This covers newline and NUL.
     3. ``CLAUSE_ABSOLUTE`` — the key has a non-empty ``anchor`` or ``drive``
        under *either* :class:`~pathlib.PurePosixPath` or
-       :class:`~pathlib.PureWindowsPath`. This refuses ``/etc/passwd``,
-       ``C:evil``, ``C:/abs`` and ``\\server\share\x``.
+       :class:`~pathlib.PureWindowsPath`, **or** it contains a bare ``':'``
+       (D-20). This refuses ``/etc/passwd``, ``C:evil``, ``C:/abs``,
+       ``\\server\share\x`` and ``ab:cd``. The colon needs its own test rather
+       than a tighter ``drive`` test because :class:`~pathlib.PureWindowsPath`
+       detects only *single-letter* drives — ``PureWindowsPath('ab:cd').drive``
+       is ``''`` — so the structural test can never reach an NTFS
+       alternate-data-stream name, however it is tightened.
     4. ``CLAUSE_SEPARATOR`` — one clause with two tests, either of which refuses:
 
        * a **raw-character scan** for ``/`` or ``\`` at any position. This is
@@ -145,10 +182,55 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
          as well as by character — ``PurePosixPath`` reads it as one harmless
          segment while ``PureWindowsPath`` reads it as three.
 
-    **Dots are legal except the exact ``.`` and ``..``, including leading dots**
-    (D-06): ``.hidden``, ``foo.bar``, ``z1.2345678``, ``foo.`` and ``a.npy`` all
-    pass. The reason matters, because the obvious reading is wrong: **the
-    separator is the entire escape mechanism, and dots carry no escape risk.**
+    5. ``CLAUSE_TRAILING`` — the key's trailing run is ASCII spaces or ASCII
+       dots (D-20). Evaluated **last**, after the separator test, and the
+       position is load-bearing: ``'a/'`` and ``'a\'`` are already refused by
+       clause 4 and existing tests assert *that* clause, so any earlier
+       placement would silently repoint a currently-refused key onto a new
+       clause.
+
+    **Leading and interior dots are legal; only a trailing run is refused**
+    (D-06 as amended by D-20). ``.hidden``, ``foo.bar``, ``z1.2345678`` and
+    ``a.npy`` all still pass — the obvious reading of "dots are now restricted"
+    is wrong, and the rule refuses a trailing dot, not a dot. ``foo.`` *did*
+    pass before D-20 and no longer does; that is the amendment, not a
+    regression.
+
+    Clause 5 has a **wider consequence than the enumerated cases**, which is
+    stated here rather than left to be discovered downstream: because it strips
+    a trailing *run*, a key consisting entirely of dots or spaces — ``'...'``,
+    a lone ``' '`` — is refused too.
+
+    **Two threats, not one, and the second is why the first argument survives
+    unchanged.** The paragraph below is the *escape* argument and it is still
+    correct. Clauses 1 (device names), 3 (colon) and 5 (trailing run) address a
+    **different** threat — *collision*:
+
+    * Win32 strips trailing dots and spaces from a filename, so ``'a'``,
+      ``'a '`` and ``'a.'`` become **one file**: two distinct store keys
+      silently overwriting one artefact.
+    * ``CON``, ``NUL``, ``COM1`` and their siblings name character devices —
+      writes are discarded and reads come back empty.
+    * A colon opens an NTFS alternate data stream, hiding bytes outside the
+      visible artefact.
+
+    None of those is an escape; every one of them lands lexically *inside* the
+    cache directory, so :func:`_assert_contained` cannot see any of them and the
+    lexical rule is the only layer that can refuse them. They are the
+    sanitise-rather-than-reject failure this phase set out to avoid, arriving
+    from the collision direction instead of the traversal direction.
+
+    **The residual, stated so it is accepted rather than assumed closed.**
+    Case-insensitive NTFS and default APFS collapse ``'Foo'`` and ``'foo'`` onto
+    one file, and APFS normalises Unicode so NFC and NFD spellings of one name
+    collide. **Neither is fixable by any lexical rule**, because both are
+    filesystem behaviour rather than key shape — refusing one spelling of a pair
+    would mean choosing a canonical form, which is precisely the normalisation
+    D-05 forbids. A reader told only about the clauses above would assume the
+    collision axis is closed; it is narrowed, not closed.
+
+    The escape argument, unchanged: **the separator is the entire escape
+    mechanism, and dots carry no escape risk.**
     The path builders never join the bare key — they concatenate an extension
     first — so ``Path('/cache') / '...npy'`` (key ``'..'``) is a literal file
     *inside* the cache directory and does not escape, while
@@ -229,7 +311,7 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
             "key, and this function will not guess which of its components was meant."
         )
 
-    if key in _RESERVED_KEYS:
+    if key in _RESERVED_KEYS or key.split(".", 1)[0].upper() in _WIN_DEVICE_NAMES:
         _refuse(key, cache_dir, CLAUSE_RESERVED)
 
     if any(ord(char) < 32 or char == _DEL_CHAR for char in key):
@@ -237,11 +319,16 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
 
     posix = PurePosixPath(key)
     windows = PureWindowsPath(key)
-    if posix.anchor or posix.drive or windows.anchor or windows.drive:
+    if posix.anchor or posix.drive or windows.anchor or windows.drive or ":" in key:
         _refuse(key, cache_dir, CLAUSE_ABSOLUTE)
 
     if any(sep in key for sep in _SEPARATORS) or len(posix.parts) != 1 or len(windows.parts) != 1:
         _refuse(key, cache_dir, CLAUSE_SEPARATOR)
+
+    # Last, deliberately: see clause 5 above. Compares against the whole key
+    # rather than testing emptiness, so ``'a.'`` is refused as well as ``'...'``.
+    if key.rstrip(_TRAILING_CHARS) != key:
+        _refuse(key, cache_dir, CLAUSE_TRAILING)
 
 
 def is_valid_store_key(key: str) -> bool:
@@ -342,6 +429,36 @@ def _assert_contained(cache_dir: Path, candidate: Path) -> None:
     matrix has four rows and parent-only is correct on all four. Note the
     base *is* fully resolved, so a symlinked cache directory compares equal to
     itself.
+
+    **What this check can and cannot discriminate — and where the four rows
+    apply.** Those four rows describe :func:`_assert_contained` called
+    *directly*, as the tests call it. They do **not** describe live
+    discrimination among :func:`_build`'s outputs, and the difference is
+    load-bearing enough that reading the matrix as the latter is the mistake
+    this paragraph exists to prevent. Once the lexical layer has accepted a key,
+    the key carries no separator, so ``(cache_dir / f"{key}{suffix}").parent`` is
+    lexically ``cache_dir``; therefore ``candidate.parent.resolve()`` equals
+    ``base`` and ``is_relative_to(base)`` is unconditionally ``True``. Verified
+    across the whole accepted-key matrix. **For a plain** :class:`str` **key the
+    check is unreachable**, and that is what defence-in-depth looks like rather
+    than a defect.
+
+    It is here to survive two things the lexical layer does not cover:
+
+    * a **lexical-layer regression** — the layer being deleted, weakened or
+      bypassed at one route, which is precisely when the signal is wanted;
+    * a :class:`str` **subclass whose** ``__str__`` **differs from its
+      characters**, which passes :func:`is_valid_store_key` on its characters
+      and then builds a path from something else entirely.
+
+    The second case is not hypothetical and is not left as a claim:
+    ``test_builder_containment_a_str_subclass_defeats_the_lexical_layer_and_is_caught_by_containment``
+    (Plan 14-08, ``tests/test_store_containment.py``) exercises it with the
+    lexical layer **fully intact** and no monkeypatch at all, and its sibling
+    ``test_builder_containment_every_builder_refuses_an_escape_with_the_lexical_layer_disabled``
+    covers the first case at every registered builder. Deleting the
+    :func:`_assert_contained` call from :func:`_build` turns those tests red and
+    nothing else — which is the measurement that keeps this paragraph honest.
 
     **2. The accepted residual.** Parent-only resolution permits a
     *pre-existing* symlink placed inside the cache directory to write through
