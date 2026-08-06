@@ -1083,3 +1083,127 @@ def test_public_exports_withhold_the_internal_names() -> None:
 
     for name in WITHHELD_NAMES:
         assert hasattr(paths_mod, name), f"{name!r} vanished from the paths module entirely"
+
+
+# ---------------------------------------------------------------------------
+# builder_containment — the SECOND layer, asserted where it actually lives
+# (Plan 14-08 / CR-01 / V-2 / SC-4 / T-14-27 / T-14-28)
+# ---------------------------------------------------------------------------
+
+
+class Sneaky(str):
+    """A ``str`` subclass whose characters and whose ``__str__`` disagree.
+
+    The whole point of the class is the disagreement. ``validate_store_key``
+    inspects the *characters* — ``in``, ``ord()`` and ``PurePath(key).parts``
+    all read the underlying ``str`` payload, which here spells the perfectly
+    legal ``'safe'`` — while every path builder interpolates the key through an
+    f-string, and ``f"{key}"`` dispatches to ``__format__``, which for an empty
+    format spec returns ``str(self)``. So the value that is *validated* and the
+    value that is *joined* are two different strings, and the lexical layer
+    cannot see it.
+
+    Defined at module level rather than inside the test that needs it because
+    Plan 14-10 reuses it for the ``get`` re-raise assertion; a locally-defined
+    class would have to be duplicated there, which is how one contract becomes
+    two drifting expressions of itself.
+    """
+
+    def __str__(self) -> str:
+        """Return the escaping string, regardless of the characters held."""
+        return ILLEGAL_KEY
+
+
+@pytest.mark.parametrize(("builder_name", "builder"), BUILDER_CASES)
+def test_builder_containment_every_builder_refuses_an_escape_with_the_lexical_layer_disabled(
+    builder_name: str,
+    builder: Callable[[Path, str], Path],
+    tmp_cache_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 14-08 / CR-01 / SC-4 / T-14-27.
+
+    **Why this group exists.** ``_assert_contained`` is the second of the two
+    layers, and until this group it had zero coverage at every builder: both
+    registry-driven builder groups above use ``ILLEGAL_KEY``, which
+    ``validate_store_key`` refuses one line earlier inside ``_build``, so the
+    containment call was never on the path of any assertion. Measured, not
+    inferred — deleting that call from ``_build`` left the suite at **616
+    passed**. With the lexical layer gone, the containment layer is the only
+    thing standing between an escaping key and a path above the cache
+    directory, so it is the thing that must be asserted directly.
+
+    **The patch target is load-bearing.** ``validate_store_key`` is rebound on
+    the ``paths`` *module object*, because ``_build`` looks the name up as a
+    module global at call time. Patching a copy imported into this test module
+    would leave the production lookup untouched and this group would pass
+    vacuously against a builder that still ran the lexical check — green, and
+    proving nothing. If this group ever passes while the containment call is
+    deleted, suspect the patch target before suspecting the builder.
+
+    Parametrised off ``BUILDER_CASES`` — the same registry the sibling groups
+    use — so a sixth builder added in Phase 15 is covered by growth rather than
+    by someone remembering to extend a hand-written list.
+
+    The match is on ``paths_mod.CLAUSE_ESCAPES`` so this group *imports* the
+    clause wording instead of restating it; a respelling breaks the test rather
+    than silently loosening it.
+    """
+    monkeypatch.setattr(paths_mod, "validate_store_key", lambda *args, **kwargs: None)
+
+    assert paths_mod.is_valid_store_key(ILLEGAL_KEY), (
+        "the lexical layer was not actually neutralised, so this case cannot isolate the "
+        "containment layer and would pass for the wrong reason"
+    )
+
+    with pytest.raises(StoreContainmentError, match=re.escape(paths_mod.CLAUSE_ESCAPES)):
+        builder(tmp_cache_dir, ILLEGAL_KEY)
+
+
+def test_builder_containment_a_str_subclass_defeats_the_lexical_layer_and_is_caught_by_containment(
+    tmp_cache_dir: Path,
+) -> None:
+    """Plan 14-08 / CR-01 / SC-4 / T-14-28.
+
+    The honest end-to-end proof that the two layers are genuinely separate,
+    because it needs **no monkeypatch at all**: the lexical layer is fully
+    intact and still lets this value through.
+
+    ``is_valid_store_key`` is asserted ``is True`` *positively* rather than by
+    the absence of a ``pytest.raises``. The distinction matters: an absence
+    would also be satisfied by a predicate that had stopped being called, while
+    the positive form records that the lexical layer actively accepts this
+    value — which is the premise the rest of the assertion rests on.
+
+    So the containment layer is not redundant defence-in-depth here; for this
+    input it is the *only* control, which is what makes CR-01's deletability
+    finding a live escape rather than a formality.
+    """
+    sneaky = Sneaky("safe")
+
+    assert paths_mod.is_valid_store_key(sneaky) is True, (
+        "the lexical layer no longer accepts the str subclass, so this case no longer "
+        "demonstrates that the two layers are separate"
+    )
+    assert str(sneaky) == ILLEGAL_KEY, "the subclass no longer disagrees with its characters"
+
+    refused: dict[str, str] = {}
+    for builder_name, builder in sorted(paths_mod.STORE_PATH_BUILDERS.items()):
+        try:
+            built = builder(tmp_cache_dir, sneaky)
+        except StoreContainmentError as exc:
+            refused[builder_name] = str(exc)
+        else:
+            pytest.fail(
+                f"{builder_name} returned {str(built)!r} for a key whose characters are legal but "
+                f"whose __str__ is {ILLEGAL_KEY!r}; the containment layer did not fire"
+            )
+
+    assert set(refused) == set(paths_mod.STORE_PATH_BUILDERS), (
+        "not every registered builder was exercised: "
+        f"refused={sorted(refused)} registered={sorted(paths_mod.STORE_PATH_BUILDERS)}"
+    )
+    for builder_name, message in refused.items():
+        assert paths_mod.CLAUSE_ESCAPES in message, (
+            f"{builder_name} refused, but not with the containment clause: {message!r}"
+        )
