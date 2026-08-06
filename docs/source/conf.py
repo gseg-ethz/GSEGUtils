@@ -106,8 +106,15 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     # Phase 14 (STORE-07): the store key contract publishes six names —
     # is_valid_store_key, StoreKeyError, StoreContainmentError and the three
     # get_*_path builders — all of which DO resolve and are deliberately NOT
-    # ignored here. The three entries below cover references that are
-    # unresolvable by construction; none of them hides a broken published name.
+    # ignored here. The entries below cover references that are unresolvable by
+    # construction; none of them hides a broken published name.
+    #
+    # Every one of them is written to its OWN target rather than to a module
+    # prefix, and that is deliberate (WR-08). A `nitpick_ignore_regex` entry
+    # cannot fail: an over-broad pattern silences real breakage forever and
+    # nothing reports it, so the only check is the pattern against its comment.
+    # A submodule-wide pattern here would disable the strict build for a module
+    # whose surface is still growing.
     #
     # `validate_store_key` is the raising validator behind the published
     # predicate. D-07 publishes "a predicate ... alongside the INTERNAL raising
@@ -122,8 +129,17 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     # The displayed name is the published one and resolves; the submodule-
     # qualified target does not, because `paths` is documented through the
     # package, not on a page of its own. Repointing those targets at the
-    # published names belongs to whoever next edits disk_backed_store.py.
-    (r"py:func", r"GSEGUtils\.lazy_disk_cache\.paths\..*"),
+    # published names belongs to whoever next edits disk_backed_store.py — and
+    # this entry then expires with them, which a module-wide pattern would not.
+    # Anchored to exactly the three targets named above: get_npy_path,
+    # get_meta_path and get_legacy_pickle_path, and nothing else in `paths`.
+    (r"py:func", r"GSEGUtils\.lazy_disk_cache\.paths\.get_(npy|meta|legacy_pickle)_path"),
+    # `_assert_contained` is the private containment check. It is referenced by
+    # name from `_store_entry`'s docstring and is not a documented member — the
+    # same class as `_normalize_base` and `validate_store_key` above, and it
+    # needs its own entry now that the pattern above no longer blankets the
+    # module. It was previously swallowed by that blanket, which is the finding.
+    (r"py:func", r"GSEGUtils\.lazy_disk_cache\.paths\._assert_contained"),
     # ── Stdlib short forms and deprecated typing aliases ───────────────────────
     # `pathlib.Path` is in the python inventory; the bare short form autodoc
     # renders under autodoc_typehints_format="short" is not. Surfaced by the

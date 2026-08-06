@@ -240,9 +240,18 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
     join today.
 
     The empty key has a separate and concrete reason: key ``''`` builds
-    ``<cache>/.npy``, whose rescan stem is ``'.npy'`` — a *different,
-    legal-looking* key. ``''`` is refused because it does not round-trip, not
-    because it is untidy.
+    ``<cache>/.npy``, a file no key can own. It is refused because it does not
+    round-trip, not because it is untidy.
+
+    ↻ **CORRECTED by Plan 14-11.** This paragraph used to say that file's
+    *rescan stem* is ``'.npy'`` — *a different, legal-looking key*. That was
+    true of the reopen scan until Plan 14-10 (D-22), which replaced
+    :attr:`~pathlib.PurePath.stem` with a derivation off the file **name**, so
+    the scan now derives ``''`` for it and refuses it. :attr:`.stem` still
+    returns ``'.npy'`` for that name; it is simply no longer what the scan
+    calls. The **conclusion is unchanged** — ``''`` is refused because it does
+    not round-trip — only its stated mechanism moved. Do not restore the old
+    wording.
 
     No normalisation of any kind is applied before validation (D-05). Validating
     one string and building the path from another is the classic bypass: a

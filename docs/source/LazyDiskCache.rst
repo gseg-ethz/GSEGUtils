@@ -26,7 +26,8 @@ precisely so that a composed name does not become a breaking change the next tim
 the composition grows a new token.
 
 All of these are legal, and all of them round-trip through the on-disk name
-exactly:
+exactly — with one filesystem-level caveat noted under *Where the exact
+round-trip stops* below:
 
 .. code-block:: text
 
@@ -34,13 +35,14 @@ exactly:
    rrim_component_(structure,range)    a composed feature name
    z1.2345678                          interior dots
    foo.bar                             interior dots
-   foo.                                a TRAILING dot
    .hidden                             a LEADING dot
    a.npy                               a key that looks like a filename
 
-Dots are legal, including leading and trailing dots. Only the exact strings
-``.`` and ``..`` are refused, and the reason is not the one most readers assume —
-see *Why the reserved names are refused* below.
+Dots are legal, **including leading dots and interior dots**. A key may not be
+the exact string ``.`` or ``..``, and it may not *end* in a dot — those are two
+separate rules with two separate reasons, and neither is the reason most readers
+assume. See *Why the reserved names are refused* and *Why collision shapes are
+refused* below.
 
 What is refused
 ~~~~~~~~~~~~~~~
@@ -57,18 +59,34 @@ carries, so you can grep your logs for it:
      - Refuses
      - Examples
    * - ``is empty or a reserved path name``
-     - the exact strings ``''``, ``'.'`` and ``'..'``
-     - ``""``, ``"."``, ``".."``
+     - the exact strings ``''``, ``'.'`` and ``'..'``, **and** any key whose
+       pre-dot stem is a Win32 device name, matched case-insensitively
+     - ``""``, ``"."``, ``".."``, ``"CON"``, ``"nul"``, ``"con.npy"``,
+       ``"COM1.dat"``
    * - ``contains a control character``
      - any character below ``\x20``, and ``\x7f``
      - ``"x\ny"``, ``"x\x00y"``
    * - ``is an absolute or drive-relative path``
-     - a non-empty anchor or drive under *either* POSIX or Windows semantics
-     - ``"/etc/passwd"``, ``"C:evil"``, ``"\\\\server\\share\\x"``
+     - a non-empty anchor or drive under *either* POSIX or Windows semantics,
+       **and** a bare ``:`` anywhere in the key
+     - ``"/etc/passwd"``, ``"C:evil"``, ``"\\\\server\\share\\x"``, ``"ab:cd"``
    * - ``contains a path separator``
      - ``/`` or ``\`` anywhere, including a *trailing* separator, and anything
        ``pathlib`` reads as multi-segment under either flavour
      - ``"../victim"``, ``"tile_03/range"``, ``"a/"``, ``"..\\..\\x"``
+   * - ``ends in a space or a dot``
+     - a trailing run of ASCII spaces or ASCII dots. Evaluated **last**, so a
+       key violating an earlier clause still reports that earlier clause
+     - ``"foo."``, ``"x."``, ``"..."``, ``"a "``, ``" "``
+
+A key that is not a :class:`str` at all is refused too, with a message that
+carries **no clause and no cache directory** — neither is meaningful for a value
+that is not a key. It reads ``Invalid store key <repr>: a store key must be a
+str, but got <type>.`` and it is a
+:exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError` like every other refusal, so a
+``except StoreKeyError`` handler already covers it. Before 0.5.x this case
+escaped as a bare :exc:`TypeError`, which neither that handler nor
+``except ValueError`` caught.
 
 Windows separators are refused **on Linux too**. The key is validated under both
 :class:`~pathlib.PurePosixPath` and :class:`~pathlib.PureWindowsPath`
@@ -126,6 +144,61 @@ adopted and could never load, because building a path from ``'.npy'`` gives
 and additionally requires the derived key to rebuild the very file it came from,
 so such a file is warned about and skipped rather than advertised as a key.
 
+Why collision shapes are refused — a different threat from escape
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Everything above this point is about **escape** — a key becoming a path outside
+the cache directory. The three clauses below are about something else entirely:
+**collision**, where two distinct keys end up naming *one file*. They are listed
+separately because a reader who has absorbed the escape argument will otherwise
+read them as arbitrary — none of them escapes anything.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 74
+
+   * - Refused
+     - What the filesystem does with it
+   * - a trailing dot or space — ``"foo."``, ``"x."``, ``"a "``
+     - **Windows strips trailing dots and spaces from a filename.** So ``"a"``,
+       ``"a "`` and ``"a."`` all resolve to the same file, and two distinct
+       store keys silently overwrite one artefact.
+   * - a device name — ``CON``, ``nul``, ``com1.dat``
+     - These name character devices, not files. A write is discarded and the
+       read comes back empty. The suffix does not help: ``con.npy`` is still
+       the device, which is why the match is against the pre-dot stem.
+   * - a bare colon — ``ab:cd``
+     - On NTFS this opens an *alternate data stream* on the file ``ab`` rather
+       than creating a file called ``ab:cd``.
+
+These apply **on every host**, exactly like the Windows separator rules above: a
+cache directory written on Linux may be read on Windows, and a key that is legal
+in one place and collides in the other is not a key you want the library to have
+accepted. Silently *sanitising* such a key would be worse than refusing it —
+sanitising is precisely how two keys become one file without anybody noticing.
+
+.. _RoundTripResidual:
+
+Where the exact round-trip stops
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The exact round-trip promised at the top of this page holds for the key *shapes*
+the rule accepts. It **cannot** hold against two filesystem behaviours, and no
+key rule can fix either, because neither is visible in the key:
+
+* **Case-insensitive filesystems** — NTFS, and APFS in its default
+  configuration — collapse ``Foo`` and ``foo`` onto one file.
+* **Unicode-normalising filesystems** — APFS again — collapse the composed and
+  decomposed forms of the same name onto one file.
+
+Both are properties of the filesystem, not of the string, so a lexical rule
+inspecting the key has nothing to inspect. This residual is **accepted and
+stated rather than silently carried**: if your keys differ only by case, or only
+by Unicode normalisation form, do not rely on them being distinct entries on
+those filesystems. On a case-sensitive, non-normalising filesystem — Linux
+ext4/xfs, and APFS configured case-sensitive — the exact round-trip holds as
+written.
+
 Why nested keys are refused — this one is a bug fix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -144,6 +217,21 @@ Per-directory nesting is still available, and always was — extend the cache
 directory rather than the key, with
 :meth:`~GSEGUtils.lazy_disk_cache.LazyDiskCacheConfig.extend_cache_path`. That
 route takes one segment at a time and is validated by the same rule.
+
+Reading the store mapping
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:attr:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.store` returns a **read-only
+view** of the entry mapping, not the live dictionary. Reading through it is
+unchanged — iteration, ``len()``, ``in``, ``.keys()``, ``.values()``,
+``.items()`` and subscript reads all behave exactly as before — but **mutating
+through it raises**, because a key inserted that way would bypass every
+validation route this page describes.
+
+Insert through the supported routes instead: ``store[key] = entry``, or
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.add_data_to_store`. Both
+validate the key. See ``BC-GSEG-007`` in ``MIGRATION-v1.0.md`` for the migration
+detail, including the one downstream annotation that needs widening.
 
 What to catch
 ~~~~~~~~~~~~~
@@ -186,7 +274,10 @@ exception:
        raise ValueError(f"{name!r} cannot be used as a cache key")
 
 The call is pure: it touches no filesystem, mutates nothing, and returns the same
-verdict every time.
+verdict every time. It is also **total over its argument**: anything that is not
+a :class:`str` — including a :class:`~pathlib.Path`, which is the shape a
+path-typed identifier arrives in — returns ``False`` rather than raising, so the
+predicate never needs to be wrapped in a ``try``.
 
 Scanning your existing cache directories
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
