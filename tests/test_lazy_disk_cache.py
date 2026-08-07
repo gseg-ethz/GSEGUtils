@@ -12,6 +12,7 @@ import logging
 import os
 import pickle
 import re
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -1210,14 +1211,35 @@ def _plant_outside_sentinel(cache_dir: Path, outside_dir: Path, name: str = "ent
     return sentinel
 
 
-def test_memmap_write_refuses_a_planted_symlink_pointing_outside_its_directory(tmp_path: Path) -> None:
-    """The escape: a final-component symlink out of the directory is refused, sentinel intact.
+def _make_entry(cache: Path, name: str = "entry", n: int = 8) -> DiskBackedNDArray:
+    """Build an entry on the **configured** branch, so ``_cache_path`` is ``<cache>/<name>.dat``.
 
-    Asserts on the sentinel's **bytes**, not on its existence. A check that
-    refuses to *create* and a check that refuses to *truncate* are different
+    The configured branch matters: on the unconfigured one ``_init_from_config``
+    calls ``tempfile.mkstemp`` and the ``.dat`` lands in the system temp
+    directory, where a containment test would be testing the temp directory
+    rather than a cache directory.
+    """
+    return DiskBackedNDArray(
+        np.arange(n, dtype=np.float64),
+        cache_path=cache / name,
+        enable_caching=True,
+        purge_disk_on_gc=False,
+    )
+
+
+def test_memmap_write_refuses_a_planted_symlink_pointing_outside_its_directory(tmp_path: Path) -> None:
+    """The escape, end to end: allocation through a planted symlink is refused, sentinel intact.
+
+    Driven through the public construction path rather than by calling the
+    helper, so it exercises the **call site** in ``_convert_to_memmap`` rather
+    than the helper's contract.
+
+    Asserts on the sentinel's **bytes and length**, not on its existence. A check
+    that refuses to *create* and a check that refuses to *truncate* are different
     checks, and only the byte comparison distinguishes them — ``"w+"`` truncates
-    an existing target rather than replacing it, so an existence assertion is
-    green against a completely unguarded write.
+    an existing target in place rather than replacing it, so an existence
+    assertion stays green against a completely unguarded write. Measured before
+    the guard existed: this construction left the sentinel's bytes changed.
     """
     cache = tmp_path / "cache"
     cache.mkdir()
@@ -1225,7 +1247,7 @@ def test_memmap_write_refuses_a_planted_symlink_pointing_outside_its_directory(t
     before = sentinel.read_bytes()
 
     with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
-        paths_mod._assert_write_contained(cache, cache / "entry.dat")
+        _make_entry(cache)
 
     assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value), (
         "the write-flavoured refusal must report the same containment clause the read-flavoured one "
@@ -1236,7 +1258,7 @@ def test_memmap_write_refuses_a_planted_symlink_pointing_outside_its_directory(t
         "the sentinel outside the cache directory was modified despite the refusal — the check "
         "raised but something still wrote through the planted symlink"
     )
-    assert len(sentinel.read_bytes()) == len(before), "the sentinel was truncated despite the refusal"
+    assert sentinel.stat().st_size == len(before), "the sentinel was truncated despite the refusal"
 
 
 def test_memmap_write_accepts_a_symlink_whose_target_stays_inside_its_directory(tmp_path: Path) -> None:
@@ -1251,36 +1273,202 @@ def test_memmap_write_accepts_a_symlink_whose_target_stays_inside_its_directory(
     cache = tmp_path / "cache"
     cache.mkdir()
     real_target = cache / "adopted_payload.bin"
-    real_target.write_bytes(b"x" * 8)
-    link = cache / "entry.dat"
-    link.symlink_to(real_target)
+    real_target.write_bytes(b"\x00" * 64)
+    (cache / "entry.dat").symlink_to(real_target)
 
-    # Must not raise: the final component IS a symlink, but it resolves inside.
-    paths_mod._assert_write_contained(cache, link)
+    entry = _make_entry(cache)  # must not raise
+    entry.offload()
+
+    assert (cache / "entry.dat").is_symlink(), "the test stopped exercising the adopted-entry shape"
+    assert real_target.exists(), "the write through the inside-resolving link did not reach its target"
+    entry.load(mode="r+")
+    assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64)), (
+        "an adopted entry whose link resolves inside the directory must still round-trip; refusing "
+        "it would be the STORE-03 regression this test exists to catch"
+    )
 
 
 def test_memmap_reopen_path_is_containment_checked_too(tmp_path: Path) -> None:
-    """A symlink planted *between* two opens of the same path is refused on the second.
+    """The reopen branch is guarded too, not only the allocation branch.
 
-    A check placed inside the create branch only passes the escape test above and
-    fails this one: the reopen branch takes a different ``mode`` and would open
-    the planted symlink with no verification at all.
+    ``_convert_to_memmap`` has two ``np.memmap`` calls: the allocate-or-reopen
+    call under ``if self._mmap is None`` and a second **reopen** call under
+    ``elif self._mmap.mode != "r+"``. A check placed inside the first branch
+    passes the escape test above and fails this one, because the ``elif`` would
+    then open the planted symlink with no verification at all.
+
+    Reaching the ``elif`` needs a live memmap whose mode is not ``"r+"``, which
+    is what ``load(mode="r")`` leaves behind.
     """
     cache = tmp_path / "cache"
     cache.mkdir()
-    dat = cache / "entry.dat"
-    dat.write_bytes(b"\x00" * 64)
+    entry = _make_entry(cache)
+    entry.offload()
+    entry.load(mode="r")
+    assert entry._mmap is not None and entry._mmap.mode != "r+", (
+        "the fixture did not leave a non-'r+' memmap live, so this test would take the allocation "
+        "branch and stop distinguishing the two call sites"
+    )
 
-    # First open: an ordinary real file, accepted.
-    paths_mod._assert_write_contained(cache, dat)
-
-    # ...then the swap, exactly as an attacker with write access would do it.
+    # ...then the swap, exactly as someone with write access to the cache dir would do it.
+    (cache / "entry.dat").unlink()
     sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
     before = sentinel.read_bytes()
 
     with pytest.raises(paths_mod.StoreContainmentError):
-        paths_mod._assert_write_contained(cache, dat)
+        entry._convert_to_memmap()
     assert sentinel.read_bytes() == before
+    assert sentinel.stat().st_size == len(before)
+
+
+def test_memmap_load_refuses_a_planted_symlink_on_both_mutating_modes(tmp_path: Path) -> None:
+    """``load()`` is a **second** mutable open of the same path, and it is guarded (RV-01).
+
+    This is the route a fix named after ``_convert_to_memmap`` leaves open with
+    the suite green. ``load``'s ``mode`` defaults to the mutable ``"r+"`` and
+    accepts the truncating ``"w+"`` from the caller, and before this guard both
+    reached ``np.memmap(self._cache_path, ..., mode=mode)`` with no containment
+    check at all.
+
+    Measured on this host before the guard existed, one fresh entry and one
+    fresh 256-byte sentinel per mode:
+
+    * ``load(mode="w+")`` → no exception, sentinel **truncated 256 → 64 bytes**;
+    * ``load(mode="r+")`` → no exception, sentinel bytes unchanged **by the call**
+      but the handle it installs is mutable, so a write through it reached the
+      sentinel.
+
+    Both halves therefore assert the exception **and** the sentinel's bytes
+    **and** its length. Length is not redundant: a check that refuses to create
+    is not the same as one that refuses to truncate, and ``"w+"`` truncates.
+    """
+    for mode in ("r+", "w+"):
+        cache = tmp_path / f"cache_{mode.replace('+', 'p')}"
+        cache.mkdir()
+        outside = tmp_path / f"outside_{mode.replace('+', 'p')}"
+
+        entry = _make_entry(cache)
+        entry.offload()
+        assert (cache / "entry.dat").exists(), "the entry never wrote its .dat, so the plant is meaningless"
+
+        # Fresh entry and fresh sentinel per mode, so one mode's damage cannot
+        # be read as the other's.
+        (cache / "entry.dat").unlink()
+        sentinel = _plant_outside_sentinel(cache, outside)
+        before = sentinel.read_bytes()
+
+        with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
+            entry.load(mode=mode)  # type: ignore[arg-type]
+
+        assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value), (
+            f"load(mode={mode!r}) refused, but not with the published containment clause"
+        )
+        assert sentinel.read_bytes() == before, (
+            f"load(mode={mode!r}) refused but the sentinel outside the cache directory still changed"
+        )
+        assert sentinel.stat().st_size == len(before), (
+            f"load(mode={mode!r}) refused but the sentinel was truncated — measured at 256 -> 64 "
+            "bytes before the guard existed, which is why length is asserted separately"
+        )
+
+
+def test_memmap_load_non_mutating_modes_are_unaffected_by_the_guard(tmp_path: Path) -> None:
+    """``"r"`` and ``"c"`` behave exactly as before, per the recorded mode scope.
+
+    The scope is a decision with a measured reason, not an omission. Neither
+    mode reaches the file — ``"r"`` opens read-only and ``"c"`` is copy-on-write,
+    so its writes never leave RAM — and extending the write-flavoured
+    final-component resolution onto a read is exactly what D-17 and STORE-03
+    refuse. The residual is recorded rather than implied: ``load(mode="r")``
+    through a planted symlink can still **read** a file outside the directory.
+    That is disclosure, not corruption, and it is out of scope for a
+    containment-on-write decision.
+    """
+    for mode in ("r", "c"):
+        cache = tmp_path / f"cache_{mode}"
+        cache.mkdir()
+        entry = _make_entry(cache)
+        entry.offload()
+        entry.load(mode=mode)  # type: ignore[arg-type]
+        assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64)), (
+            f"load(mode={mode!r}) stopped round-tripping; the guard was applied to a mode the "
+            "four-mode table measured as non-mutating"
+        )
+
+
+def test_unconfigured_branch_entry_still_allocates_and_still_loads() -> None:
+    """The ``mkstemp`` branch is not refused by the explicit base (RV-02).
+
+    With no ``cache_path`` configured, ``_init_from_config`` creates the ``.dat``
+    with :func:`tempfile.mkstemp` and its parent is the **system temp
+    directory**. The check still runs there and still has a well-defined base —
+    it is simply near-vacuous, because that branch has **no cache-directory
+    root** at all. What must not happen is the explicit base turning a
+    near-vacuous check into a refusal.
+    """
+    entry = DiskBackedNDArray(
+        np.arange(8, dtype=np.float64),
+        enable_caching=True,
+        purge_disk_on_gc=False,
+    )
+    dat = entry._cache_path
+    try:
+        assert dat.suffix == ".dat" and dat.parent == Path(tempfile.gettempdir()), (
+            f"the unconfigured branch put the .dat at {str(dat)!r}, so this test is no longer "
+            "measuring the mkstemp branch it is named for"
+        )
+        entry.offload()
+        entry.load(mode="r+")
+        assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64))
+    finally:
+        dat.unlink(missing_ok=True)
+
+
+def test_write_containment_helper_refuses_an_escaping_final_component(tmp_path: Path) -> None:
+    """The helper's own contract, asserted directly rather than through a call site.
+
+    Kept alongside the end-to-end tests because the two fail for different
+    reasons: this one reddens when the helper's logic is wrong, the end-to-end
+    ones redden when a call site is missing. A run where only one group is red
+    says which of the two happened.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
+    before = sentinel.read_bytes()
+
+    with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
+        paths_mod._assert_write_contained(cache, cache / "entry.dat")
+    assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value)
+    assert sentinel.read_bytes() == before
+
+    # A path whose parent chain leaves the directory is refused too, by the
+    # delegated _assert_contained layer rather than by the new one.
+    with pytest.raises(paths_mod.StoreContainmentError):
+        paths_mod._assert_write_contained(cache, cache / ".." / "outside" / "victim.bin")
+
+
+def test_write_containment_helper_accepts_an_inside_link_and_a_not_yet_created_path(
+    tmp_path: Path,
+) -> None:
+    """Two acceptances the helper must keep: the adopted entry, and allocation."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    # Allocation is the normal case: the path does not exist yet.
+    paths_mod._assert_write_contained(cache, cache / "not_yet.dat")
+
+    # An ordinary file inside the directory.
+    plain = cache / "plain.dat"
+    plain.write_bytes(b"x" * 8)
+    paths_mod._assert_write_contained(cache, plain)
+
+    # A final-component symlink resolving INSIDE the directory (STORE-03).
+    real_target = cache / "adopted_payload.bin"
+    real_target.write_bytes(b"x" * 8)
+    link = cache / "entry.dat"
+    link.symlink_to(real_target)
+    paths_mod._assert_write_contained(cache, link)
 
 
 def test_memmap_write_accepts_a_path_inside_a_cache_directory_that_is_itself_a_symlink(
@@ -1302,12 +1490,21 @@ def test_memmap_write_accepts_a_path_inside_a_cache_directory_that_is_itself_a_s
         "path while claiming to cover the symlinked-base case"
     )
 
-    # Not yet allocated — allocation is the normal case and must be accepted.
-    paths_mod._assert_write_contained(linked, linked / "entry.dat")
+    # Helper contract: not-yet-allocated, then an ordinary file.
+    paths_mod._assert_write_contained(linked, linked / "probe.dat")
+    (linked / "probe.dat").write_bytes(b"\x00" * 8)
+    paths_mod._assert_write_contained(linked, linked / "probe.dat")
 
-    # And once it exists as an ordinary file, still accepted.
-    (linked / "entry.dat").write_bytes(b"\x00" * 8)
-    paths_mod._assert_write_contained(linked, linked / "entry.dat")
+    # And end-to-end for the memmap artefact specifically: allocate, offload and
+    # reload a real entry through the symlinked cache directory. This is the half
+    # the codec-pair symlink group in test_store_containment.py does not reach.
+    entry = _make_entry(linked)
+    entry.offload()
+    assert (real / "entry.dat").exists(), (
+        "the offload through the symlinked cache directory wrote no .dat into the real directory"
+    )
+    entry.load(mode="r+")
+    assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64))
 
 
 def test_memmap_write_accepts_a_mkstemp_candidate_against_the_system_temp_directory() -> None:
@@ -1320,9 +1517,7 @@ def test_memmap_write_accepts_a_mkstemp_candidate_against_the_system_temp_direct
     helper must not need to know which branch produced the path, which is the
     whole reason the base is a parameter rather than something it derives.
     """
-    import tempfile as _tempfile
-
-    fd, name = _tempfile.mkstemp(suffix=".dat")
+    fd, name = tempfile.mkstemp(suffix=".dat")
     os.close(fd)
     candidate = Path(name)
     try:
