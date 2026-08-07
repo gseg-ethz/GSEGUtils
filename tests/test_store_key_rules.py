@@ -1081,12 +1081,12 @@ def test_exception_hierarchy_is_value_error_and_deliberately_not_key_error() -> 
 
 
 @pytest.mark.parametrize("value", NON_STR_KEYS)
-def test_predicate_is_total_and_returns_false_for_a_non_str(value: object) -> None:
-    """Plan 14-09 / STORE-01 / WR-02: the published predicate returns ``bool`` for *every* argument.
+def test_predicate_returns_false_for_a_non_str_argument(value: object) -> None:
+    """Plan 14-09 / STORE-01 / WR-02: the published predicate returns ``False`` for a non-``str``.
 
     ``is_valid_store_key`` documents ``Returns: bool`` and the contract page
     sells it as the supported way to check a composed name *without catching an
-    exception*. Before this plan a non-``str`` escaped as a bare
+    exception*. Before Plan 14-09 a non-``str`` escaped as a bare
     :exc:`TypeError` out of the control-character scan — so the one published
     call shape the predicate exists for could crash a downstream's per-tile
     pre-check, and neither ``except StoreKeyError`` nor ``except ValueError``
@@ -1095,6 +1095,18 @@ def test_predicate_is_total_and_returns_false_for_a_non_str(value: object) -> No
     The ``Path`` case is the one that bites in practice: a consumer pre-checking
     a path-typed identifier got a crash for exactly the escape shape this phase
     is about.
+
+    ↻ RENAMED and REWORDED by Plan 14-19 (D-33, § IN-01, cross-AI review RV-05).
+    This test was called ``test_predicate_is_total_and_returns_false_for_a_non_str``
+    and its docstring and failure message both asserted an **unqualified**
+    totality — that the predicate returns a ``bool`` for *any* argument
+    whatsoever. That claim is false and is withdrawn this round: a ``str``
+    subclass with a raising ``__hash__`` propagates out of the reserved-key
+    membership test. Withdrawing the claim in the docstring and on the contract
+    page while the suite kept asserting it in its own failure text would be a
+    half-correction, so the name, the docstring and the message all move here.
+    The scope this test actually covers — non-``str`` arguments — is unchanged
+    and is now what its name says.
     """
     # The annotation says ``str``; passing something else is the whole point of
     # this test, because the real downstream case is a caller who ignored it
@@ -1102,8 +1114,72 @@ def test_predicate_is_total_and_returns_false_for_a_non_str(value: object) -> No
     # keeps ``mypy --strict`` honest about the deviation instead of widening the
     # published annotation, which is surface and did not change.
     assert is_valid_store_key(cast(str, value)) is False, (
-        f"is_valid_store_key({value!r}) did not return False; the predicate is not total over its input domain"
+        f"is_valid_store_key({value!r}) did not return False; a non-str argument must be refused as a "
+        "verdict rather than escaping as an exception"
     )
+
+
+def test_is_valid_store_key_is_total_over_non_str_arguments_only() -> None:
+    """Plan 14-19 / STORE-01 / D-33 / § IN-01: the predicate's totality covers non-``str`` arguments and no more.
+
+    Two halves, held together in one test on purpose, because the claim and its
+    exception are a pair and separating them is how the unqualified version
+    survived three rounds.
+
+    **First half — every non-``str`` shape produces a verdict.** That much of the
+    old claim is true, is what consumers actually use, and is what
+    :func:`test_predicate_returns_false_for_a_non_str_argument` pins per shape.
+    It is restated in aggregate here so a reader who greps this test's name finds
+    the whole picture in one place.
+
+    **Second half — a ``str`` subclass with a raising** ``__hash__`` **raises,
+    and that is asserted as the correct behaviour rather than as a known bug.**
+    ``key in _RESERVED_KEYS`` hashes the argument, and it does so *before* the
+    non-``str`` type guard's position has any bearing on the outcome — the guard
+    is ahead of it, but a ``str`` subclass passes the guard, so the hash is
+    reached anyway. Converting that exception into a ``False`` would take a
+    blanket ``except Exception``, and a blanket handler here would also swallow
+    :exc:`StoreContainmentError` — the signal the ``get`` and ``pop`` carve-outs
+    were added in Plans 14-14 and 14-17 specifically to keep visible. A
+    contributor who "fixes" the predicate that way reddens this test, and this
+    docstring tells them what they would have broken.
+
+    The module already reasons about hostile ``str`` subclasses one file over
+    (``_assert_contained``'s case 2 and its ``Sneaky`` shape), so this is not an
+    exotic argument for this codebase — it is the shape the containment layer
+    exists for, arriving at the lexical layer instead.
+    """
+    for value in NON_STR_KEYS:
+        verdict = is_valid_store_key(cast(str, value))
+        assert isinstance(verdict, bool), (
+            f"is_valid_store_key({value!r}) returned {verdict!r}, which is not a bool; the non-str "
+            "half of the documented claim has stopped holding"
+        )
+
+    class RaisingHash(str):
+        """A ``str`` subclass whose ``__hash__`` raises — the § IN-01 escape shape."""
+
+        def __hash__(self) -> int:
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        is_valid_store_key(RaisingHash("safe"))
+
+
+def test_an_ordinary_str_subclass_is_decided_by_its_characters() -> None:
+    """Plan 14-19 / STORE-01 / D-33: a well-behaved ``str`` subclass is decided like any other key.
+
+    The positive boundary of the test above. The narrowing is about a *hostile*
+    dunder, not about subclasses as a category: a subclass that behaves like the
+    ``str`` it is gets the verdict its characters say, so the narrowed claim does
+    not quietly withdraw support for the ordinary case.
+    """
+
+    class Ordinary(str):
+        """A ``str`` subclass with no dunder overrides at all."""
+
+    assert is_valid_store_key(cast(str, Ordinary("tile_03"))) is True
+    assert is_valid_store_key(cast(str, Ordinary("../victim"))) is False
 
 
 @pytest.mark.parametrize("value", NON_STR_KEYS)
