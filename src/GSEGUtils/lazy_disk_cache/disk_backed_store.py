@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import tempfile
-import warnings
 from pathlib import Path
 from types import MappingProxyType
 from typing import (
@@ -741,122 +740,6 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     def __repr__(self) -> str:
         """Return a debug representation listing the currently-tracked keys."""
         return f"<DiskBackedStore({list(self._store.keys())})>"
-
-    # -- Deprecated builder aliases (D-15) ---------------------------------
-    #
-    # These three used to *be* the builders. They now delegate to the shared
-    # free functions in `paths`, which validate the key and verify containment
-    # (STORE-02) — behaviour these methods never had.
-    #
-    # They survive rather than being deleted because they are de facto subclass
-    # API despite the underscore: pc2img overrides `_get_npy_path` and
-    # `_get_meta_path`, calls them directly, and asserts on them in its tests.
-    # The parameter name stays `feature` — NOT `key` — for the same reason: a
-    # rename is a silent break for a subclass that overrides with the old name.
-    #
-    # Consistency note worth preserving: D-01 seals `LazyDiskCache.cache_path`
-    # with NO deprecation cycle while these get a full one. Same principle —
-    # evidence of use — opposite outcome, because the setter has zero measured
-    # assigners and these have measured live callers.
-    #
-    # No library-internal call site goes through these wrappers; every one of
-    # them calls `paths.<builder>` directly, so the library never triggers its
-    # own deprecation warning. The suite is run with
-    # `-W error::DeprecationWarning` to keep that true.
-
-    def _get_npy_path(self, feature: str) -> Path:
-        """Return the on-disk ``.npy`` path for ``feature``.
-
-        Parameters
-        ----------
-        feature : str
-            The store key. Named ``feature`` because subclasses override this
-            method by signature.
-
-        Returns
-        -------
-        Path
-            Exactly what :func:`GSEGUtils.lazy_disk_cache.get_npy_path` returns
-            for this store's cache directory.
-
-        Warnings
-        --------
-        Deprecated. Call
-        :func:`GSEGUtils.lazy_disk_cache.get_npy_path(cache_dir, key)
-        <GSEGUtils.lazy_disk_cache.paths.get_npy_path>` instead. This alias is
-        removed in the next breaking release after this one.
-        """
-        warnings.warn(
-            "DiskBackedStore._get_npy_path is deprecated; call "
-            "GSEGUtils.lazy_disk_cache.get_npy_path(cache_dir, key) instead. "
-            "This alias is removed in the next breaking release after this one.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return paths.get_npy_path(self._cache_dir, feature)
-
-    def _get_meta_path(self, feature: str) -> Path:
-        """Return the on-disk JSON sidecar path for ``feature``.
-
-        Parameters
-        ----------
-        feature : str
-            The store key. Named ``feature`` because subclasses override this
-            method by signature.
-
-        Returns
-        -------
-        Path
-            Exactly what :func:`GSEGUtils.lazy_disk_cache.get_meta_path`
-            returns for this store's cache directory.
-
-        Warnings
-        --------
-        Deprecated. Call
-        :func:`GSEGUtils.lazy_disk_cache.get_meta_path(cache_dir, key)
-        <GSEGUtils.lazy_disk_cache.paths.get_meta_path>` instead. This alias is
-        removed in the next breaking release after this one.
-        """
-        warnings.warn(
-            "DiskBackedStore._get_meta_path is deprecated; call "
-            "GSEGUtils.lazy_disk_cache.get_meta_path(cache_dir, key) instead. "
-            "This alias is removed in the next breaking release after this one.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return paths.get_meta_path(self._cache_dir, feature)
-
-    def _get_legacy_pickle_path(self, feature: str) -> Path:
-        """Return the legacy pre-Phase-2 ``.pkl`` path for ``feature`` (refused on read).
-
-        Parameters
-        ----------
-        feature : str
-            The store key. Named ``feature`` because subclasses override this
-            method by signature.
-
-        Returns
-        -------
-        Path
-            Exactly what
-            :func:`GSEGUtils.lazy_disk_cache.get_legacy_pickle_path` returns
-            for this store's cache directory.
-
-        Warnings
-        --------
-        Deprecated. Call
-        :func:`GSEGUtils.lazy_disk_cache.get_legacy_pickle_path(cache_dir, key)
-        <GSEGUtils.lazy_disk_cache.paths.get_legacy_pickle_path>` instead. This
-        alias is removed in the next breaking release after this one.
-        """
-        warnings.warn(
-            "DiskBackedStore._get_legacy_pickle_path is deprecated; call "
-            "GSEGUtils.lazy_disk_cache.get_legacy_pickle_path(cache_dir, key) instead. "
-            "This alias is removed in the next breaking release after this one.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return paths.get_legacy_pickle_path(self._cache_dir, feature)
 
     def add_data_to_store(
         self,
