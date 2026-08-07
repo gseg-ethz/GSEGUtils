@@ -1018,6 +1018,42 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         silently at the next route somebody adds — which is precisely how this
         one was missed for a round. Do not restore the unqualified wording.
 
+        ↻ **CORRECTED A THIRD TIME by Plan 14-18 (D-32, § WR-03).** Both
+        paragraphs above stay exactly as written — the D-19 argument because it
+        is right, and Plan 14-12's correction because it is the second of three
+        instances of one defect and the sequence is the point. What is withdrawn
+        is a single sentence, by annotation rather than by deletion: **"the claim
+        holds now" was false when it was written.** Round 3 detached the
+        snapshot on the way *out*; :meth:`__setstate__` still installed the
+        caller's mapping on the way *in*, because ``self.__dict__.update(state)``
+        binds the state's ``_store`` **object** onto the instance. Measured
+        against the round-3 tree: ``store._store is state["_store"]`` was
+        ``True``, and writing ``state["_store"]["../victim"] = None`` after the
+        call put ``'../victim'`` in ``keys()``.
+
+        **What this note claims, and what it deliberately does not.** The route
+        closed in round 4 is :meth:`__setstate__`'s installation of the incoming
+        mapping; the mechanism is a rebind to a fresh ``dict``, placed after the
+        instance-dict update and before the reload loop; the plan is 14-18. It
+        does **not** claim that every route is now covered. That claim has been
+        made three times and falsified three times, each time by a route the
+        asserting round had itself edited, and nothing in this module enforces
+        it — the quantifier is maintained by whoever last enumerated the routes,
+        which is the failure the paragraph above names one sentence before
+        committing it. Three routes, three mechanisms, three plans is what is
+        known: the ``store`` property (read-only view, 14-08), ``__getstate__``
+        (detached snapshot, 14-12), ``__setstate__`` (detaching rebind, 14-18).
+
+        *What would enforce the withdrawn claim, written down so the withdrawal
+        does not read as a shrug —* **and explicitly not built here, not
+        promised, and not part of this round.** *One mechanism rather than a
+        longer list: make* ``_store`` *unreachable as a plain attribute — a
+        private mapping type whose own* ``__setitem__`` *validates — so every
+        write route that exists, or is ever added, passes through one site by
+        construction and no route can be forgotten because none can bypass it.
+        Until something of that shape exists, a per-route enumeration is a
+        snapshot of one author's memory and should be written as one.*
+
         *Measured basis, not assumed.* Across ``30_GSEGUtils``,
         ``41_pchandler``, ``pc2img`` and ``iof3D`` there are **zero
         write-through sites** for this property; every measured usage is a
@@ -1324,6 +1360,45 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         it was written. The conclusion follows **now**: Plan 14-12 makes
         :meth:`__getstate__` return a detached ``dict``, so the snapshot is a
         copy, and every route that installs a key into ``_store`` validates it.
+
+        ↻ **CORRECTED A THIRD TIME by Plan 14-18 (D-32, § WR-03).** Both
+        corrections above stay, per the instruction two paragraphs up — and
+        **this makes three, which is now the most useful thing this block
+        says.** The sentence withdrawn here is *"the conclusion follows now"*:
+        it did not follow, and the counterexample was again one line away, this
+        time inside this very method. ``self.__dict__.update(state)`` installs
+        the caller's ``_store`` **object**, so the restored store shared its
+        entry mapping with whoever held the state, and a write into that state
+        *after* the call installed a key into a store that had validated every
+        key it was shown. Measured on the round-3 tree: identity ``True``, and
+        ``keys()`` gaining ``'../victim'`` from a post-call write.
+
+        *Reachability, stated rather than implied, because a deserialization
+        defect reads as worse than it is unless its shape is named.*
+        :func:`pickle.loads` and :func:`copy.copy` both discard the state
+        mapping once restoration is done, so reaching this needs an explicit
+        ``__setstate__`` call by a caller who retains the state — the shape this
+        module's own tests use. That makes it narrower than the ``store``
+        property's route, and it was still a live, unvalidated write route into
+        ``_store`` on a trust boundary: precisely the thing the two paragraphs
+        above assert does not exist.
+
+        **The progression, which is the part worth carrying forward.** This is
+        one defect on three surfaces of one protocol pair. The ``store``
+        property handed out the live mapping (round 1, closed by D-19's
+        read-only view); ``__getstate__`` handed out the same mapping through a
+        shallow snapshot (round 2, closed by Plan 14-12's detached ``dict``);
+        ``__setstate__`` installed the caller's mapping on the way in (round 3,
+        closed by Plan 14-18's rebind below). Each was found by the round after
+        the one that declared the set complete.
+
+        **So this paragraph names a route and a mechanism and stops there.** The
+        route is this method's installation of the incoming mapping; the
+        mechanism is the rebind to a fresh ``dict``, placed after the
+        instance-dict update and ahead of the reload loop; the plan is 14-18. No
+        every-route quantifier is restored, because nothing enforces one — see
+        the matching note on the :attr:`store` property for what would, and for
+        why it is not built here.
 
         This is DELIBERATELY the opposite of the ``__init__`` rescan's policy
         (D-09, which warns and skips). Warning-and-skipping here would return a
