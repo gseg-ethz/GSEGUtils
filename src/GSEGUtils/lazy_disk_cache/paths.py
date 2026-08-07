@@ -571,13 +571,33 @@ def is_valid_store_key(key: str) -> bool:
     Downstreams can also use it to pre-check a composed feature name *before* it
     becomes a key, or to decide per-tile without catching an exception.
 
-    **The predicate is total: every argument produces a** :class:`bool`. A
-    non-``str`` is refused by :func:`validate_store_key`'s own type guard as a
-    :exc:`StoreKeyError`, which this function already catches, so nothing
-    escapes as an exception — there is deliberately no second guard here. That
-    totality is what lets a downstream pre-check a path-typed identifier without
-    wrapping the call, which is the shape the "decide per-tile without catching
-    an exception" guidance above was written for.
+    **The predicate always produces a** :class:`bool` **for a non-**``str``
+    **argument.** Such a value is refused by :func:`validate_store_key`'s own
+    type guard as a :exc:`StoreKeyError`, which this function already catches, so
+    it cannot escape as an exception — there is deliberately no second guard
+    here. That is what lets a downstream pre-check a path-typed identifier
+    without wrapping the call, which is the shape the "decide per-tile without
+    catching an exception" guidance above was written for.
+
+    ↻ **NARROWED by Plan 14-19 (D-33, § IN-01).** This paragraph previously
+    claimed the predicate produced a ``bool`` for *any* argument at all. It does
+    not, and the counter-example is a shape this module reasons about one file
+    over: a :class:`str` **subclass** whose ``__hash__`` raises. Such a value
+    passes the type guard — it *is* a ``str`` — and then reaches
+    ``key in _RESERVED_KEYS``, which hashes it; the exception propagates. The
+    guard's position ahead of that membership test is still load-bearing for
+    *unhashable non-*``str`` arguments, which is the case it was placed for, but
+    it has no bearing on this one. Measured at
+    :func:`validate_store_key`'s reserved-key membership test.
+
+    The behaviour is deliberately **unchanged** — only the claim moved. Turning
+    that exception into a ``False`` would require a blanket
+    ``except Exception``, which would also swallow
+    :exc:`StoreContainmentError`, the signal the ``get`` and ``pop`` accessors
+    re-raise on purpose so that evidence of something planted in the cache
+    directory stays visible. A consumer composing keys from third-party objects
+    with hostile dunders is the one case that needs a ``try``; a consumer passing
+    ordinary values, of any type, is not.
 
     Parameters
     ----------
