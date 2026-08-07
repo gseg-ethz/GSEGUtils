@@ -155,6 +155,13 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     # it. Anchored to that one method, not to the class, so a future reference to
     # a *different* MutableMapping method still has to resolve or be justified.
     (r"py:meth", r"typing\.MutableMapping\.setdefault$"),
+    # The justification the entry above asks for, one method along. Plan 14-17's
+    # `clear` docstring (D-29) records why `popitem` is deliberately left
+    # inherited, and links it to the ABC that supplies it for exactly the reason
+    # the `setdefault` reference exists: a reader must be able to see that the
+    # neighbour is a decision rather than an oversight. Same deprecated-alias
+    # cause, same per-method anchoring — not widened to the class.
+    (r"py:meth", r"typing\.MutableMapping\.popitem$"),
     # dunder methods — Sphinx can't resolve short-form bare `__array__` etc.
     # `__setstate__` and `__delitem__` joined the list in Phase 14: the pickle
     # protocol hook is referenced from `cache_dir`'s docstring (Plan 14-14,

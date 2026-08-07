@@ -329,18 +329,65 @@ environment* — something planted a symlink in the cache directory. A per-item
 handler that skips one bad key should not silently swallow the second kind, so
 catch the base type only where you mean "this key was bad".
 
-**Not every route raises, so not every route needs a handler.** Three routes
-answer an illegal key instead of raising: ``key in store`` returns ``False``,
-``store.get(key, default)`` returns its default, and ``store.pop(key, default)``
-returns its default. Two neighbours deliberately do raise: the bare
-``store.pop(key)``, because answering a miss with ``None`` is not what a mapping
-``pop`` does, and ``store.setdefault(key, default)``, because ``setdefault`` is
-a **write** route and refusing an illegal key on a write is the point of this
-contract. A ``StoreContainmentError`` propagates out of *all* of them, including
-the defaulting ones — it is evidence about the environment rather than about the
+.. CONTRACT-PAGE-ROUTES: BEGIN
+
+**Not every route raises, so not every route needs a handler.** The list below
+is every mapping route that can meet a key — all ten of them — and it is
+*enforced* to be every one, not merely intended to be: the regression test
+``test_contract_page_route_paragraph_names_every_overridden_mapping_route``
+derives the set by introspection and fails the build if a route is missing from
+this page. An earlier draft named five and called itself exhaustive; the two it
+omitted were the two that were then found to misbehave, which is the usual way
+round.
+
+* ``key in store`` (``__contains__``) — answers ``False`` for an illegal key.
+* ``store.get(key, default)`` (``get``) — returns its default.
+* ``store.pop(key, default)`` (``pop``, defaulting form) — returns its default.
+* ``store.pop(key)`` (``pop``, bare form) — **raises**, because answering a miss
+  with ``None`` is not what a mapping ``pop`` does.
+* ``store[key]`` (``__getitem__``) — **raises**; this is the route the others
+  are defined against.
+* ``store[key] = entry`` (``__setitem__``) — **raises**, before any filesystem
+  call.
+* ``del store[key]`` (``__delitem__``) — removes tracking; it builds no path, so
+  it has no key to refuse.
+* ``store.setdefault(key, default)`` (``setdefault``) — **raises**, because
+  ``setdefault`` is a **write** route and refusing an illegal key on a write is
+  the point of this contract. Its resemblance to ``get`` is not a reason to give
+  it ``get``'s behaviour.
+* ``store.update(other)`` (``update``) — **raises**, per key, through
+  ``__setitem__``.
+* ``store.clear()`` (``clear``) — empties the store or raises; it can no longer
+  return with keys still tracked.
+* ``store.popitem()`` (``popitem``) — left as ``MutableMapping`` supplies it.
+  Its ``KeyError`` carries the key on a non-empty store and carries nothing on
+  an empty one, so the two cases are distinguishable.
+
+The last four are supplied by ``collections.abc.MutableMapping`` rather than
+written in this library, so they appear in no diff that changes their behaviour.
+That is why they were missed, and why the enumeration above is now derived from
+the ABC rather than remembered.
+
+A ``StoreContainmentError`` propagates out of *all* of them, including the
+defaulting ones — it is evidence about the environment rather than about the
 key, and swallowing it behind a default would hide exactly the case worth
-seeing. The full per-route enumeration lives in ``BC-GSEG-006`` in
+seeing. Nothing is removed when it propagates.
+
+**What a removal leaves behind.** Every removal route above — ``pop``,
+``del store[key]`` and ``clear`` — drops the key from the store's **in-memory**
+tracking and **leaves the entry's files on disk**. So a removed key that had
+been offloaded is re-adopted by the next ``store[key]``, which falls back to the
+loader for any untracked key, and again by the rescan when the store is
+reopened. Between the removal and that read, ``key not in store`` and
+``store[key]`` both succeed. Treat this as a known limitation rather than a
+guarantee, and unlink the artefacts yourself if you need them gone; the atomic
+drop-key-and-delete-files operation is **STORE-04**, and it is not in this
+release.
+
+The full per-route enumeration with migration detail lives in ``BC-GSEG-006`` in
 ``MIGRATION-v1.0.md``.
+
+.. CONTRACT-PAGE-ROUTES: END
 
 Pre-checking a key
 ~~~~~~~~~~~~~~~~~~

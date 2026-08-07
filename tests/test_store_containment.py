@@ -88,6 +88,7 @@ import pickle
 import re
 import tempfile
 import textwrap
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Optional, cast
@@ -1748,6 +1749,141 @@ def test_builder_containment_a_str_subclass_defeats_the_lexical_layer_and_is_cau
     for builder_name, message in refused.items():
         assert paths_mod.CLAUSE_ESCAPES in message, (
             f"{builder_name} refused, but not with the containment clause: {message!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# contract-page route enumeration — derived from BOTH the class's own namespace
+# and MutableMapping's mixins (Plan 14-17 / D-29 / WR-04 / RV-04 / T-14-78,
+# T-14-101)
+# ---------------------------------------------------------------------------
+
+#: Routes deliberately **not** named in the page's enumeration, each with the
+#: reason. These are the only members of the derived union that take no key and
+#: mutate nothing, so no key can be refused at them and there is no policy to
+#: publish. A silent omission and a decided one must look different, which is
+#: what makes this an explicit table rather than a filter buried in a
+#: comprehension.
+ROUTE_ENUMERATION_ALLOWLIST: dict[str, str] = {
+    "keys": "returns a view of the tracked keys; takes no key argument and mutates nothing",
+    "items": "returns a view of (key, entry) pairs; takes no key argument and mutates nothing",
+    "values": "returns a view of the entries; takes no key argument and mutates nothing",
+}
+
+#: Extraction floor. The marker block currently yields far more inline literals
+#: than this; the floor exists so that a parser which has stopped seeing the
+#: page fails on *itself* rather than passing vacuously over an empty match.
+_MIN_ROUTE_PARAGRAPH_LITERALS: int = 20
+
+
+def _derive_mapping_route_sets() -> tuple[frozenset[str], frozenset[str]]:
+    """Return ``(set_a, set_b)`` — the routes this class is answerable for.
+
+    **Two sets, and deriving only the first is the defect this control exists
+    to close** (RV-04). Round 3's enumeration was assembled by looking at
+    ``disk_backed_store.py``, which is why it named five routes and missed
+    ``clear`` and ``popitem``: both are supplied by ``MutableMapping`` and
+    appear nowhere in this library, so they are invisible from the module *and*
+    from the diff that changed their behaviour.
+
+    * **Set (a) — overridden or policied.** The mapping-API names the class
+      defines in its own namespace.
+    * **Set (b) — inherited mutators.** The concrete mixins ``MutableMapping``
+      supplies (its namespace minus its abstract methods) that the class does
+      **not** define, and whose behaviour therefore flows through the overridden
+      ``__getitem__`` / ``__setitem__`` / ``__delitem__``.
+
+    Both are read off the ABCs rather than from a literal list, so a future
+    Python that adds or renames a mixin changes this derivation instead of
+    quietly leaving it stale. A hardcoded list would be a second enumeration,
+    and a second enumeration drifts exactly the way the paragraph did.
+    """
+
+    def namespace(cls: type) -> frozenset[str]:
+        return frozenset(name for name, value in vars(cls).items() if callable(value) and not name.startswith("_abc"))
+
+    universe = namespace(Mapping) | namespace(MutableMapping)
+    own = frozenset(vars(DiskBackedStore))
+    set_a = universe & own
+    mixins = namespace(MutableMapping) - frozenset(MutableMapping.__abstractmethods__)
+    set_b = mixins - own
+    return set_a, set_b
+
+
+def _extract_route_paragraph_literals() -> list[str]:
+    """Return every ``inline literal`` inside the page's route-enumeration block."""
+    page = CONTRACT_PAGE.read_text(encoding="utf-8")
+    blocks = re.findall(
+        r"\.\. CONTRACT-PAGE-ROUTES: BEGIN\n(.*?)\.\. CONTRACT-PAGE-ROUTES: END",
+        page,
+        flags=re.DOTALL,
+    )
+    assert len(blocks) == 1, (
+        f"expected exactly one CONTRACT-PAGE-ROUTES marker pair in {CONTRACT_PAGE.name}, found "
+        f"{len(blocks)} — the page and this test are no longer in step"
+    )
+    return re.findall(r"``([^`]+)``", blocks[0])
+
+
+def test_contract_page_route_paragraph_names_every_overridden_mapping_route() -> None:
+    """Plan 14-17 / STORE-07 / D-29 / § WR-04 / RV-04 / T-14-78 / T-14-101.
+
+    **The page's route enumeration keeps its exhaustiveness claim, and this is
+    what makes the claim true rather than aspirational.** Round 3 published a
+    five-route list headed by that claim; ``clear`` and ``popitem`` were missing
+    and both were then found to misbehave. A partial list marked complete is
+    harder to find defects in than a list that makes no such claim, so the claim
+    now has a maintainer instead of only an author.
+
+    **The derivation is over two sets, and a one-set derivation would have been
+    green through the whole of round 3** — that is not a hypothetical, it is
+    mutation proof 3 in this plan's SUMMARY, run on this repository. Set (a) is
+    what ``DiskBackedStore`` defines; set (b) is what ``MutableMapping`` supplies
+    and this class inherits. Round 3's two omissions live in set (b), where a
+    control that introspects the class alone cannot see them — which is the same
+    blindness, rebuilt as a test, that produced the defect.
+
+    Set (b) is asserted non-empty on purpose: if the derivation breaks, it comes
+    out empty and every inherited route silently stops being checked.
+
+    The floor assertion comes first for the reason Plan 14-15's page tests give:
+    it is an assertion about the *parser*, and a parser matching nothing would
+    make every check below it vacuous and this test green.
+    """
+    literals = _extract_route_paragraph_literals()
+
+    assert len(literals) >= _MIN_ROUTE_PARAGRAPH_LITERALS, (
+        f"extracted only {len(literals)} inline literals from the route enumeration in "
+        f"{CONTRACT_PAGE.name} (floor {_MIN_ROUTE_PARAGRAPH_LITERALS}) — the parser has stopped "
+        f"seeing the page. Check the '.. CONTRACT-PAGE-ROUTES: BEGIN/END' markers. "
+        f"Extracted: {literals}"
+    )
+
+    set_a, set_b = _derive_mapping_route_sets()
+    assert set_b, (
+        "set (b) came out empty — the inherited-mutator derivation is broken, not absent. Every "
+        "route MutableMapping supplies would silently stop being checked, which is precisely how "
+        "clear() and popitem() went unenumerated for a whole round (RV-04)"
+    )
+
+    origin = {name: "a (defined by DiskBackedStore)" for name in set_a}
+    origin.update({name: "b (inherited from MutableMapping)" for name in set_b})
+
+    for name in ROUTE_ENUMERATION_ALLOWLIST:
+        assert name in origin, (
+            f"{name!r} is allowlisted out of the page enumeration but is no longer a member of "
+            f"either derived set; a stale exclusion hides a route that has come back"
+        )
+
+    required = sorted(set(origin) - set(ROUTE_ENUMERATION_ALLOWLIST))
+    for name in required:
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
+        assert any(pattern.search(literal) for literal in literals), (
+            f"the route enumeration in {CONTRACT_PAGE.name} does not name {name!r}, which is in "
+            f"derived set {origin[name]}. Either name it in the paragraph between the "
+            f"CONTRACT-PAGE-ROUTES markers, or add it to ROUTE_ENUMERATION_ALLOWLIST with the "
+            f"reason it is excluded — a silent omission and a decided one must not look alike. "
+            f"Literals currently in the paragraph: {literals}"
         )
 
 
