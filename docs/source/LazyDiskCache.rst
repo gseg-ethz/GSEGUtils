@@ -377,13 +377,9 @@ when they share one rule.
 It is read-only: it opens no file, writes nothing and creates nothing, so it is
 safe to interrupt and safe to re-run.
 
-It scans for the **base** array extension, ``.npy``. If you subclass
-:class:`~GSEGUtils.lazy_disk_cache.DiskBackedStore` and repoint
-``_DBNDArrayFileExt``, substitute your own extension in the two places the
-snippet names it — otherwise the scan matches nothing and reports an empty
-result that reads like a clean bill of health. Repointing that attribute is a
-supported configuration: since 0.5.x the reopen scan reads the extension off the
-instance, so such a store adopts its own artefacts.
+It scans for ``.npy``, which is the array extension the store writes — the
+snippet and the store's own reopen scan read that extension from the same place,
+so neither can be pointed at a set of files the other does not see.
 
 .. caution::
    Exclude type-checker caches, virtual environments and ``site-packages``. The

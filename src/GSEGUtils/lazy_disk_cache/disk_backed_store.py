@@ -201,14 +201,13 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     mutation is unsupported (see PROJECT.md threading constraint).
     """
 
-    # Aliases of the shared vocabulary in `paths` (D-14). They survive as class
-    # attributes because pc2img subclasses read them off `self`; the values now
-    # come from the one place that also builds the paths, so the suffix used to
-    # glob the cache directory can no longer drift from the suffix written into
-    # it.
-    _DBNDArrayFileExt = paths.NPY_SUFFIX
-    _DBNDArrayMetaExt = paths.META_SUFFIX
-    _LegacyPickleExt = paths.LEGACY_PICKLE_SUFFIX
+    # D-27 — THE ARTEFACT-SUFFIX ATTRIBUTES ARE GONE, AND THEIR ABSENCE IS THE
+    # MECHANISM. This class used to publish three suffix aliases here and invite
+    # subclasses to repoint them. Every codec suffix now comes from `paths`, so
+    # a subclass cannot introduce a second vocabulary and there is nothing left
+    # for a later round to re-diverge. The rationale in full — including what the
+    # class gives up and what the deletion does *not* buy — is in the rescan
+    # comment in `__init__`, beside the code the property protects.
 
     _store: dict[str, Optional[T]]
     _cache_dir: Path
@@ -257,7 +256,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         # pair (.npy + .meta.json); legacy .pkl files are intentionally NOT
         # registered here so __getitem__ surfaces them as a cache miss with
         # the D-05 INFO log via _load_entry.
-        available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
+        available_files = [f for f in self._cache_dir.glob(f"*{paths.NPY_SUFFIX}") if f.is_file()]
         for f in available_files:
             # D-09 — WARN AND SKIP. This route reconstructs keys from
             # filenames that are ALREADY on disk, so what it sees is
@@ -302,35 +301,68 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             #      filter-versus-invariant distinction this phase draws about
             #      paths, applied to keys.
             #
-            #      D-26 (Plan 14-14, WR-02) FINISHES that half: derivation and
-            #      rebuild now read from ONE source rather than agreeing by
-            #      construction. Both halves of the decision are recorded,
-            #      because each reads as a mistake to a different reader.
+            #      D-27 (Plan 14-16, CR-01) FINISHES that half BY DELETION, and
+            #      it supersedes D-26's answer to the same question. The
+            #      superseded position is stated here rather than quietly
+            #      dropped, because it was held on purpose and it reads as the
+            #      obvious fix to anyone who arrives at this code cold.
             #
-            #      WHY THE INSTANCE ATTRIBUTE. The glob and the derivation above
-            #      use `self._DBNDArrayFileExt`; the rebuild used to use the
-            #      module-level `.npy` builder. For the base class those are the
-            #      SAME OBJECT, so the round-trip was a tautology — which is
-            #      exactly why nothing in this repository's suite caught it. For
-            #      a subclass that repoints the attribute — the documented reason
-            #      the attribute exists, see the class-attribute comment above —
-            #      they disagree for EVERY file, so the store adopted NOTHING and
-            #      warned once per file. An empty store plus a per-file warning is
-            #      the "data loss disguised as success" shape the D-09/D-10 policy
-            #      split was written against, reached through the extension point
-            #      the class publishes. Deriving with one vocabulary and rebuilding
-            #      with another is the defect; one vocabulary is the fix.
+            #      WHAT D-26 DID, AND WHY IT WAS NOT ENOUGH. The glob, the
+            #      derivation and (as of D-26) the rebuild all read the withdrawn
+            #      artefact-suffix instance attribute — the three names are
+            #      enumerated in `MIGRATION-v1.0.md` under BC-GSEG-006 and in the
+            #      regression test's `WITHDRAWN_SUFFIX_ATTRS`, and deliberately
+            #      NOT here, so that grepping this module for them returns
+            #      nothing. NOTHING ELSE IN THE CLASS READ THEM:
+            #      `_load_entry`, `_store_entry` and `offload` call
+            #      `paths.get_npy_path` / `paths.get_meta_path`, which read the
+            #      module constants. So the attribute governed DISCOVERY and
+            #      nothing governed RETRIEVAL. For the base class the two are the
+            #      same object, so nothing showed. For the subclass the change was
+            #      written for, they disagreed for every file: measured, such a
+            #      store adopted `['alpha']`, answered `'alpha' in s` with True,
+            #      emitted NO warning, and raised `KeyError` on every read. Round 3
+            #      traded "empty store plus a per-file warning" for "non-empty
+            #      store, no warning, every advertised key unreadable" — which is
+            #      the worse of the two by this module's own standard.
             #
-            #      WHY THE INTRA-PACKAGE SEAM RATHER THAN A NEW PUBLIC BUILDER.
-            #      `paths._build` is private-within-package, and `paths` and this
-            #      module are the same package, so this is not a layering break.
-            #      The alternative — promoting a suffix-taking builder to the
-            #      published surface — was rejected: SC-5 was verified against a
-            #      published surface of EXACTLY SIX names and the docs member
-            #      allowlist is written to that number, so widening it to serve an
-            #      INTERNAL round-trip check would re-open a verified criterion
-            #      and a documentation allowlist for no consumer benefit. Same
-            #      argument recorded in `DESIGN-DECISIONS.md`.
+            #      WHY DELETION RATHER THAN UNIFICATION. Unification — moving
+            #      retrieval and writing onto the instance vocabulary — is the
+            #      larger diff, and it leaves the divergence POSSIBLE: a fifth
+            #      seam added later reads whichever vocabulary its author reaches
+            #      for. Deleting the attribute makes the divergence
+            #      UNREPRESENTABLE. That is the same filter-versus-invariant
+            #      distinction this phase draws everywhere else, applied to the
+            #      vocabulary itself.
+            #
+            #      WHAT THE CLASS GIVES UP. A subclass can no longer choose its
+            #      artefact extension. That capability never worked: measured, a
+            #      suffix-repointing subclass WROTE THE BASE SUFFIX
+            #      (`beta.npy`, not `beta.sub.npy`), because the write path
+            #      ignored the attribute — so it could not produce an artefact its
+            #      own glob would find, and reopening its own directory adopted
+            #      nothing. The documentation paragraph calling the repoint a
+            #      supported configuration was therefore false in both directions,
+            #      and it is gone with the attribute.
+            #
+            #      IN-02 GOES WITH IT. `key = f.name[: -len(suffix)]` degenerates
+            #      to the empty key for EVERY file when the suffix is empty
+            #      (`-len('')` is `0`, so the slice is `f.name[:0]`), and the empty
+            #      suffix was reachable only through the published override point.
+            #      The slice length is now decided at import time, so the
+            #      degenerate case is unreachable and needs no separate guard.
+            #
+            #      WHAT THE DELETION DOES NOT BUY — READ THIS CLAUSE BEFORE
+            #      REPEATING THE CLAIM ANYWHERE. This leaves `DiskBackedStore` with
+            #      ONE **CODEC** ARTEFACT VOCABULARY: `.npy` / `.meta.json` /
+            #      `.pkl`. It does NOT leave the class, and certainly not the
+            #      package, with one artefact vocabulary full stop. The `.dat`
+            #      memmap suffix keeps its own, duplicated between
+            #      `paths.MEMMAP_SUFFIX` and `LazyDiskCache._MEMMAP_SUFFIX`, and
+            #      unifying those is STORE-08 / Phase 15 work (filed beside
+            #      D-14-01) that this round does not do. The unqualified claim
+            #      would be false at the moment it was written, which is the same
+            #      defect class as the documentation sentence deleted above.
             #
             # ORDERING, which is what keeps D-09's prohibition intact: check the
             # cheap predicate FIRST — it cannot raise, and it is what makes the
@@ -339,13 +371,19 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             # shared builder RAISES for a refused key and can raise a
             # containment error on an odd directory. A round-trip check that
             # propagated would violate the very policy it is being added under.
-            key = f.name[: -len(self._DBNDArrayFileExt)]
+            key = f.name[: -len(paths.NPY_SUFFIX)]
             skip_reason: Optional[str] = None
             if not paths.is_valid_store_key(key):
                 skip_reason = "the key derived from its name is not a legal store key"
             else:
                 try:
-                    rebuilt = paths._build(self._cache_dir, key, self._DBNDArrayFileExt)
+                    # The PUBLISHED builder, not `paths._build`. D-26 reached for
+                    # the private seam only so it could pass a per-instance
+                    # suffix; with the attribute gone there is no second suffix to
+                    # pass, so the private seam buys nothing and this is the same
+                    # builder `_load_entry` and `_store_entry` already call.
+                    # Discovery and retrieval now cannot disagree.
+                    rebuilt = paths.get_npy_path(self._cache_dir, key)
                 except paths.StoreKeyError as exc:
                     skip_reason = f"the shared path builder refuses the key derived from its name ({exc})"
                 else:
