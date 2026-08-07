@@ -1096,72 +1096,67 @@ def test_extend_cache_path_with_no_source_path_still_refuses_a_bad_folder() -> N
 
 
 # ---------------------------------------------------------------------------
-# Phase 14 Plan 05 — the D-15 deprecation contract on the three builder aliases
+# Phase 14 Plan 16 — the D-28 withdrawal of the three builder aliases
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.parametrize(
-    ("method_name", "builder_name"),
-    [
-        ("_get_npy_path", "get_npy_path"),
-        ("_get_meta_path", "get_meta_path"),
-        ("_get_legacy_pickle_path", "get_legacy_pickle_path"),
-    ],
+#: The three withdrawn builder-alias methods, paired with the module-level free
+#: function that replaces each and the artefact suffix that function appends.
+#: The pairing is the point: this is a migration, not an obituary, and the
+#: second half of the test below is what says so.
+WITHDRAWN_BUILDER_ALIASES = (
+    ("_get_npy_path", "get_npy_path", "NPY_SUFFIX"),
+    ("_get_meta_path", "get_meta_path", "META_SUFFIX"),
+    ("_get_legacy_pickle_path", "get_legacy_pickle_path", "LEGACY_PICKLE_SUFFIX"),
 )
-def test_deprecated_builder_alias_warns_and_delegates(tmp_cache_dir: Path, method_name: str, builder_name: str) -> None:
-    """Plan 14-05 / STORE-02 / D-15: each surviving alias warns and returns what the seam returns.
 
-    The direct-call shape — one of the two ways the warning reaches pc2img
-    (the other is a ``super()`` call from its own override, covered by the
-    next test). Both assertions are load-bearing:
 
-    * the ``DeprecationWarning`` naming its replacement is the whole contract;
-    * the **equality against the free function** is what stops a wrapper
-      quietly diverging from the seam it is supposed to delegate to. A wrapper
-      that warns correctly and then builds its own path would satisfy the
-      warning half while silently reintroducing the unguarded construction
-      this phase removed.
+def test_withdrawn_builder_aliases_are_gone_from_the_class(tmp_cache_dir: Path) -> None:
+    """Plan 14-16 / MIG-01 / D-28 / T-14-73.
 
-    Known gap, stated rather than left implicit: a subclass that overrides one
-    of these **without** calling ``super()`` stays silently coupled and never
-    sees the warning. That is immaterial for the current downstream, but the
-    warning is a nudge, not a guarantee.
+    **Why these went, when Plan 14-05 gave them a full deprecation cycle.** The
+    cycle was granted on the sentence *"precisely because they have measured live
+    callers"* — but the measurement was of **callers**, and their callers are
+    downstream, not internal. Re-measured this round: **7** internal
+    ``self._get_*_path`` call sites at ``v0.5.3``, ``origin/main`` and
+    ``origin/develop/gsd``; **0** at phase-14 HEAD, removed by ``d83c22d``
+    (*"feat(14-05): route every store path through the shared builders"*) — the
+    same plan that wrote the deprecation. So an **override** of these has been
+    inert since before the promise was written: the deprecation warning's advice
+    (*call the free function instead*) is advice for a caller, and for an
+    overrider it restores nothing.
+
+    **Two assertions, and the second is the one that matters.** Absence alone
+    records a removal. The free-function equality re-asserts, against the
+    surviving surface, exactly what the deleted delegation test was protecting:
+    that the replacement returns the paths the aliases returned. A downstream
+    reading this test should be able to see its migration in it.
+
+    No stub, no ``__getattr__`` shim and no re-export: a partial withdrawal is
+    the defect MIG-01 is about, in the other direction.
     """
     store = _make_store(tmp_cache_dir)
-    builder = getattr(paths_mod, builder_name)
-
-    with pytest.warns(DeprecationWarning, match=re.escape(builder_name)) as record:
-        result = getattr(store, method_name)("k0")
-
-    assert result == builder(store._cache_dir, "k0"), (
-        f"{method_name} no longer returns what paths.{builder_name} returns — the alias has "
-        "diverged from the seam it delegates to"
+    assert store._cache_dir == tmp_cache_dir, (
+        "the free functions take the cache directory explicitly, so a caller migrating off the "
+        "methods needs this to be the directory the store is actually using"
     )
-    assert any(f"GSEGUtils.lazy_disk_cache.{builder_name}" in str(w.message) for w in record), (
-        f"the deprecation warning does not name its replacement: {[str(w.message) for w in record]}"
-    )
+    key = "k0"
 
+    for method_name, builder_name, suffix_name in WITHDRAWN_BUILDER_ALIASES:
+        assert not hasattr(DiskBackedStore, method_name), (
+            f"DiskBackedStore.{method_name} resolves again; D-28 withdrew the whole "
+            "artefact-naming override surface in one move, and a partial restoration is the "
+            "half-true deprecation promise MIG-01 is about"
+        )
+        assert not hasattr(store, method_name), (
+            f"an instance resolves {method_name}; the method is gone from the class but something "
+            "re-creates it per instance, which is the same surface by another route"
+        )
 
-def test_deprecated_builder_alias_warns_through_a_subclass_super_call(tmp_cache_dir: Path) -> None:
-    """Plan 14-05 / STORE-02 / D-15: the warning reaches a subclass that overrides and calls ``super()``.
-
-    This is pc2img's *current* usage shape — it overrides ``_get_npy_path`` and
-    ``_get_meta_path`` and delegates upward — so it is the shape that decides
-    whether the deprecation is actually delivered today. The direct-call shape
-    (covered above) is the one it falls back to once the override is deleted.
-    """
-    cfg = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
-
-    class _OverridingStore(DiskBackedStore[DiskBackedNDArray]):
-        """A local stand-in for pc2img's subclass: overrides, then calls ``super()``."""
-
-        def _get_npy_path(self, feature: str) -> Path:
-            """Delegate upward, exactly as the downstream override does."""
-            return super()._get_npy_path(feature)
-
-    store = _OverridingStore(config=cfg, factory=DiskBackedNDArray)
-
-    with pytest.warns(DeprecationWarning, match=re.escape("get_npy_path")):
-        result = store._get_npy_path("k0")
-
-    assert result == paths_mod.get_npy_path(tmp_cache_dir, "k0")
+        # The migration half: the replacement returns the path the alias
+        # returned, for this store's own cache directory.
+        builder = getattr(paths_mod, builder_name)
+        suffix = getattr(paths_mod, suffix_name)
+        assert builder(store._cache_dir, key) == tmp_cache_dir / f"{key}{suffix}", (
+            f"paths.{builder_name} no longer returns what {method_name} returned; the withdrawal "
+            "would then be a removal rather than a migration"
+        )
