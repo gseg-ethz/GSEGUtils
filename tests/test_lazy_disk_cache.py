@@ -1160,3 +1160,172 @@ def test_withdrawn_builder_aliases_are_gone_from_the_class(tmp_cache_dir: Path) 
             f"paths.{builder_name} no longer returns what {method_name} returned; the withdrawal "
             "would then be a removal rather than a migration"
         )
+
+
+# ---------------------------------------------------------------------------
+# Plan 14-20 / D-31 / STORE-02 + STORE-03 — write-flavoured containment for the
+# ``.dat`` memmap artefact.
+#
+# The four artefact families the phase already guards are all built through
+# ``paths._build``, which calls ``_assert_contained``. The memmap artefact is
+# not: its path is derived by re-suffixing an already-checked path and opened
+# directly. Measured before this group was written, on this host:
+#
+#   * allocation through a planted ``<key>.dat`` symlink -> no exception, the
+#     sentinel outside the cache directory was overwritten;
+#   * ``load(mode="w+")`` through the same plant -> no exception, the sentinel
+#     truncated 256 -> 64 bytes;
+#   * ``load(mode="r+")`` -> no exception, and the *handle it installs* is
+#     mutable, so a write through it reaches the sentinel.
+#
+# ``_assert_contained`` cannot be reused unchanged for this: it deliberately
+# leaves the final component unresolved (D-17) so that a legitimately *adopted*
+# entry still loads, which is STORE-03 and is already verified. The
+# write-flavoured helper adds final-component resolution **on top** of it.
+#
+# BOUNDARY: this group covers containment only. Torn-write safety for ``.dat``
+# (temp file -> fsync -> atomic replace, as ``_store_entry`` already does for the
+# codec pair) is STORE-08 / Phase 15, paired with deferred item D-14-01.
+# ---------------------------------------------------------------------------
+
+_SENTINEL_BYTES = b"S" * 256
+
+
+def _plant_outside_sentinel(cache_dir: Path, outside_dir: Path, name: str = "entry.dat") -> Path:
+    """Symlink ``<cache_dir>/<name>`` at a fresh sentinel inside ``outside_dir``.
+
+    Builds the symlink **explicitly** rather than relying on the ambient temp
+    tree, for the reason the STORE-03 symlink group records: CI's temp tree on
+    ``ubuntu-latest`` is a real directory while macOS ``mkdtemp`` and ETH
+    ``/scratch`` are not, so a test that depends on the ambient shape passes in
+    CI while testing nothing.
+    """
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = outside_dir / "victim.bin"
+    sentinel.write_bytes(_SENTINEL_BYTES)
+    link = cache_dir / name
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(sentinel)
+    return sentinel
+
+
+def test_memmap_write_refuses_a_planted_symlink_pointing_outside_its_directory(tmp_path: Path) -> None:
+    """The escape: a final-component symlink out of the directory is refused, sentinel intact.
+
+    Asserts on the sentinel's **bytes**, not on its existence. A check that
+    refuses to *create* and a check that refuses to *truncate* are different
+    checks, and only the byte comparison distinguishes them — ``"w+"`` truncates
+    an existing target rather than replacing it, so an existence assertion is
+    green against a completely unguarded write.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
+    before = sentinel.read_bytes()
+
+    with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
+        paths_mod._assert_write_contained(cache, cache / "entry.dat")
+
+    assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value), (
+        "the write-flavoured refusal must report the same containment clause the read-flavoured one "
+        "publishes; BC-GSEG-006 offers that clause text as a grep target, and a second wording would "
+        "make the guarantee unsearchable at exactly the route that carries the data"
+    )
+    assert sentinel.read_bytes() == before, (
+        "the sentinel outside the cache directory was modified despite the refusal — the check "
+        "raised but something still wrote through the planted symlink"
+    )
+    assert len(sentinel.read_bytes()) == len(before), "the sentinel was truncated despite the refusal"
+
+
+def test_memmap_write_accepts_a_symlink_whose_target_stays_inside_its_directory(tmp_path: Path) -> None:
+    """The positive case that keeps the fix from becoming a blanket symlink ban (STORE-03).
+
+    Without this test the cheapest implementation that passes the escape test is
+    *refuse every symlinked final component*, which would break the legitimately
+    adopted entry D-17 and STORE-03 exist to protect. The existing symlink group
+    in ``test_store_containment.py`` does not cover it for this artefact: it
+    exercises the codec pair, which is built through a different seam.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    real_target = cache / "adopted_payload.bin"
+    real_target.write_bytes(b"x" * 8)
+    link = cache / "entry.dat"
+    link.symlink_to(real_target)
+
+    # Must not raise: the final component IS a symlink, but it resolves inside.
+    paths_mod._assert_write_contained(cache, link)
+
+
+def test_memmap_reopen_path_is_containment_checked_too(tmp_path: Path) -> None:
+    """A symlink planted *between* two opens of the same path is refused on the second.
+
+    A check placed inside the create branch only passes the escape test above and
+    fails this one: the reopen branch takes a different ``mode`` and would open
+    the planted symlink with no verification at all.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    dat = cache / "entry.dat"
+    dat.write_bytes(b"\x00" * 64)
+
+    # First open: an ordinary real file, accepted.
+    paths_mod._assert_write_contained(cache, dat)
+
+    # ...then the swap, exactly as an attacker with write access would do it.
+    sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
+    before = sentinel.read_bytes()
+
+    with pytest.raises(paths_mod.StoreContainmentError):
+        paths_mod._assert_write_contained(cache, dat)
+    assert sentinel.read_bytes() == before
+
+
+def test_memmap_write_accepts_a_path_inside_a_cache_directory_that_is_itself_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """The shape ``ubuntu-latest`` cannot see (STORE-03).
+
+    The base is fully resolved, so a symlinked cache directory compares equal to
+    itself and every ordinary path inside it stays accepted. This is the default
+    under ``mkdtemp`` on macOS (``/var`` -> ``/private/var``) and normal on ETH
+    ``/scratch``; CI's real temp tree makes a regression here invisible.
+    """
+    real = tmp_path / "real_cache"
+    real.mkdir()
+    linked = tmp_path / "linked_cache"
+    linked.symlink_to(real, target_is_directory=True)
+    assert linked.is_symlink() and linked.resolve() != linked, (
+        "the fixture did not build a real symlinked directory, so this test exercises the ordinary "
+        "path while claiming to cover the symlinked-base case"
+    )
+
+    # Not yet allocated — allocation is the normal case and must be accepted.
+    paths_mod._assert_write_contained(linked, linked / "entry.dat")
+
+    # And once it exists as an ordinary file, still accepted.
+    (linked / "entry.dat").write_bytes(b"\x00" * 8)
+    paths_mod._assert_write_contained(linked, linked / "entry.dat")
+
+
+def test_memmap_write_accepts_a_mkstemp_candidate_against_the_system_temp_directory() -> None:
+    """The unconfigured branch is not a special case inside the helper.
+
+    When no cache path is configured, ``_init_from_config`` creates the ``.dat``
+    with ``tempfile.mkstemp`` and its parent is the **system temp directory**.
+    The check still runs and still has a well-defined base there — it is simply
+    near-vacuous, because that branch has no cache-directory root at all. The
+    helper must not need to know which branch produced the path, which is the
+    whole reason the base is a parameter rather than something it derives.
+    """
+    import tempfile as _tempfile
+
+    fd, name = _tempfile.mkstemp(suffix=".dat")
+    os.close(fd)
+    candidate = Path(name)
+    try:
+        paths_mod._assert_write_contained(candidate.parent, candidate)
+    finally:
+        candidate.unlink(missing_ok=True)
