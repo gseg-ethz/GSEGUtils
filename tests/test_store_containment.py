@@ -1933,103 +1933,139 @@ def test_rescan_and_the_published_snippet_derive_the_same_key_for_every_seeded_f
     assert nested.exists(), "the rescan reached into a subdirectory and disturbed it"
 
 
-#: The artefact suffix ``_SuffixSubStore`` repoints to. Deliberately *ends* in
-#: the base suffix so the seeding is genuinely ambiguous to a careless glob: a
-#: rebuild that hardcoded the module constant produces ``<key>.npy``, not
-#: ``<key>.sub.npy``, for every one of these files.
-SUBCLASS_NPY_SUFFIX = f".sub{paths_mod.NPY_SUFFIX}"
+#: The three artefact-suffix class attributes D-27 withdraws, as data rather
+#: than inline literals so the failure message can name *which* one came back.
+#: Their presence is what let the rescan's discovery vocabulary drift away from
+#: the load and write vocabularies, which is CR-01.
+WITHDRAWN_SUFFIX_ATTRS = ("_DBNDArrayFileExt", "_DBNDArrayMetaExt", "_LegacyPickleExt")
 
 
-class _SuffixSubStore(DiskBackedStore[DiskBackedNDArray]):
-    """A ``DiskBackedStore`` repointing only the artefact-suffix attribute.
-
-    **This subclass is the only shape that can detect the D-26 defect at all,
-    which is why it exists rather than being folded into an existing fixture.**
-    For the base class the rescan's derivation vocabulary and its rebuild
-    vocabulary are the *same object* — ``_DBNDArrayFileExt`` **is**
-    ``paths.NPY_SUFFIX`` — so the round-trip check is a tautology and passes
-    however the rebuild is written. Nothing in this repository's suite could
-    therefore see that the two had drifted apart.
-
-    Repointing the suffix is not an exotic thing to do: the class publishes
-    these three attributes as an override point in its own words (*"they survive
-    as class attributes because pc2img subclasses read them off ``self``"*). A
-    subclass that takes the class at its word used to adopt **nothing** from a
-    directory of its own artefacts — an empty store plus one warning per file,
-    which is the "data loss disguised as success" shape the D-09/D-10 policy
-    split was written against.
-    """
-
-    _DBNDArrayFileExt = SUBCLASS_NPY_SUFFIX
-
-
-def test_route_rescan_adopts_a_subclass_that_repoints_the_artefact_suffix(
+def test_route_rescan_has_one_codec_artefact_vocabulary_and_every_adopted_key_loads(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Plan 14-14 / WR-02 / D-26 / T-14-59.
+    """Plan 14-16 / CR-01 + IN-02 / D-27 / T-14-70, T-14-71, T-14-72.
 
-    The rescan globs and derives with ``self._DBNDArrayFileExt`` and used to
-    rebuild with the *module-level* builder, which hardcodes the module suffix.
-    For the base class those are one object, so the guard proved nothing; for a
-    subclass that repoints the attribute they disagree for **every** file, so the
-    round-trip rejected all of them. Reproduced before the fix: two seeded
-    artefacts, ``keys() == []``, two warnings.
+    **The property, stated with the qualifier it needs.** ``DiskBackedStore``
+    holds **one codec artefact vocabulary** — ``.npy`` / ``.meta.json`` /
+    ``.pkl``, all read from :mod:`GSEGUtils.lazy_disk_cache.paths` by the glob,
+    the key derivation, the round-trip rebuild, ``_load_entry``, ``_store_entry``
+    and ``offload`` alike. It does **not** hold one artefact vocabulary
+    unqualified: the ``.dat`` memmap suffix keeps its own, duplicated between
+    ``paths.MEMMAP_SUFFIX`` and ``LazyDiskCache._MEMMAP_SUFFIX``, and unifying
+    those is STORE-08 / Phase 15 work this round does not do. The test's own name
+    carries the qualifier because an overstated claim in a test name outlives
+    every document that repeats it.
 
-    **The negative controls carry as much weight as the positive one.** A rescan
-    that adopted everything indiscriminately would satisfy "both subclass
-    artefacts were adopted" on its own, so this test also pins that the
-    base-suffix artefact is *not* adopted (the subclass globs its own suffix and
-    never sees it) and that an artefact whose derived key the widened rule
-    refuses is still skipped with a warning — D-26 changes which builder the
-    guard calls, not whether the guard exists.
+    **This replaces the D-26 test, and the reason is the assertion that test
+    omitted.** ``test_route_rescan_adopts_a_subclass_that_repoints_the_artefact_suffix``
+    asserted ``keys()`` and never read an adopted entry. Measured at ``7d798cd``
+    with a genuine ``alpha.sub.npy`` + ``alpha.meta.json`` pair under a suffix-
+    repointing subclass: ``keys() == ['alpha']``, ``'alpha' in s`` is ``True``,
+    **no warning at all**, and ``s['alpha']`` raises ``KeyError``. A store full of
+    ``KeyError`` read as green, because ``keys()`` is not evidence about
+    retrieval. So the end-to-end half below **subscripts every adopted key and
+    compares the payload**.
 
-    The base-class positive control lives in the same function on purpose: a
-    "fix" that repaired the subclass by breaking the base class would otherwise
-    surface only as an aggregate suite-count change, which is not a diagnosis.
+    **Two halves, and both are needed.** The structural half is a proxy — it
+    pins that no second codec vocabulary can be introduced through an instance
+    attribute. The end-to-end half is the property that proxy stands for. A
+    mutation that repoints the glob and the derivation at a foreign constant
+    while leaving the rebuild on the module constant passes the structural half
+    and fails the end-to-end one, which is CR-01's exact mechanism.
+
+    **IN-02 rides along.** ``key = f.name[: -len(suffix)]`` degenerates to the
+    empty key for *every* file when the suffix is empty, and the empty suffix was
+    reachable only through the withdrawn attribute. With a module constant the
+    slice length is decided at import time, so the degenerate case is
+    unrepresentable rather than guarded.
+
+    The negative controls and the base-class positive control are carried over
+    from the D-26 test, for the reason that test gives: a change that repaired
+    one path by breaking another would otherwise surface only as an aggregate
+    suite-count change, which is not a diagnosis.
     """
-    subclass_dir = tmp_path / "subclass-cache"
-    subclass_dir.mkdir()
-    planted = {
-        "adopted-alpha": subclass_dir / f"alpha{SUBCLASS_NPY_SUFFIX}",
-        "adopted-beta": subclass_dir / f"beta{SUBCLASS_NPY_SUFFIX}",
-        # Carries the BASE suffix: invisible to the subclass's own glob.
-        "base-suffix": subclass_dir / f"plain{paths_mod.NPY_SUFFIX}",
-        # Carries the subclass suffix but derives a key the widened device
-        # denylist refuses (D-23, Plan 14-13) — warn and skip still applies.
-        "refused": subclass_dir / f"CON{SUBCLASS_NPY_SUFFIX}",
+    # -- The structural half: no second codec vocabulary can be introduced. --
+    seeded_dir = tmp_path / "codec-cache"
+    seeded_dir.mkdir()
+    store = _store_with_cache_path(seeded_dir)
+
+    for attr in WITHDRAWN_SUFFIX_ATTRS:
+        assert not hasattr(DiskBackedStore, attr), (
+            f"DiskBackedStore.{attr} resolves again; the artefact-suffix override point was "
+            "withdrawn by D-27 precisely because discovery read it and retrieval did not, so a "
+            "store could adopt keys it can never load (CR-01)"
+        )
+        assert not hasattr(store, attr), (
+            f"an instance resolves {attr}; the class attribute is gone but something re-creates it "
+            "per instance, which re-opens the same divergence (CR-01)"
+        )
+
+    # -- The end-to-end half: every adopted key is read, payload compared. --
+    payloads = {
+        "alpha": np.arange(4, dtype=np.float64),
+        "beta": np.arange(10, 16, dtype=np.float64),
     }
-    for artefact in planted.values():
-        artefact.write_bytes(b"not-a-real-npy")
+    for key, payload in payloads.items():
+        store.add_data_to_store(key, payload)
+    store.offload(pickle_container=True)
 
-    cfg = LazyDiskCacheConfig(
-        enable_caching=True,
-        cache_path=subclass_dir,
-        purge_disk_on_gc=False,
-        automatic_offloading=False,
-    )
+    # Planted after the seeding so the writing store's own construction scans an
+    # empty directory: the single WARNING asserted below is unambiguously the
+    # reopen's.
+    #
+    # `foreign` carries the `.dat` memmap suffix on purpose. It is the surviving
+    # second vocabulary this test's name is qualified against, and having it sit
+    # here as a control is the cheapest possible reminder that the codec claim
+    # does not reach it (STORE-08).
+    foreign = seeded_dir / f"foreign{paths_mod.MEMMAP_SUFFIX}"
+    refused = seeded_dir / f"CON{paths_mod.NPY_SUFFIX}"
+    foreign.write_bytes(b"not-a-real-npy")
+    refused.write_bytes(b"not-a-real-npy")
+
+    caplog.clear()
     with caplog.at_level("WARNING"):
-        subclass_store = _SuffixSubStore(config=cfg, factory=DiskBackedNDArray)
+        reopened = _store_with_cache_path(seeded_dir)
 
-    assert sorted(subclass_store.keys()) == ["alpha", "beta"], (
-        f"the subclass adopted {subclass_store.keys()!r}; a subclass using the class's own "
-        "published extension point must adopt its own artefacts, and adopting none of them is an "
-        "empty store reported as success"
+    assert sorted(reopened.keys()) == sorted(payloads), (
+        f"the reopened store adopted {sorted(reopened.keys())!r}, not {sorted(payloads)!r}"
     )
-    assert "plain" not in subclass_store.keys(), (
-        "the subclass adopted an artefact carrying the BASE suffix, which its own glob never sees"
+    for key, payload in payloads.items():
+        entry = reopened[key]
+        assert entry is not None, (
+            f"the reopened store adopted {key!r} and handed back None for it; adopting a key the "
+            "store cannot resolve is a silently short store (CR-01)"
+        )
+        np.testing.assert_array_equal(
+            np.asarray(entry),
+            payload,
+            err_msg=(
+                f"the payload round-tripped for {key!r} is not the one written; a rescan that "
+                "adopts and returns an empty placeholder is the same defect as one that raises"
+            ),
+        )
+
+    # -- The negative controls, carried over from the D-26 test. --
+    assert "CON" not in reopened.keys(), "the rescan adopted a key the lexical rule refuses"
+    assert foreign.stem not in reopened.keys(), (
+        "the rescan adopted an artefact carrying the .dat memmap suffix, which the codec glob never sees"
     )
-    assert "CON" not in subclass_store.keys(), "the rescan adopted a key the lexical rule refuses"
 
     messages = _warning_messages(caplog)
     assert len(messages) == 1, f"expected exactly one WARNING, for the refused artefact only; got {messages!r}"
-    assert repr(planted["refused"].name) in messages[0], (
-        f"the single WARNING does not name the refused artefact: {messages[0]!r}"
+    assert repr(refused.name) in messages[0], f"the single WARNING does not name the refused artefact: {messages[0]!r}"
+    assert repr(foreign.name) not in messages[0], (
+        "the foreign-suffix artefact produced a warning; the glob is supposed to never see it"
     )
-    for label, artefact in planted.items():
+    for label, artefact in {"foreign": foreign, "refused": refused}.items():
         assert artefact.exists(), f"the rescan deleted the {label} artefact instead of skipping it"
 
-    # The base-class positive control, in its own directory so the two suffix
-    # vocabularies cannot overlap through the glob.
+    # -- The base-class positive control, in its own directory. --
+    #
+    # A bare artefact with no sidecar, adopted with no warning: this pins that
+    # the end-to-end half above did not tighten *adoption* into requiring a
+    # complete codec pair. Adoption is a statement about the name; resolution is
+    # a statement about the pair, and conflating them would be a different bug
+    # wearing this one's clothes.
     caplog.clear()
     base_dir = tmp_path / "base-cache"
     base_dir.mkdir()
@@ -2038,7 +2074,7 @@ def test_route_rescan_adopts_a_subclass_that_repoints_the_artefact_suffix(
         base_store = _store_with_cache_path(base_dir)
 
     assert base_store.keys() == ["ordinary"], (
-        f"the base class adopted {base_store.keys()!r}; the subclass fix broke the base class"
+        f"the base class adopted {base_store.keys()!r}; the deletion broke ordinary adoption"
     )
     assert _warning_messages(caplog) == [], "the base class now warns about an artefact it used to adopt"
 
