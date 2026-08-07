@@ -26,6 +26,7 @@ from typing import cast
 import pytest
 
 from GSEGUtils.lazy_disk_cache.paths import (
+    _WIN_DEVICE_NAMES,
     CLAUSE_ABSOLUTE,
     CLAUSE_CONTROL,
     CLAUSE_RESERVED,
@@ -33,6 +34,7 @@ from GSEGUtils.lazy_disk_cache.paths import (
     CLAUSE_TRAILING,
     StoreContainmentError,
     StoreKeyError,
+    _device_stem,
     is_valid_store_key,
     validate_store_key,
 )
@@ -155,12 +157,33 @@ WIN_COLLISION_KEYS: list[tuple[str, str]] = [
 #: * ``'con.'``, ``'com1. '`` — a device stem that *also* ends in a trailing run.
 #:   They report the *reserved* clause and must keep doing so, which is what
 #:   forbids the naive "just put the device test last" placement.
+#:
+#: ↻ EXTENDED by Plan 14-19 (D-30, § WR-01) with the **crossover family**, and
+#: the reason it was missing is the finding. The two families above are the two
+#: **pure** directions — a device stem followed by a trailing run *and no dot*,
+#: and a device stem whose trailing run *is* the dot. Neither is a key carrying a
+#: device stem, an interior space **and** a dot, which is where the two clauses'
+#: territories actually meet. Round 3's dot-gated strip closed the dotless half
+#: only; ``'con .'`` contains a dot, so the strip fired, ``rstrip(' ')`` turned
+#: the pre-dot stem ``'con '`` into ``'con'``, and four already-refused keys
+#: repointed from the trailing clause onto the reserved one with nothing going
+#: red — because no key of this shape was pinned anywhere. The combination is
+#: pinned here now, so the boundary is a named case rather than an
+#: unrepresented one.
 DEVICE_STEM_BOUNDARY_KEYS: list[tuple[str, str]] = [
     ("com1 ", CLAUSE_TRAILING),
     ("con ", CLAUSE_TRAILING),
     ("nul  ", CLAUSE_TRAILING),
     ("con.", CLAUSE_RESERVED),
     ("com1. ", CLAUSE_RESERVED),
+    # The crossover family (Plan 14-19 / D-30): a device stem, an interior
+    # space and a dot, all in one key. The key's own trailing run reaches back
+    # through the dot to the space, so the space belongs to the trailing clause
+    # and the device strip must not consume it.
+    ("con .", CLAUSE_TRAILING),
+    ("CON .", CLAUSE_TRAILING),
+    ("CON . ", CLAUSE_TRAILING),
+    ("nul .", CLAUSE_TRAILING),
 ]
 
 #: Every key the rule must refuse, paired with the clause it must report under
@@ -283,6 +306,17 @@ PRE_WIDENING_CLAUSE: dict[str, str] = {
     "nul  ": CLAUSE_TRAILING,
     "con.": CLAUSE_TRAILING,
     "com1. ": CLAUSE_TRAILING,
+    # ↻ EXTENDED by Plan 14-19 (D-30, § WR-01). This table is the guard the
+    # docstring above calls the one for *every pre-existing refusal*, and it had
+    # the identical hole as DEVICE_STEM_BOUNDARY_KEYS: it pinned the two pure
+    # directions and never the crossover. Extending it is what makes that
+    # description true. Each value is measured — with the device set emptied and
+    # at 56c8306 alike, these four report the trailing clause, so they are
+    # pre-existing refusals and not new ones.
+    "con .": CLAUSE_TRAILING,
+    "CON .": CLAUSE_TRAILING,
+    "CON . ": CLAUSE_TRAILING,
+    "nul .": CLAUSE_TRAILING,
 }
 
 #: The **two** pairs that disagree with the snapshot above, carried as named
@@ -602,10 +636,18 @@ def test_the_device_stem_strip_stays_out_of_the_trailing_clause_s_territory(key:
     group it happens with nothing going red, because no key of that shape was in
     :data:`REFUSED_KEYS` before Plan 14-13 put it there.
 
-    The last two rows pull the other way and constrain the *placement* rather than
-    the strip: ``'con.'`` and ``'com1. '`` are device stems that also end in a
-    trailing run, and they must keep reporting the reserved clause. That is what
-    forbids the naive "just put the device test last" reading of D-24.
+    Rows four and five pull the other way and constrain the *placement* rather
+    than the strip: ``'con.'`` and ``'com1. '`` are device stems that also end in
+    a trailing run, and they must keep reporting the reserved clause. That is
+    what forbids the naive "just put the device test last" reading of D-24.
+
+    ↻ EXTENDED by Plan 14-19 (D-30, § WR-01). The group is no longer five rows
+    and no longer green-on-arrival: the last four are the **crossover family**
+    (``'con .'``, ``'CON .'``, ``'CON . '``, ``'nul .'``), which round 3 repointed
+    from the trailing clause onto the reserved one. They were green before D-23
+    and red between D-23 and D-30, so they are a driver here rather than a
+    control. The two pure families above them remained green throughout, which is
+    precisely why nothing caught the repoint.
     """
     with pytest.raises(StoreKeyError, match=re.escape(clause)) as excinfo:
         validate_store_key(key, _CACHE_DIR)
@@ -615,6 +657,50 @@ def test_the_device_stem_strip_stays_out_of_the_trailing_clause_s_territory(key:
     assert other not in str(excinfo.value), (
         f"{key!r} is now reported under {other!r} as well as {clause!r}; the device clause and the "
         "trailing clause have stopped dividing the space cleanly"
+    )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "con .",
+        "CON .",
+        "CON . ",
+        "nul .",
+        "com1 .",
+        "con  .",
+        "con . ",
+        "aux .",
+    ],
+)
+def test_a_device_stem_never_consumes_the_keys_own_trailing_run(key: str) -> None:
+    """Plan 14-19 / STORE-01 / D-30 / § WR-01: the stem strip stops at the key's own trailing run.
+
+    Asserted on :func:`~GSEGUtils.lazy_disk_cache.paths._device_stem`'s **own
+    return value** rather than through a clause, deliberately. The corpus test
+    above tells you *that* a clause moved; this one tells you *why* — the stem
+    the membership test is handed still ends in a character belonging to the
+    key's trailing run, so it cannot upper-case into
+    ``_WIN_DEVICE_NAMES`` however that set is later widened.
+
+    That distinction is the finding. Round 3's docstring claimed *"No clause
+    position fixes that; only the conditional does"*, and the conditional closes
+    the **dotless** half only. A key carrying a device stem, an interior space
+    **and** a dot slips through it: the dot makes the strip fire and the strip
+    then reaches into territory the trailing clause owns. Naming the mechanism
+    here means a future widening of the device set reddens this test rather than
+    silently repointing a family again.
+    """
+    boundary = len(key.rstrip(" ."))
+    stem = _device_stem(key)
+    assert stem[boundary:], (
+        f"_device_stem({key!r}) returned {stem!r}, which has consumed the key's own trailing run "
+        f"(it begins at index {boundary}); the device clause has reached into the trailing clause's "
+        "territory and the key will now report the reserved clause instead"
+    )
+    assert stem.upper() not in _WIN_DEVICE_NAMES, (
+        f"_device_stem({key!r}) returned {stem!r}, which upper-cases into the reserved device set; "
+        "the membership test will fire and repoint a key that ends in a space or a dot"
     )
 
 
