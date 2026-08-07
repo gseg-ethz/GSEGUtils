@@ -120,7 +120,8 @@ _WIN_DEVICE_NAMES: Final[frozenset[str]] = frozenset(
 
 #: The characters stripped from the **pre-dot stem** before the reserved-device
 #: membership test (D-23) — ASCII space only. See :func:`_device_stem` for the
-#: conditional that scopes it and for why it is not ``_TRAILING_CHARS``.
+#: **two** constraints that scope it — the dot condition and the trailing-run
+#: boundary (D-30) — and for why it is not ``_TRAILING_CHARS``.
 _DEVICE_STEM_STRIP: Final[str] = " "
 
 #: The characters Win32 strips from the end of a filename (D-20). ASCII space
@@ -135,8 +136,9 @@ def _device_stem(key: str) -> str:
 
     Everything before the first ``'.'``, right-stripped of
     :data:`_DEVICE_STEM_STRIP` — **but only when ``key`` actually contains a
-    ``'.'``**. The condition is on the key, not on whether the strip would change
-    anything, because it is a rule rather than an optimisation.
+    ``'.'``, and only as far back as the start of the key's own trailing run**
+    (D-30). Both conditions are on the key, not on whether the strip would
+    change anything, because they are rules rather than optimisations.
 
     **Why the strip exists.** Win32 strips trailing spaces from the name
     component *before* device resolution, so ``'CON .txt'`` resolves to the
@@ -155,8 +157,57 @@ def _device_stem(key: str) -> str:
     into the trailing clause's territory and repoints
     ``'com1 '``, ``'con '`` and ``'nul  '`` from ``CLAUSE_TRAILING`` onto
     ``CLAUSE_RESERVED`` — a repoint of pre-existing refusals, introduced by the
-    very change (D-23) that D-24 exists to keep from repointing anything. No
-    clause position fixes that; only the conditional does.
+    very change (D-23) that D-24 exists to keep from repointing anything.
+
+    **Two constraints, not one, and the rule above is why both are needed
+    (D-30, § WR-01).** The division-of-territory rule in the previous paragraph
+    is quoted verbatim from round 3 and is **unchanged**: it was correct then and
+    it is correct now. What was wrong was the implementation, which honoured only
+    half of it, and the sentence that followed — *"No clause position fixes
+    that; only the conditional does"* — which told the next reader the axis was
+    closed. It is not, and it is withdrawn:
+
+    * The **dot condition** closes the *dotless* half. A key with no ``'.'`` at
+      all has no stem/extension division for the strip to reach into, so the
+      strip must not fire; that is what keeps ``'com1 '``, ``'con '`` and
+      ``'nul  '`` on the trailing clause.
+    * The **trailing-run boundary** closes the *crossover* half, which the dot
+      condition cannot see. ``'con .'`` contains a dot, so the condition lets the
+      strip fire; the pre-dot stem is ``'con '``; ``rstrip(' ')`` turns it into
+      ``'con'`` and clause 5 matches. Four already-refused keys — ``'con .'``,
+      ``'nul .'``, ``'CON .'``, ``'CON . '`` — repointed from ``CLAUSE_TRAILING``
+      onto ``CLAUSE_RESERVED`` that way. The strip is now allowed to consume only
+      characters lying *strictly before* the index at which the key's own
+      trailing run begins, so it can never reach a character the trailing clause
+      owns.
+
+    **The two are not independent, and this was measured rather than assumed.**
+    Removing the boundary restores all four crossover repoints — it is
+    load-bearing. Removing the dot *condition* while keeping the boundary
+    changes **nothing**: the whole suite stays green, and an exhaustive check
+    over every key of length ≤ 4 drawn from an alphabet of device letters,
+    digits, spaces, dots, a tab and a superscript found zero disagreements
+    between the two forms. The reason is structural rather than accidental.
+    For a key with no ``'.'`` the stem *is* the whole key, so
+    ``key[:own_trailing_run_start]`` ends — by the definition of that index — in
+    a character outside :data:`_TRAILING_CHARS`, and :data:`_DEVICE_STEM_STRIP`
+    is a subset of :data:`_TRAILING_CHARS`; the strip is therefore the identity
+    on it. The boundary subsumes the condition.
+
+    The condition is nevertheless **kept**, deliberately and with its redundancy
+    recorded rather than left for a reader to rediscover. It states the *rule*
+    that a key with no stem/extension division has nothing interior for the
+    strip to reach, which is why it was introduced; the boundary states a
+    different rule that happens to imply it. Removing it is a behaviour-neutral
+    simplification, which makes it a change for a plan that can prove that claim
+    on its own terms, not a side effect of this one.
+
+    **What the strip covers, and what it does not.** It reaches ASCII spaces that
+    are interior to the key and lie before the key's own trailing run — which is
+    exactly the ``'CON .txt'`` shape D-23 was widened for. It does not reach the
+    trailing run itself, and it does not model any other Win32 name-resolution
+    behaviour; see :func:`validate_store_key`'s residual paragraph, where the
+    device axis is recorded as narrowed rather than closed.
 
     **The residual attribution nuance, recorded rather than left to be
     rediscovered.** ``'com1 '`` is consequently refused as *"ends in a space or
@@ -182,7 +233,15 @@ def _device_stem(key: str) -> str:
         The stem to test for membership of :data:`_WIN_DEVICE_NAMES`.
     """
     stem = key.split(".", 1)[0]
-    return stem.rstrip(_DEVICE_STEM_STRIP) if "." in key else stem
+    if "." not in key:
+        return stem
+    # The index at which the key's **own** trailing run begins -- the third
+    # member of the _DEVICE_STEM_STRIP / _TRAILING_CHARS family, named rather
+    # than inlined because it is the concept the division-of-territory rule
+    # above turns on. Everything from here to the end of the key belongs to
+    # ``CLAUSE_TRAILING``; the strip may consume only what lies before it.
+    own_trailing_run_start = len(key.rstrip(_TRAILING_CHARS))
+    return stem[:own_trailing_run_start].rstrip(_DEVICE_STEM_STRIP) + stem[own_trailing_run_start:]
 
 
 def _refuse(key: str, cache_dir: Optional[Path], clause: str) -> NoReturn:
@@ -267,9 +326,11 @@ def validate_store_key(key: str, cache_dir: Optional[Path] = None) -> None:
        (D-20, widened by D-23). The stem test is what refuses ``con.npy`` and
        ``COM1.dat`` as well as bare ``CON``: on Win32 a device name is still the
        device with a suffix attached. The stem is right-stripped of ASCII spaces
-       **when the key contains a dot**, so ``CON .txt`` is refused too; see
-       :func:`_device_stem` for why that condition is a rule and not an
-       optimisation.
+       **when the key contains a dot, and only as far back as the key's own
+       trailing run** (D-30), so ``CON .txt`` is refused here while ``CON .`` —
+       whose trailing run reaches back through the dot to the space — is left to
+       clause 6. See :func:`_device_stem` for why both constraints are rules
+       rather than optimisations, and why neither is redundant.
 
        It reports ``CLAUSE_RESERVED`` rather than a clause of its own because
        that wording — "is empty or a reserved path name" — already describes a
