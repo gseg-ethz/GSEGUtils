@@ -657,14 +657,54 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         leave this method a second :meth:`get` under another name; it is asserted
         directly rather than assumed.
 
+        ↻ **CORRECTED by Plan 14-17 (D-29, § WR-02).** The paragraph above was
+        true only of the *success* path, and the two things it left unsaid were
+        both wrong in shipped code.
+
+        **First, the delete now happens on the refusal path too, when there is
+        something to delete.** The handler below could not tell *no such key*
+        from *key exists, payload unreadable* — both arrive as ``KeyError`` —
+        so ``pop`` answered a present-but-unloadable key with the default and
+        **left it tracked**. ``dict.pop(k, d)`` removes ``k`` when ``k`` is
+        present; this now does too, on **both** forms, so they differ only in
+        what they return. A caller draining a store with ``pop(k, None)``
+        previously completed a removal loop having removed nothing and having
+        been told nothing.
+
+        **Second, and it is not changed here: the delete is in-memory only.**
+        It drops tracking and **leaves the on-disk artefacts** — the ``.npy``,
+        the ``.meta.json`` and the ``.dat`` — exactly where they are. So a
+        popped *offloaded* key is re-adopted by the very next subscript, since
+        :meth:`__getitem__` falls back to :meth:`_load_entry` for any untracked
+        key, and again by the reopen rescan. Between the ``pop`` and that
+        subscript, ``key not in store`` and ``store[key]`` both succeed, which
+        is a :class:`~typing.Mapping` contract violation and is a **known
+        limitation rather than a designed guarantee**. It is not fixed here on
+        purpose: **STORE-05** requires that *where the data lives*, *whether the
+        key is tracked* and *whether the file outlives the object* stay three
+        separate axes and be characterization-tested, and **STORE-04** owns the
+        atomic drop-key-and-delete-files primitive, with its no-partial-effect
+        and no-stale-finalizer requirements. Adding an unlink here would
+        collapse the first and half-implement the second. Pinned by
+        ``test_route_pop_of_an_offloaded_entry_leaves_its_artefacts_and_the_key_is_re_adopted``,
+        which says in its own docstring that it characterizes a limitation.
+
         Parameters
         ----------
         key : str
-            The store key to remove.
+            The store key to remove. **Positional-only**, matching
+            ``dict.pop``; ``pop(key=..., default=...)`` raises
+            :class:`TypeError`. Recorded in ``BC-GSEG-006`` delta (3) (§ IN-03)
+            because it is a silent narrowing of ``MutableMapping``'s signature
+            on the route that entry otherwise documents as a *restoration*.
         default : optional
-            Returned when ``key`` is absent from the store *or* refused by the
-            lexical rule. When **no** default is supplied the refusal or the
-            lookup error propagates instead; the two cases are told apart by
+            Returned when ``key`` is absent from the store, refused by the
+            lexical rule, *or* present with a payload that cannot be loaded —
+            and in that last case the key is **removed** first. The word
+            *absent* used to stand alone here, and it is what made the no-op on
+            a present key read as correct (§ WR-02a). When **no** default is
+            supplied the refusal or the lookup error propagates instead — but
+            the removal still happens — and the two cases are told apart by
             :data:`_POP_DEFAULT_MISSING`, because ``None`` is a legitimate
             caller-supplied default for an ``Optional``-valued store.
 
@@ -683,7 +723,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         StoreContainmentError
             If the path built for ``key`` would resolve outside the cache
             directory. Deliberately **not** converted into ``default``, however
-            the call was made (WR-03).
+            the call was made (WR-03). **Nothing is removed when this
+            propagates** — it is evidence about the environment, so the store is
+            left intact for the caller to inspect.
         """
         try:
             value = self[key]
@@ -691,13 +733,105 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             # Environment evidence, not a bad key — never swallowed by a read.
             # Must stay ABOVE the tuple below: it is a subclass of one of its
             # members, so a handler ordered the other way never reaches here.
+            #
+            # D-29 restructured the clause below and deliberately did NOT touch
+            # this one, in either of the two ways it could have gone wrong:
+            # it stays first, and it removes nothing. A containment violation
+            # says something planted a symlink in the cache directory; dropping
+            # the key on the way out would destroy the evidence.
             raise
         except (KeyError, paths.StoreKeyError):
+            # D-29 / § WR-02a. This is the only place that can tell *no such
+            # key* from *key exists, payload unreadable* — both arrive here as
+            # a `KeyError`, and collapsing them is what made `pop(k, default)`
+            # answer for a key it then left tracked. The membership test is
+            # the distinction, and it must come BEFORE the `raise`, so that the
+            # bare and defaulting forms differ only in what they return.
+            if key in self:
+                del self[key]
             if default is _POP_DEFAULT_MISSING:
                 raise
             return default
         del self[key]
         return value
+
+    def clear(self) -> None:
+        r"""Remove every tracked key, whether or not its payload can be loaded.
+
+        **Overridden because the inherited implementation returned successfully
+        with the store still populated** (D-29, § WR-04).
+        :class:`~typing.MutableMapping`'s ``clear`` is
+        ``while True: self.popitem()`` under ``except KeyError: pass``, and
+        ``popitem`` reaches the validating subscript — so the first tracked key
+        whose payload cannot be loaded raises :class:`KeyError`, the handler
+        reads that as *the mapping is empty*, and the loop stops. Measured over
+        four tracked keys with one unloadable:
+        ``['a', 'ghost', 'b', 'c']`` → ``['ghost', 'b', 'c']``, **raising
+        nothing**. One key of four dropped, and the caller told it succeeded.
+
+        **This removes tracking only** — the same in-memory scope :meth:`pop`
+        and :meth:`__delitem__` have. No artefact is unlinked, so every cleared
+        key that was offloaded is re-adopted by the reopen rescan. STORE-04 owns
+        the combined drop-and-delete; see :meth:`__delitem__`.
+
+        **Why the loop is over a snapshot of the keys and goes through**
+        :meth:`__delitem__`, rather than one bulk ``self._store.clear()``. The
+        inherited version's fault is not that it loops but that it *reads a
+        payload* on the way; :meth:`__delitem__` reads nothing, builds no path
+        and cannot raise for a key that is tracked, so looping through it has
+        the defect designed out rather than guarded against. Going through the
+        documented removal route also keeps the hook a subclass may already
+        rely on: a subclass whose ``__delitem__`` unlinks would silently stop
+        unlinking under a bulk clear, and would leak an artefact per key.
+
+        The trailing check is the prohibition made structural rather than
+        inferred: a route that cannot honour a key must raise, not drop part of
+        the work and report success.
+
+        **Why** :meth:`~typing.MutableMapping.popitem` **is deliberately left
+        inherited**, stated here rather than left to be inferred from which
+        method happens to be overridden — the same courtesy :meth:`pop`'s
+        docstring extends to ``setdefault``. Its two ``KeyError``\\ s are
+        **distinguishable**: on a non-empty store the payload error propagates
+        as ``KeyError(key)`` (measured ``args == ('ghost',)``), while on an
+        empty one ``next(iter(self))`` raises a bare ``KeyError`` (measured
+        ``args == ()``). The information this method needed was therefore always
+        present, and the round-3 defect was a handler that discarded it — **the
+        fault was in the handler, not in the signal**, and with ``clear`` no
+        longer routing through ``popitem`` nothing depends on it. Three
+        override shapes were considered and each is worse than leaving it:
+
+        * *Return a value anyway.* It would make ``popitem`` the one route that
+          answers with a value for a key whose payload cannot be produced.
+        * *Raise and remove, mirroring the bare* :meth:`pop`. For ``pop`` the
+          caller named the key, so removing it is what they asked for; for
+          ``popitem`` the store chose the key, and the caller cannot recover
+          which one from the exception — so it would destroy tracking for a key
+          they never identified.
+        * *Raise a different type.* It changes nothing about the ambiguity and
+          breaks the ``Mapping`` contract's documented ``KeyError`` on empty.
+
+        Pinned by
+        ``test_route_popitem_is_left_inherited_and_its_key_error_carries_the_key``,
+        so a reader who finds ``clear`` overridden and ``popitem`` not can tell
+        a decision from an oversight by grepping the suite.
+
+        Raises
+        ------
+        RuntimeError
+            If the store is still non-empty after every tracked key has been
+            passed to :meth:`__delitem__` — reachable only through a subclass
+            whose ``__delitem__`` does not remove. Raising is the point: the one
+            thing this method must never do is return short.
+        """
+        for key in list(self._store):
+            del self[key]
+        if self._store:
+            raise RuntimeError(
+                f"clear() ran to completion with {sorted(self._store)!r} still tracked; a "
+                "__delitem__ override that does not remove turns clear() back into the silently "
+                "short route D-29 fixed (WR-04)"
+            )
 
     def __setitem__(self, key: str, value: T) -> None:
         """Validate ``key`` lexically and ``value`` structurally, then store in memory.
@@ -722,7 +856,42 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         self._store[key] = self._check_T(value)
 
     def __delitem__(self, key: str) -> None:
-        """Remove ``key`` from the in-memory store."""
+        """Remove ``key`` from the in-memory store, **leaving its files on disk**.
+
+        This is the whole removal mechanism — :meth:`pop` and :meth:`clear` both
+        route through it — and the second half of that first sentence is the
+        half a reader actually needs. It drops tracking. It unlinks nothing: the
+        ``.npy``, the ``.meta.json`` and the ``.dat`` stay exactly where they
+        are.
+
+        **The consequence, stated rather than left to be discovered.** For an
+        *offloaded* entry the removal does not survive the next read:
+        :meth:`__getitem__` falls back to :meth:`_load_entry` for any untracked
+        key, so the very next ``store[key]`` re-adopts it, and so does the
+        reopen rescan. Between the two, ``key not in store`` and ``store[key]``
+        both succeed, which is a :class:`~typing.Mapping` contract violation.
+        Treat it as a **known limitation, not a designed guarantee** — the
+        earlier one-line docstring said only *"removes from the in-memory
+        store"*, which is true and answers about half of what a caller reading
+        it is trying to find out (D-29, § WR-02b).
+
+        **The missing half is owned by Phase 15, by ID.** **STORE-04** is the
+        atomic drop-key-and-delete-files operation: refused, it leaves no
+        partial effect; completed, it leaves no artefact behind and no stale
+        finalizer able to delete a later entry created under the same key. None
+        of that is achievable by adding an ``unlink`` here. **STORE-05** is the
+        reason not to try: it requires that *where the data lives* (offload),
+        *whether the key is tracked* (this method) and *whether the file
+        outlives the object* (``purge_disk_on_gc``) remain three separate axes
+        and be characterization-tested. An unlink on this route would collapse
+        the first two into one and pre-empt STORE-04's atomicity work with
+        something harder to make atomic afterwards. **Do not "finish" this
+        method.**
+
+        No key validation runs here, and that is D-11's decision rather than an
+        omission: removal builds no path, so there is nothing to contain, and a
+        key already tracked has been through a validating write route.
+        """
         del self._store[key]
 
     def __iter__(self) -> Iterator[str]:

@@ -550,14 +550,22 @@ def test_route_pop_removes_a_tracked_key_whose_payload_cannot_be_loaded(
 
     # 4. Containment evidence is never degraded, and nothing is removed when it
     #    propagates (WR-03, in the handler D-29 restructures).
-    store3 = make_store(tmp_cache_dir)
-    store3["safe"] = _entry()
+    #
+    #    The Sneaky key is installed as *tracked but not resident* — the state
+    #    the reopen rescan produces — because that is the only state in which
+    #    the new removal clause could fire on it. A resident entry short-circuits
+    #    in `_store.get` and never reaches the builder that refuses; an untracked
+    #    key reaches the builder but has nothing to remove. Only this state puts
+    #    the containment re-raise and the removal in the same call.
+    store3 = make_store(tmp_cache_dir / "containment")
+    store3._store[Sneaky("safe")] = None
     for call in (lambda: store3.pop(Sneaky("safe")), lambda: store3.pop(Sneaky("safe"), sentinel)):
         with pytest.raises(StoreContainmentError, match=re.escape(paths_mod.CLAUSE_ESCAPES)):
             call()
         assert store3.keys() == ["safe"], (
-            "a containment violation removed the key; it is evidence about the environment, not "
-            "about the key, and the store must be left intact for the caller to inspect (WR-03)"
+            f"a containment violation removed the key (store is now {store3.keys()}); it is evidence "
+            "about the environment, not about the key, and the store must be left intact for the "
+            "caller to inspect (WR-03)"
         )
 
 
