@@ -1428,6 +1428,35 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             paths.validate_store_key(incoming_key, incoming_cache_dir)
 
         self.__dict__.update(state)
+        # D-32 (Plan 14-18, § WR-03). Detach on the way IN as well as out — the
+        # mirror of the Plan 14-12 fix in `__getstate__`, and the same defect on
+        # the other side of the same protocol pair. `__dict__.update` installs
+        # the caller's mapping OBJECT, so without this rebind the restored store
+        # SHARES `_store` with whoever holds `state`: a write into the retained
+        # state after this call lands in a store that validated every key it was
+        # shown. Measured before the fix: `self._store is state["_store"]` was
+        # `True`, and `state["_store"]["../victim"] = None` afterwards put
+        # `'../victim'` in `keys()`.
+        #
+        # It must stay AHEAD of the reload loop below, which writes into the
+        # mapping and must write into the detached one.
+        #
+        # Do NOT add a validation pass here. The per-key loop above already ran
+        # against this exact mapping, and a second validation site is precisely
+        # the enumeration approach D-19 argues against — the rebind closes the
+        # route STRUCTURALLY, which is the whole point of doing it this way
+        # rather than re-checking. Pinned by
+        # `test_route_setstate_detaches_the_incoming_entry_mapping`.
+        #
+        # The source is `self._store` — which `__dict__.update` has just bound to
+        # the incoming mapping — and NOT `incoming_store`, though the two are the
+        # same object on every well-formed state. They differ on one input: a
+        # state carrying no `_store` key at all, where `incoming_store` is the
+        # `{}` default and rebinding from it would silently EMPTY a store this
+        # method was never asked to change. This line does one thing, detach, and
+        # `dict(self._store)` is not the no-op it looks like: it is the copy that
+        # breaks the alias `__dict__.update` just created.
+        self._store = dict(self._store)
         if self._enable_caching:
             for key in list(self.keys()):
                 if self._store[key] is not None:
