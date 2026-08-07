@@ -2045,6 +2045,78 @@ def test_route_getstate_hands_out_a_detached_copy_of_the_entry_mapping(
     assert "another_legal_key" in shallow.keys(), "the copy did not take the insert either, so it is simply broken"
 
 
+def test_route_setstate_detaches_the_incoming_entry_mapping(make_store: MakeStoreFn, tmp_cache_dir: Path) -> None:
+    """Plan 14-18 / D-32 / § WR-03 / SC-1 / T-14-80 / T-14-81.
+
+    **The inverse of the test directly above, and the third surface of one
+    protocol pair.** Plan 14-12 detached the snapshot on the way *out*; this
+    pins the way *in*. ``__setstate__``'s ``self.__dict__.update(state)``
+    installed the caller's mapping **object**, so the restored store's
+    ``_store`` *was* ``state["_store"]`` and a caller who retained ``state``
+    kept a live, unvalidated write handle into a store that had validated every
+    key it was shown.
+
+    **Why this is written as an inverse rather than as a copy.** The
+    ``__getstate__`` test mutates the *store* and asserts the *snapshot* is
+    unchanged. This one mutates the *snapshot* — after the call — and asserts
+    the *store* is unchanged. A test asserting only non-identity would be
+    satisfied by any object that is merely a different object, including one
+    that shares nothing useful, and would not pin the property that matters.
+
+    **The legal-key assertion is the one that names the property.** Non-aliasing
+    is the property; key legality is not. A "fix" that special-cased the illegal
+    key — re-validating on the way through, say — would pass the illegal-key
+    assertion and fail this one, and a reader needs to see that this test is
+    about *sharing* rather than about *validation*. That distinction is D-19's
+    whole argument: the route is closed structurally, not guarded.
+
+    The reverse direction is asserted too, so a fix that replaced sharing in one
+    direction with sharing in the other is caught rather than congratulated.
+    """
+    source = make_store(tmp_cache_dir / "source")
+    source["legal"] = _entry()
+    state = source.__getstate__()
+
+    victim = make_store(tmp_cache_dir / "victim")
+    victim.__setstate__(state)
+    baseline = sorted(victim.keys())
+    assert baseline == ["legal"], (
+        f"the round trip did not restore the entry (keys={baseline!r}); a detach that drops entries "
+        "is a silently short store, not a fix"
+    )
+
+    # (1) The cheap structural check.
+    assert victim._store is not state["_store"], (
+        "__setstate__ installed the caller's mapping object itself; the restored store shares its "
+        "entry mapping with whoever holds the state (§ WR-03, the mirror of the CR-02 defect "
+        "Plan 14-12 closed on __getstate__)"
+    )
+
+    # (2) The property that actually matters, with an ILLEGAL key.
+    state["_store"][ILLEGAL_KEY] = None
+    assert sorted(victim.keys()) == baseline, (
+        f"writing {ILLEGAL_KEY!r} into the retained state AFTER __setstate__ changed the store's "
+        f"key set to {sorted(victim.keys())!r} — an illegal key installed post-validation through "
+        "a mapping the caller still holds"
+    )
+
+    # (3) The same with a LEGAL key: the property is non-aliasing, not legality.
+    state["_store"]["smuggled_legal"] = None
+    assert sorted(victim.keys()) == baseline, (
+        f"writing a LEGAL key into the retained state after __setstate__ changed the store's key "
+        f"set to {sorted(victim.keys())!r}. This assertion is not about key legality — it is what "
+        "distinguishes a structural detach from a fix that only re-validates the illegal case"
+    )
+
+    # (4) The reverse direction: sharing must not be re-established the other way.
+    state_baseline = sorted(state["_store"])
+    victim._store["from_the_store_side"] = None
+    assert sorted(state["_store"]) == state_baseline, (
+        f"mutating the restored store changed the caller's state dict to {sorted(state['_store'])!r}; "
+        "sharing was moved rather than removed"
+    )
+
+
 # ---------------------------------------------------------------------------
 # route_rescan (Plan 14-10 / WR-04 / D-22 / T-14-39 / T-14-40 / T-14-41)
 #
