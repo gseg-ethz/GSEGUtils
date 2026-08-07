@@ -27,6 +27,7 @@ from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import (
+    Final,
     Literal,
     Optional,
     Self,
@@ -50,6 +51,18 @@ except ImportError:  # pragma: no cover
     psutil = None  # type: ignore[assignment]
 
 _MEMMAP_FALLBACK_CHUNK_BYTES = 64 * 1024**2  # 64 MB (D-04 default)
+
+#: The :meth:`LazyDiskCache.load` modes that open the ``.dat`` for writing, and
+#: therefore the modes Plan 14-20 verifies containment on (D-31, STORE-02).
+#:
+#: Named as a set rather than spelled inline at the call site so the mode scope
+#: is one editable fact rather than a condition a reader has to reverse-engineer.
+#: Membership was decided by measurement, not by reading ``numpy``'s docs -- the
+#: four-row table is recorded at the ``load()`` call site and in
+#: :func:`GSEGUtils.lazy_disk_cache.paths._assert_write_contained`. ``"r"`` and
+#: ``"c"`` are absent because neither reaches the file: ``"r"`` opens read-only
+#: and ``"c"`` is copy-on-write, whose writes never leave RAM.
+_MUTATING_MEMMAP_MODES: Final[frozenset[str]] = frozenset({"r+", "w+"})
 
 
 def _purge_cache_pair(cache_path: Path) -> None:
@@ -262,6 +275,56 @@ class LazyDiskCache(ABC):
         copy of the source array on the streaming path.
         """
         with self._lock:
+            # D-31 / STORE-02: verify containment before ANY write on this path.
+            #
+            # WHAT THIS GUARANTEES, stated as what it is rather than as a
+            # universal. The memmap path is derived from the path the store
+            # built, by re-suffixing it, so the honest property is that **the
+            # memmap artefact lands beside the artefact its path was derived
+            # from** -- not "inside the cache directory", which is true when a
+            # store constructed the entry and false when a caller constructed
+            # one directly with an arbitrary `cache_path=`.
+            #
+            # SCOPE, and the limit of it. This call and the one in `load()`
+            # cover the three mutable opens the Plan 14-20 enumeration found:
+            # the allocate-or-reopen `np.memmap` under `if self._mmap is None`,
+            # the reopen `np.memmap` under the `elif`, and `load()`'s open on
+            # its mutating modes. Completeness rests on **re-running that
+            # enumeration whenever this module changes** -- no test would notice
+            # a fourth mutable open added later; it would simply be unguarded
+            # and the suite would stay green. A structural pin (a test asserting
+            # the line-set of `np.memmap(` opens here) was considered and
+            # rejected by the maintainer as a brittle line-number pin over a
+            # module this phase is not otherwise restructuring.
+            #
+            # PLACEMENT, twice over. Ahead of the parent `mkdir` below, because
+            # creating a directory is itself a write. And ahead of the mode
+            # selection, so ONE call covers both `np.memmap` opens rather than
+            # being duplicated into two branches a later edit could fix one of
+            # and miss the other -- which is the shape of the defect being
+            # closed here.
+            #
+            # THE UNCONFIGURED BRANCH, named rather than skipped. When no cache
+            # path is configured, `_init_from_config` creates this `.dat` with
+            # `tempfile.mkstemp` and `self._cache_path.parent` is the **system
+            # temp directory**. The check still runs and still has a well-defined
+            # base there, but that base is not a cache directory: **that branch
+            # has no cache-directory root at all**, so the check catches a
+            # symlink swapped in after `mkstemp` created the file and nothing
+            # else. That is the limit of what it is worth there -- not a
+            # statement that the case is safe. The file that branch leaks is
+            # deferred item D-14-01.
+            #
+            # BOUNDARY -- STORE-08 owns the other half. This adds containment and
+            # **not** torn-write safety: the temp-file / fsync / atomic-replace
+            # machinery `DiskBackedStore._store_entry` already applies to the
+            # `.npy` + `.meta.json` codec pair does not apply to this artefact,
+            # so an interrupted write can still leave a partial `.dat`. That
+            # half, and the purge-family interaction, is STORE-08 (Phase 15),
+            # paired with D-14-01. A reader who finds a containment check beside
+            # an unguarded truncating write needs to know the gap is filed.
+            paths._assert_write_contained(self._cache_path.parent, self._cache_path)
+
             shape, dtype, array = self._describe_buffer()
 
             # D-04 chunk budget: RAM-fraction if psutil is available, else fixed-bytes.
@@ -520,6 +583,38 @@ class LazyDiskCache(ABC):
         with self._lock:
             if not self.offloaded or self._cache_path is None:
                 return
+
+            # D-31 / STORE-02 / RV-01: this is a SECOND mutable open of the same
+            # path, and it was unguarded until Plan 14-20. `mode` defaults to
+            # the mutable "r+" and the truncating "w+" is accepted from the
+            # caller, so a reload of an already-offloaded entry reached
+            # `np.memmap(self._cache_path, ..., mode=mode)` below with no
+            # containment check at all.
+            #
+            # The condition names the modes rather than testing something
+            # incidental, and the set it names was decided by MEASUREMENT --
+            # a 256-byte sentinel outside the cache directory, a `.dat` symlink
+            # planted at it, one fresh entry and one fresh sentinel per mode:
+            #
+            #   'r'   no exception, sentinel untouched, handle NOT writable
+            #   'r+'  no exception, sentinel untouched BY the call -- but the
+            #         handle it installs is mutable, so the write arrives one
+            #         statement later, through the buffer the caller is handed
+            #   'w+'  no exception, sentinel TRUNCATED 256 -> 64 bytes
+            #   'c'   no exception, sentinel untouched (copy-on-write never
+            #         reaches disk)
+            #
+            # So the two mutating modes are guarded and "r"/"c" are not. Leaving
+            # them out is a decision with a reason, not an omission: forcing the
+            # write-flavoured final-component resolution onto a read is exactly
+            # what D-17 and STORE-03 refuse, because a final-component symlink
+            # is the legitimate adopted entry. The accepted residual is that
+            # `load(mode="r")` can still READ through a planted symlink -- that
+            # is disclosure, not corruption, and out of scope for a
+            # containment-on-write decision. See `paths._assert_write_contained`
+            # for the table and for the STORE-08 boundary.
+            if mode in _MUTATING_MEMMAP_MODES:
+                paths._assert_write_contained(self._cache_path.parent, self._cache_path)
 
             # (re)open the mmap if needed
             shape, dtype = self._describe_shape_dtype()
