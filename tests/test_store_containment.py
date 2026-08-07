@@ -8,8 +8,8 @@ policy matrix and the SC-1 worker-safety proof; Plan 14-06 extends it with the
 builder-containment and symlink tests; Plan 14-07 extends it with the migration
 snippet's round-trip.
 
-The point of this file is the *differences* between the routes. Four distinct
-policies apply to ten routes, and each difference is a decision:
+The point of this file is the *differences* between the routes. Six distinct
+policies apply to twelve routes, and each difference is a decision:
 
 ===================== ============================================== ======
 Route                 Policy                                         Basis
@@ -18,13 +18,21 @@ Route                 Policy                                         Basis
 ``add_data_to_store`` raise, unconditionally                         SC-1
 ``__getitem__``       raise, before ``_load_entry`` touches disk     D-11
 ``get``               return the default                             D-11a
-``pop(key, default)`` return the default; the bare form raises       D-25
+``pop(key, default)`` return the default; remove a key that is there D-29
+``pop(key)``          raise, and still remove a key that is there    D-29
 ``setdefault``        raise — it is a write route                    D-25
+``clear``             remove every tracked key, or raise             D-29
+``popitem``           left inherited; its ``KeyError`` carries a key D-29
 ``__init__`` rescan   warn and skip, leaving the file untouched      D-09
 ``__setstate__``      raise, never a silently short store            D-10
 ``store`` property    not a write route at all — a read-only view    D-19
 ``__getstate__``      not a write route at all — a detached snapshot D-19
 ===================== ============================================== ======
+
+The table has thirteen rows for twelve routes because ``pop``'s two forms took
+one row until D-29 split them: they now differ **only** in what they return, and
+writing that as one row is how the round-3 draft came to claim a delete it did
+not perform.
 
 The ``pop`` and ``setdefault`` rows are one decision seen from both sides
 (D-25), and they are in the table because the phase *changed* one of them
@@ -37,6 +45,22 @@ illegal key at a write route is the whole point of this phase. The asymmetry is
 a choice, and it is written down in three places — here, in ``pop``'s docstring
 and in the migration note — precisely so the next reader does not read it as an
 oversight and helpfully "finish" it.
+
+The ``clear`` and ``popitem`` rows are D-29, and they are here because round 3
+published a five-route enumeration marked *exhaustive* that named neither.
+Both are supplied by ``MutableMapping`` and neither appeared anywhere in
+``disk_backed_store.py``, so the set was invisible from the diff that changed
+their behaviour — which is the mechanism worth carrying away, not the two
+names. ``clear`` was ``while True: self.popitem()`` under ``except KeyError:
+pass``, and measured over four tracked keys one of which had no readable
+payload it returned, **raising nothing**, with three keys still in the store.
+It is overridden. ``popitem`` is **deliberately left inherited**, and the
+reason is measured rather than asserted: its ``KeyError`` on a non-empty store
+carries the key (``args == ('ghost',)``) while its ``KeyError`` on an empty one
+does not (``args == ()``), so the two cases were always distinguishable and
+``clear``'s bare ``except KeyError`` is what threw the distinction away. The
+defect was in the handler, not in the signal. See ``clear``'s docstring for the
+three override shapes that were rejected.
 
 The last two rows are the odd ones out on purpose, and the difference is the
 decision: the other six routes *validate* a write, while these two have no
@@ -430,6 +454,272 @@ def test_route_setdefault_still_raises_because_it_is_a_write_route(
 
     assert ILLEGAL_KEY not in store, "a refused setdefault still tracked the key"
     assert store.keys() == [], "the refused setdefault left residue in the store"
+
+
+# ---------------------------------------------------------------------------
+# route_pop / route_clear / route_popitem — removal semantics (D-29)
+# ---------------------------------------------------------------------------
+
+
+def _seed_offloaded(make_store: MakeStoreFn, cache_dir: Path, keys: list[str]) -> DiskBackedStore[DiskBackedNDArray]:
+    """Seed a genuine codec pair per key, then return a **reopened** store over them.
+
+    Reopening is what makes the seeded keys *tracked but not resident*: the
+    rescan installs ``_store[key] = None`` and every read goes through
+    ``_load_entry``. That is the only state in which a key can be present and
+    its payload unreadable, and it is the state both round-3 defects live in.
+    """
+    writer = make_store(cache_dir)
+    for i, key in enumerate(keys):
+        writer.add_data_to_store(key, np.arange(4, dtype=np.float64) + i)
+    writer.offload(pickle_container=True)
+    del writer
+    return make_store(cache_dir)
+
+
+def _unlink_artefacts(cache_dir: Path, key: str) -> None:
+    """Remove every on-disk artefact belonging to ``key``, leaving it tracked."""
+    for path in cache_dir.glob(f"{key}.*"):
+        path.unlink()
+
+
+def test_route_pop_removes_a_tracked_key_whose_payload_cannot_be_loaded(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-17 / STORE-01 / D-29 / § WR-02a / T-14-76.
+
+    **``dict.pop(k, d)`` removes ``k`` when ``k`` is present. This did not.**
+    Measured at the post-14-16 tip, over a key the reopen rescan tracked and
+    whose codec pair had then been unlinked::
+
+        'gone' in s (before) : True
+        bare pop             : KeyError('gone')
+        'gone' in s (after)  : True
+        defaulting pop       : 'DEF'
+        'gone' in s (after)  : True
+
+    The cause is a single handler that cannot tell *no such key* from *key
+    exists, payload unreadable* — ``except (KeyError, StoreKeyError): return
+    default`` sees the same exception type for both. A caller draining a store
+    with ``pop(k, None)`` therefore completes a removal loop having removed
+    nothing and having been told nothing.
+
+    **Both forms are asserted, and they must differ only in what they return.**
+    The bare form still raises, because raising on a miss is what a mapping
+    ``pop`` does; but it now also removes, because the key *was* there. If only
+    the defaulting form were fixed, the bare form would be the route that
+    reports a failure and leaves the store in the state that caused it.
+
+    **The containment carve-out is re-asserted here, not assumed.** The refusal
+    handler is exactly where WR-03's swallow lived, and D-29 restructures it —
+    so the last clause of this test drives a ``StoreContainmentError`` through
+    both forms and asserts nothing was removed. A containment violation is
+    evidence about the *environment*; the store must be left intact for the
+    caller to inspect.
+    """
+    store = _seed_offloaded(make_store, tmp_cache_dir, ["gone", "kept"])
+    _unlink_artefacts(tmp_cache_dir, "gone")
+    assert sorted(store.keys()) == ["gone", "kept"], (
+        "the fixture did not track both keys, so nothing below proves anything"
+    )
+
+    # 1. The bare form: raises, and still removes the key that was there.
+    with pytest.raises(KeyError):
+        store.pop("gone")
+    assert "gone" not in store, (
+        "the BARE pop raised and left the key tracked; a route that cannot honour a key must not "
+        "also leave the caller holding it (D-29, WR-02a)"
+    )
+
+    # 2. The defaulting form: returns the default, and still removes.
+    store2 = _seed_offloaded(make_store, tmp_cache_dir, ["gone2"])
+    _unlink_artefacts(tmp_cache_dir, "gone2")
+    sentinel = object()
+    assert store2.pop("gone2", sentinel) is sentinel, "the defaulting pop did not answer with its default"
+    assert "gone2" not in store2, (
+        "the DEFAULTING pop returned its default and left the key tracked — `dict.pop(k, d)` removes "
+        "`k` when present, and a removal loop built on this one removes nothing (D-29, WR-02a)"
+    )
+
+    # 3. A genuinely absent key is unchanged on both forms: the fix must
+    #    distinguish "present but unreadable" from "not there", not collapse
+    #    them the other way.
+    assert store2.pop("never_existed", sentinel) is sentinel
+    with pytest.raises(KeyError):
+        store2.pop("never_existed")
+
+    # 4. Containment evidence is never degraded, and nothing is removed when it
+    #    propagates (WR-03, in the handler D-29 restructures).
+    store3 = make_store(tmp_cache_dir)
+    store3["safe"] = _entry()
+    for call in (lambda: store3.pop(Sneaky("safe")), lambda: store3.pop(Sneaky("safe"), sentinel)):
+        with pytest.raises(StoreContainmentError, match=re.escape(paths_mod.CLAUSE_ESCAPES)):
+            call()
+        assert store3.keys() == ["safe"], (
+            "a containment violation removed the key; it is evidence about the environment, not "
+            "about the key, and the store must be left intact for the caller to inspect (WR-03)"
+        )
+
+
+def test_route_pop_of_an_offloaded_entry_leaves_its_artefacts_and_the_key_is_re_adopted(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    """Plan 14-17 / D-29 / § WR-02b / T-14-77 — **a characterization test.**
+
+    **This pins a known limitation, not a desired property.** Read that
+    sentence before changing anything it asserts. A ``pop`` that succeeds
+    removes the key from tracking and **leaves the codec pair on disk**, so the
+    very next subscript re-adopts the key and so does the reopen rescan. That
+    leaves ``key not in store`` true while ``store[key]`` succeeds, which is a
+    ``Mapping`` contract violation. Measured at the post-14-16 tip::
+
+        popped         : DiskBackedNDArray
+        keys after pop : []      'a' in s: False
+        files on disk  : ['a.dat', 'a.meta.json', 'a.npy']
+        RESURRECTED    : DiskBackedNDArray   keys now: ['a']
+        reopen adopts  : ['a']
+
+    **Why it is deliberately not fixed here.** Adding an unlink to
+    ``__delitem__`` would collapse **STORE-05**, which requires that *where the
+    data lives* (offload), *whether the key is tracked* (``__delitem__``,
+    in-memory only) and *whether the file outlives the object*
+    (``purge_disk_on_gc``) stay three separate axes and are characterization-
+    tested — this test is one of those characterizations. And the combined
+    drop-key-and-delete-files operation is **STORE-04**'s, which additionally
+    requires atomicity, no partial effect on refusal and no stale finalizer able
+    to delete a later entry created under the same key. Neither is in this
+    phase, and a removal route that half-implemented STORE-04 here would be
+    harder to make atomic later than one that does not touch disk at all.
+
+    A test that merely records a bug without saying it is one is how a bug
+    becomes a feature; this docstring is the part that keeps that from
+    happening.
+    """
+    store = _seed_offloaded(make_store, tmp_cache_dir, ["a"])
+    assert store.keys() == ["a"] and dict(store.store) == {"a": None}, "the fixture did not produce an offloaded entry"
+
+    popped = store.pop("a")
+    assert popped is not None, "pop did not return the entry"
+    assert "a" not in store and store.keys() == [], "pop did not drop the tracking entry"
+
+    remaining = sorted(p.name for p in tmp_cache_dir.iterdir())
+    assert remaining == ["a.dat", "a.meta.json", "a.npy"], (
+        f"the on-disk artefacts changed: {remaining}. If an unlink was added to a removal route, it "
+        "collapsed STORE-05's three axes and pre-empted STORE-04's atomic primitive — revert it and "
+        "take the change to Phase 15"
+    )
+
+    revived = store["a"]
+    assert revived is not None, "the subscript did not re-adopt the popped key"
+    assert store.keys() == ["a"], "the key is re-adopted by the subscript — this is the documented limitation"
+
+    del store
+    reopened = make_store(tmp_cache_dir)
+    assert reopened.keys() == ["a"], "the reopen rescan also re-adopts the popped key — the second half of WR-02b"
+
+
+def test_route_clear_cannot_return_with_the_store_non_empty(make_store: MakeStoreFn, tmp_cache_dir: Path) -> None:
+    """Plan 14-17 / STORE-01 / D-29 / § WR-04 / T-14-75.
+
+    **A ``clear()`` that returns normally with the store still populated is a
+    data-integrity defect, and it shipped.** ``MutableMapping.clear`` is
+    ``while True: self.popitem()`` under ``except KeyError: pass``, and
+    ``popitem`` reaches the validating subscript — so a tracked key whose
+    payload cannot be loaded raises ``KeyError``, which the handler reads as
+    *the mapping is empty* and stops on. Measured at the post-14-16 tip over
+    four tracked keys, one of them unloadable::
+
+        before clear : ['a', 'ghost', 'b', 'c']
+        clear raised : (nothing)
+        after clear  : ['ghost', 'b', 'c']
+
+    One key of four dropped, no exception, and the caller told it succeeded.
+
+    **Emptiness is asserted, not a count.** A partial clear that happened to
+    drop the right *number* of keys would satisfy an arithmetic assertion, and
+    the failure mode here is precisely a partial clear.
+
+    **The unloadable key is placed after a loadable one on purpose.** If it
+    came first the inherited implementation would drop nothing, and a test that
+    only distinguishes "cleared nothing" from "cleared everything" cannot see a
+    clear that stops halfway — which is the shape that actually shipped.
+    """
+    store = _seed_offloaded(make_store, tmp_cache_dir, ["a", "ghost", "b", "c"])
+    _unlink_artefacts(tmp_cache_dir, "ghost")
+    before = sorted(store.keys())
+    assert before == ["a", "b", "c", "ghost"], "the fixture did not track all four keys"
+
+    store.clear()
+
+    assert store.keys() == [], (
+        f"clear() returned with the store non-empty: before={before}, after={sorted(store.keys())}. "
+        "A route that cannot honour a key must raise, not drop part of the work and report success "
+        "(D-29, WR-04)"
+    )
+
+    # Idempotency: a second clear, and a clear on a store that was never
+    # populated, are both no-ops rather than raises.
+    store.clear()
+    assert store.keys() == [], "the second clear() was not a no-op"
+    empty = make_store(tmp_cache_dir / "never-populated")
+    empty.clear()
+    assert empty.keys() == [], "clear() on an already-empty store did not leave it empty"
+
+
+def test_route_popitem_is_left_inherited_and_its_key_error_carries_the_key(
+    make_store: MakeStoreFn, tmp_cache_dir: Path
+) -> None:
+    r"""Plan 14-17 / D-29 / § WR-04 (``popitem`` half) — **decided by measurement.**
+
+    § WR-04 proposed overriding ``popitem`` alongside ``clear``. Re-measured at
+    the post-14-16 tip, its two ``KeyError``\\ s are **distinguishable**::
+
+        popitem() on a NON-EMPTY store, payload unreadable : KeyError args=('ghost',)
+        popitem() on an EMPTY store                        : KeyError args=()
+
+    ``MutableMapping.popitem`` raises a bare ``KeyError`` from ``next(iter())``
+    when the mapping is empty and propagates ``self[key]``'s ``KeyError(key)``
+    otherwise. The information ``clear`` needed was therefore always present;
+    ``except KeyError: pass`` discarded it. **The defect was in the handler, not
+    in the signal**, and with ``clear`` overridden nothing routes through
+    ``popitem`` any more.
+
+    **Three override shapes were considered and all are worse**, which is why
+    this is a decision rather than an oversight — see ``clear``'s docstring for
+    the same argument in the module. This test exists so that a reader who finds
+    ``clear`` overridden and ``popitem`` not can tell the two apart by grepping
+    the suite, exactly as ``setdefault``'s test does for ``pop``.
+
+    The reviewer's own caveat also reproduces and is asserted below: an
+    already-installed illegal key makes ``popitem`` raise ``StoreKeyError``
+    rather than misbehave, which is defensible and is left alone.
+    """
+    store = _seed_offloaded(make_store, tmp_cache_dir, ["ghost"])
+    _unlink_artefacts(tmp_cache_dir, "ghost")
+
+    with pytest.raises(KeyError) as unloadable:
+        store.popitem()
+    assert unloadable.value.args == ("ghost",), (
+        f"popitem's KeyError on a NON-EMPTY store no longer carries the key (args="
+        f"{unloadable.value.args!r}); that is the only thing distinguishing it from the empty-store "
+        "KeyError, and clear()'s round-3 defect was reading the two as the same event"
+    )
+    assert store.keys() == ["ghost"], "the inherited popitem removed a key the caller never named"
+
+    empty = make_store(tmp_cache_dir / "empty-store")
+    with pytest.raises(KeyError) as exhausted:
+        empty.popitem()
+    assert exhausted.value.args == (), (
+        f"popitem's KeyError on an EMPTY store now carries arguments ({exhausted.value.args!r}); the "
+        "two cases have stopped being distinguishable"
+    )
+
+    # The reviewer's caveat, reproduced: an already-installed illegal key is
+    # refused by the subscript's lexical layer rather than silently popped.
+    installed = make_store(tmp_cache_dir / "installed-illegal")
+    installed._store[ILLEGAL_KEY] = _entry()
+    with pytest.raises(StoreKeyError, match="Invalid store key"):
+        installed.popitem()
 
 
 # ---------------------------------------------------------------------------
