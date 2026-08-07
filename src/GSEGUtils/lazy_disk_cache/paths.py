@@ -784,6 +784,148 @@ def _assert_contained(cache_dir: Path, candidate: Path) -> None:
         )
 
 
+def _assert_write_contained(base_dir: Path, candidate: Path) -> None:
+    """Verify that ``candidate`` is safe to **open for writing** under ``base_dir``, or raise.
+
+    The write-flavoured sibling of :func:`_assert_contained` (D-31, STORE-02).
+    It performs that function's parent-chain verification — by *calling* it,
+    not by restating it — and then adds one thing on top: when the final
+    component already exists and is a symlink, the link is resolved and the
+    target must also be inside the fully-resolved base.
+
+    **Why there are two functions rather than one, stated as a contrast.**
+    :func:`_assert_contained` deliberately leaves the final component
+    unresolved (D-17). That is not an oversight: a final-component symlink
+    inside the cache directory pointing at a real codec pair outside it is the
+    legitimate **adopted entry**, and refusing it would break STORE-03, which
+    Phase 14 has already verified against the macOS ``mkdtemp`` and ETH
+    ``/scratch`` shapes. Leaving the final component unresolved is therefore
+    *correct for a read* and *wrong for a truncating write*: reading through an
+    adopted entry returns the caller their own data, while writing through a
+    planted one silently overwrites a file the caller never named. So the read
+    semantics stay exactly as they were and the extra resolution lives here.
+    :func:`_assert_contained` must not be changed to serve this path — that
+    would trade one verified requirement (STORE-03) for another (STORE-02).
+
+    **Why the base is a parameter and this function derives none (RV-02).**
+    :meth:`LazyDiskCache._init_from_config` produces the memmap path two
+    different ways: ``config.cache_path.with_suffix(_MEMMAP_SUFFIX)`` when a
+    path is configured, and :func:`tempfile.mkstemp` when one is not. A helper
+    that tried to infer its own base would have to guess which branch ran.
+    ``config.cache_path`` is also the wrong thing to guess at: it is a
+    **file-like path, not a directory**. The only well-defined base on both
+    branches is the *derived* path's parent, and only the caller knows it —
+    which is why every call site passes ``self._cache_path.parent`` and none
+    passes ``config.cache_path``. On the configured branch that parent is the
+    store's real cache directory; on the ``mkstemp`` branch it is the **system
+    temp directory**, where the check is near-vacuous: it catches a symlink
+    swapped in after ``mkstemp`` created the file and nothing else, because
+    that branch has no cache-directory root at all. The leak that branch
+    creates is deferred item **D-14-01**; the fix belongs to **STORE-08**.
+
+    **The measured mode scope, and the table it rests on.** ``load()`` accepts
+    four memmap modes, and callers of this helper guard the ones measured to
+    reach the file. Measured on this repository before the guard existed, with
+    a 256-byte sentinel outside the cache directory and a ``.dat`` symlink
+    planted at it — a fresh entry and a fresh sentinel per row:
+
+    ===== ======== ============ =========== ====================== ==========================
+    mode  raised   size before  size after  bytes changed by load  handle mutable after load
+    ===== ======== ============ =========== ====================== ==========================
+    'r'   no       256          256         no                     no (``ValueError`` on write)
+    'r+'  no       256          256         no                     **yes**
+    'w+'  no       256          **64**      **yes**                **yes**
+    'c'   no       256          256         no                     no (copy-on-write, never
+                                                                   reaches disk)
+    ===== ======== ============ =========== ====================== ==========================
+
+    So the guard covers ``"r+"`` and ``"w+"``. ``"w+"`` truncates the target
+    during :meth:`~LazyDiskCache.load` itself; ``"r+"`` does not write during
+    the call but installs a **mutable mapping onto the outside file**, so the
+    damage arrives through the handle the caller is then handed — the same
+    escape, one statement later. ``"r"`` and ``"c"`` are left unguarded because
+    the table shows neither reaches the file, and because forcing this
+    write-flavoured final-component resolution onto a read is precisely what
+    D-17 and STORE-03 refuse. The scope is decided by that table; a mode later
+    measured to mutate the sentinel gets guarded whatever this paragraph says.
+
+    **Accepted residual: a read can still disclose.** ``load(mode="r")``
+    through a planted symlink still *reads* a file outside the directory. That
+    is disclosure, not corruption, and it is out of scope for a
+    containment-on-write decision — closing it is what would break the adopted
+    entry.
+
+    **Accepted residual: TOCTOU.** This is a check-then-open sequence, so a
+    window remains between the verification here and the ``np.memmap`` call
+    that follows: a path verified as an ordinary file can be replaced by a
+    symlink before it is opened. The check **narrows** the window; it does not
+    close it. What would close it is an open that refuses to follow a
+    final-component symlink (``O_NOFOLLOW`` on the final component, or an
+    ``openat``-based construction), which :mod:`numpy` does not expose through
+    :class:`numpy.memmap`. That is **not this round's work**, and exploiting
+    the residual already requires write access to the directory — the same
+    precondition as the escape being closed here.
+
+    **BOUNDARY — this is deliberately half a fix.** It adds containment and
+    **not** torn-write safety. The temp-file / ``fsync`` / atomic-replace
+    machinery :meth:`DiskBackedStore._store_entry` already applies to the codec
+    pair does not apply to the memmap artefact, so an interrupted write can
+    still leave a partial ``.dat``. That half, and its interaction with the
+    purge family, is **STORE-08** (Phase 15), paired with deferred item
+    **D-14-01**. A reader who finds a containment check sitting beside an
+    unguarded truncating write needs to know the gap is filed rather than
+    missed.
+
+    Parameters
+    ----------
+    base_dir : Path
+        The directory the write must stay inside; the authorization boundary.
+        Passed explicitly rather than derived — see the reasoning above. It is
+        fully resolved here, so a ``base_dir`` that is itself a symlink
+        compares equal to itself and every ordinary path inside it is accepted.
+    candidate : Path
+        The path that is about to be opened for writing. It need **not** exist:
+        allocation is the normal case, and a path whose final component is
+        absent has no link to resolve, so it is accepted on that ground alone.
+
+    Returns
+    -------
+    None
+        Returns ``None`` when ``candidate`` is safe to open for writing.
+
+    Raises
+    ------
+    StoreContainmentError
+        If ``candidate``'s parent chain leaves ``base_dir`` (delegated to
+        :func:`_assert_contained`), or if its final component is a symlink
+        resolving outside ``base_dir``. Both report
+        :data:`CLAUSE_ESCAPES`, so a consumer greps one clause for both layers.
+    """
+    # Layer one, delegated rather than restated: the parent-chain semantics
+    # cannot drift between the read-flavoured and write-flavoured checks if
+    # only one function implements them.
+    _assert_contained(base_dir, candidate)
+
+    # Layer two, the only difference: resolve the final component as well.
+    # ``is_symlink()`` is False for a path that does not exist, so allocation
+    # -- the normal case -- falls straight through.
+    if not candidate.is_symlink():
+        return
+
+    base = base_dir.resolve()
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(base):
+        raise StoreContainmentError(
+            f"Store path {str(candidate)!r} for cache directory {str(base_dir)!r}: the path "
+            f"{CLAUSE_ESCAPES} — its final component is a symlink resolving to "
+            f"{str(resolved)!r}, which is not inside the resolved directory {str(base)!r}, and "
+            "this path is about to be opened for writing. Reading through such a link is the "
+            "legitimate adopted-entry case (D-17); writing through it would overwrite or "
+            "truncate a file outside the directory, so the write is refused. Inspect the "
+            "directory before retrying."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Phase-14 path builders and the builder registry (D-14 / D-15 / STORE-02)
 # ---------------------------------------------------------------------------
