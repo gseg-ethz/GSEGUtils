@@ -1246,6 +1246,12 @@ _PAGE_MARKER = re.compile(r"^\.\.\s+CONTRACT-PAGE-KEYS:\s*(?P<group>[A-Z0-9-]+)\
 _MIN_LEGAL_PAGE_LITERALS: int = 6
 _MIN_REFUSED_PAGE_LITERALS: int = 30
 
+#: The floor for the (key, clause) pairs read out of the refusal table by
+#: :func:`test_contract_page_refusal_table_agrees_on_the_clause_not_only_the_verdict`
+#: (Plan 14-19). Measured on the page as this plan leaves it, for the same reason
+#: the two floors above exist: a parser that pairs nothing asserts nothing.
+_MIN_REFUSED_TABLE_CLAUSE_PAIRS: int = 29
+
 #: The shapes D-23 added to the device set. The page presented a strict subset of
 #: the refused device names before Plan 14-15; ``CON .txt`` is the one a reader is
 #: most likely to take for a typo, which is exactly why it has to be on the page.
@@ -1413,6 +1419,55 @@ def test_contract_page_key_literals_agree_with_the_shipped_rule() -> None:
             f"{CONTRACT_PAGE.name} presents {key!r} as a refused key (page group {group}), "
             f"but the shipped rule accepts it — the page documents a refusal the library "
             f"does not perform"
+        )
+
+
+def test_contract_page_refusal_table_agrees_on_the_clause_not_only_the_verdict() -> None:
+    """Plan 14-19 / STORE-01 / T-14-88: each page example reports the clause its own row names.
+
+    The agreement test above checks *whether* a documented key is refused. It
+    cannot see an attribution that moved — round 3 repointed four already-refused
+    keys and every verdict assertion stayed green, because refusal is what they
+    assert and refusal did not change.
+
+    That gap matters here specifically because BC-GSEG-006 publishes the clause
+    strings as a grep target. A downstream matching ``ends in a space or a dot``
+    against its logs stops finding a family the moment that family starts
+    reporting a different clause, and nothing about the store's behaviour looks
+    wrong. This test pairs each example in the refusal table's *Examples* column
+    with the clause literal in its own row's first column, so a documented
+    attribution that drifts is a red build rather than something a reviewer has
+    to notice.
+    """
+    lines = CONTRACT_PAGE.read_text(encoding="utf-8").splitlines()
+    pairs: list[tuple[str, str]] = []
+    for index, line in enumerate(lines):
+        match = _PAGE_MARKER.match(line.strip())
+        if match is None or match.group("group") != "REFUSED-TABLE-COLUMN-3":
+            continue
+        for row in _list_table_rows(lines, index)[1:]:
+            clauses = [literal for literal in _inline_literals(row[0]) if literal in ALL_CLAUSES]
+            assert len(clauses) == 1, (
+                f"the refusal table row beginning {row[0][:60]!r} names {len(clauses)} clause "
+                f"constants in its first column ({clauses!r}); the row/clause pairing this test "
+                "reads has stopped being unambiguous"
+            )
+            pairs.extend((key, clauses[0]) for key in _quoted_keys(row[2]))
+
+    # A floor, for the same reason the verdict test has two: a parser that pairs
+    # nothing asserts nothing and reports success.
+    assert len(pairs) >= _MIN_REFUSED_TABLE_CLAUSE_PAIRS, (
+        f"paired only {len(pairs)} (key, clause) rows from {CONTRACT_PAGE.name} "
+        f"(floor {_MIN_REFUSED_TABLE_CLAUSE_PAIRS}) — the parser has stopped seeing the refusal "
+        f"table. Paired: {sorted(pairs)}"
+    )
+
+    for key, documented in sorted(pairs):
+        actual = reported_clause(key)
+        assert actual == documented, (
+            f"{CONTRACT_PAGE.name} places {key!r} in the {documented!r} row, but the shipped rule "
+            f"reports {actual!r}. BC-GSEG-006 publishes these strings as a grep target, so a "
+            f"downstream matching the documented clause has stopped finding this key"
         )
 
 

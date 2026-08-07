@@ -69,6 +69,11 @@ already refused for another reason reporting the clause it always reported.
    ``tests/test_store_key_rules.py::test_contract_page_key_literals_agree_with_the_shipped_rule``.
    Keep key literals double-quoted and on one line, and keep this marker directly
    above the directive, or that test stops seeing this table and fails on its floor.
+   Each example is **also** asserted to report the clause named in its own row's
+   first column, in
+   ``tests/test_store_key_rules.py::test_contract_page_refusal_table_agrees_on_the_clause_not_only_the_verdict``
+   (Plan 14-19). Keep the clause in column 1 written as a double-backtick inline
+   literal, exactly as the message spells it, or that test loses the pairing.
 
 .. list-table::
    :header-rows: 1
@@ -94,7 +99,8 @@ already refused for another reason reporting the clause it always reported.
    * - ``is empty or a reserved path name`` — **same clause string, evaluated
        here**
      - any key whose pre-dot stem is a Win32 device name, matched
-       case-insensitively, after a trailing-ASCII-space strip. The names are
+       case-insensitively, after a trailing-ASCII-space strip that stops at the
+       start of the key's own trailing run. The names are
        ``CON``, ``PRN``, ``AUX``, ``NUL``, ``CONIN$``, ``CONOUT$``,
        ``COM0``–``COM9``, ``LPT0``–``LPT9`` and the superscript ``COM¹²³`` /
        ``LPT¹²³`` forms
@@ -209,9 +215,14 @@ read them as arbitrary — none of them escapes anything.
        **The last example is the one that looks like a typo and is not:**
        ``"CON .txt"`` is refused because Win32 strips trailing spaces from the
        name component *before* resolving it, so the space does not save the key
-       — the stem it resolves is ``CON``. The strip is applied for this test
-       only when the key contains a dot, so ``"com1 "`` keeps reporting the
-       trailing-space clause it always reported rather than moving here.
+       — the stem it resolves is ``CON``. **The strip has a boundary, and it is
+       where this clause stops and the trailing-run clause starts:** it reaches
+       spaces that are *interior* to the key and stops at the start of the key's
+       own trailing run. So ``"CON .txt"``, whose space is interior, is refused
+       here as a reserved name, while ``"CON ."`` and ``"com1 "`` — whose
+       trailing runs reach back to the space — are refused under
+       ``ends in a space or a dot`` instead. Both are refused; only the reported
+       clause differs.
        Matching is case-insensitive over the exact characters supplied and
        folds nothing: a fullwidth ``ＣＯＮ`` stays outside the set and stays
        legal, because on Win32 it is an ordinary filename.
@@ -254,7 +265,9 @@ the device axis reading as complete when it is a fixed list, so, precisely:
 * It is a **fixed name list** — ``CON``, ``PRN``, ``AUX``, ``NUL``, ``CONIN$``,
   ``CONOUT$``, ``COM0``–``COM9``, ``LPT0``–``LPT9`` and the superscript
   ``COM¹²³`` / ``LPT¹²³`` forms — matched case-insensitively against the pre-dot
-  stem after a trailing-ASCII-space strip. It covers exactly those names.
+  stem after a trailing-ASCII-space strip that reaches only spaces *interior* to
+  the key and stops at the start of the key's own trailing run. It covers exactly
+  those names, in exactly that position.
 * It does **not** model every Win32 path-parsing behaviour. Any device-resolving
   shape outside that list, or reached by a mechanism other than a trailing-space
   strip on the stem, is not covered.
@@ -405,10 +418,22 @@ exception:
        raise ValueError(f"{name!r} cannot be used as a cache key")
 
 The call is pure: it touches no filesystem, mutates nothing, and returns the same
-verdict every time. It is also **total over its argument**: anything that is not
-a :class:`str` — including a :class:`~pathlib.Path`, which is the shape a
-path-typed identifier arrives in — returns ``False`` rather than raising, so the
-predicate never needs to be wrapped in a ``try``.
+verdict every time. It always produces a verdict **for a non-**:class:`str`
+**argument**: anything that is not a :class:`str` — including a
+:class:`~pathlib.Path`, which is the shape a path-typed identifier arrives in —
+returns ``False`` rather than raising, so for those arguments the predicate does
+not need to be wrapped in a ``try``.
+
+There is exactly one argument shape for which it does. A :class:`str`
+**subclass** whose ``__hash__`` raises passes the non-:class:`str` guard — it *is*
+a :class:`str` — and its exception then propagates out of the reserved-name
+membership test. If you compose keys out of third-party objects that subclass
+:class:`str` with overridden dunders, wrap the call; if you pass ordinary values
+of any type, you do not need to. The predicate deliberately does **not** catch
+that exception: a blanket handler would also swallow
+:class:`~GSEGUtils.lazy_disk_cache.StoreContainmentError`, which is the signal
+that something was planted in your cache directory and is the one thing this
+page asks you never to hide.
 
 Scanning your existing cache directories
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

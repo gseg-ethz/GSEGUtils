@@ -571,8 +571,8 @@ def is_valid_store_key(key: str) -> bool:
     Downstreams can also use it to pre-check a composed feature name *before* it
     becomes a key, or to decide per-tile without catching an exception.
 
-    **The predicate always produces a** :class:`bool` **for a non-**``str``
-    **argument.** Such a value is refused by :func:`validate_store_key`'s own
+    **For a non-**``str`` **argument the predicate always produces a**
+    :class:`bool`. Such a value is refused by :func:`validate_store_key`'s own
     type guard as a :exc:`StoreKeyError`, which this function already catches, so
     it cannot escape as an exception — there is deliberately no second guard
     here. That is what lets a downstream pre-check a path-typed identifier
@@ -585,9 +585,10 @@ def is_valid_store_key(key: str) -> bool:
     over: a :class:`str` **subclass** whose ``__hash__`` raises. Such a value
     passes the type guard — it *is* a ``str`` — and then reaches
     ``key in _RESERVED_KEYS``, which hashes it; the exception propagates. The
-    guard's position ahead of that membership test is still load-bearing for
-    *unhashable non-*``str`` arguments, which is the case it was placed for, but
-    it has no bearing on this one. Measured at
+    guard's position ahead of that membership test is still load-bearing for an
+    argument that is both *unhashable* and not a ``str`` — the ``bytearray``
+    case Plan 14-09 placed it for — but it has no bearing on this one, because a
+    ``str`` subclass passes the guard. Measured at
     :func:`validate_store_key`'s reserved-key membership test.
 
     The behaviour is deliberately **unchanged** — only the claim moved. Turning
