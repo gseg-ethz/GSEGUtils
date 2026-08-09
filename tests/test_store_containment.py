@@ -2888,3 +2888,61 @@ def test_route_setstate_adds_no_expected_cache_dir_surface() -> None:
     # a declined option comes back as a helpful addition.
     notes = DiskBackedStore.__setstate__.__doc__ or ""
     assert DECLINED_SURFACE in notes, "the Notes block no longer records why this surface was declined"
+
+
+# ---------------------------------------------------------------------------
+# STORE-02 / EB-02 — extend_cache_path must not relocate the containment base
+# ---------------------------------------------------------------------------
+#
+# The lexical rule refuses a traversing NAME. It cannot see the filesystem, so
+# it cannot refuse a legal name that is already a symlink pointing out of the
+# cache directory. That component becomes the cache root of the store built on
+# the returned config, so every later `_assert_contained` measures against the
+# relocated base and stays silent while artefacts land outside.
+#
+# Found by the round-4 escalation review (EB-02), reproduced before the fix:
+# artefacts `victim.npy` / `victim.meta.json` were written outside the
+# configured root through the public API with a lexically-valid key.
+
+
+def test_extend_cache_path_refuses_a_planted_directory_symlink(tmp_path: Path) -> None:
+    """A legal folder name that is a symlink out of the cache dir is refused."""
+    cache = tmp_path / "cache"
+    outside = tmp_path / "outside"
+    cache.mkdir()
+    outside.mkdir()
+    (cache / "tile1").symlink_to(outside, target_is_directory=True)
+
+    config = LazyDiskCacheConfig(cache_path=cache)
+
+    with pytest.raises(StoreContainmentError):
+        config.extend_cache_path("tile1")
+
+
+def test_extend_cache_path_still_works_under_a_symlinked_cache_root(tmp_path: Path) -> None:
+    """STORE-03 regression guard: a cache root that is itself a symlink still extends.
+
+    The EB-02 fix resolves the final component. This pins that it did not also
+    break the symlinked-root case STORE-03 verifies — the failure mode a
+    final-component-resolving guard would most plausibly introduce.
+    """
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+
+    config = LazyDiskCacheConfig(cache_path=link)
+    extended = config.extend_cache_path("tile1")
+
+    assert extended.cache_path == link / "tile1"
+
+
+def test_extend_cache_path_accepts_an_ordinary_subfolder(tmp_path: Path) -> None:
+    """The guard must not turn the ordinary case into a refusal."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    config = LazyDiskCacheConfig(cache_path=cache)
+    extended = config.extend_cache_path("tile1")
+
+    assert extended.cache_path == cache / "tile1"

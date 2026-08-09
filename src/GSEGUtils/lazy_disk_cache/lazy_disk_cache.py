@@ -206,6 +206,25 @@ class LazyDiskCacheConfig:
         new_path = self.cache_path / new_folder if self.cache_path else None
         if new_path is None:
             logger.info("Cache path is None; cannot extend.")
+        else:
+            # STORE-02 / EB-02. The lexical rule above refuses a traversing *name*
+            # ('../x'), but it cannot see the filesystem, so it cannot refuse a
+            # perfectly legal name that is already a symlink pointing out of the
+            # cache directory. That case is not an ordinary containment miss: this
+            # component BECOMES the cache root of the store built on the returned
+            # config, so every later `_assert_contained` measures against the
+            # relocated base and stays self-consistent and silent while artefacts
+            # land outside the configured root.
+            #
+            # The *write*-flavoured guard is the correct one here even though no
+            # write happens on this line, and that is the whole point: it is the
+            # only one that resolves the FINAL component. `_assert_contained`
+            # deliberately leaves it unresolved (D-17) so a symlinked adopted entry
+            # still loads — correct for reading an entry, and unable to fire for a
+            # directory that is about to become a containment base. Verified: this
+            # refuses a planted directory symlink while still accepting a cache root
+            # that is itself a symlink (STORE-03) and a plain subfolder.
+            paths._assert_write_contained(self.cache_path, new_path)
         return replace(self, cache_path=new_path)
 
 
