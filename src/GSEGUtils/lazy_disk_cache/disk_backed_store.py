@@ -941,18 +941,31 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         store"*, which is true and answers about half of what a caller reading
         it is trying to find out (D-29, § WR-02b).
 
-        **The missing half is owned by Phase 15, by ID.** **STORE-04** is the
-        atomic drop-key-and-delete-files operation: refused, it leaves no
-        partial effect; completed, it leaves no artefact behind and no stale
-        finalizer able to delete a later entry created under the same key. None
-        of that is achievable by adding an ``unlink`` here. **STORE-05** is the
-        reason not to try: it requires that *where the data lives* (offload),
+        **The durable counterpart is** :meth:`purge`, **and the pair is the
+        whole answer.** ``del store[key]`` drops tracking and unlinks nothing;
+        :meth:`purge` drops tracking **and** removes every artefact whose name
+        derives from the key, and it is the only removal that sticks — it
+        sticks *because* it unlinks, since with nothing on disk there is
+        nothing for the next read or the reopen rescan to re-adopt. Reach for
+        this method when you mean *stop tracking this key in this process*, and
+        for :meth:`purge` when you mean *this key and its data are gone*.
+
+        **The re-adoption above is measured, not described**, and the
+        measurement is a standing assertion rather than a transcript:
+        ``tests/test_store_lifecycle_axes.py::test_delitem_is_undone_by_the_very_next_read``
+        pins the read-back half and
+        ``tests/test_store_lifecycle_axes.py::test_a_fresh_store_re_adopts_a_deleted_key``
+        pins the fresh-store half. If either goes red, this docstring is what
+        became wrong.
+
+        **Do not "finish" this method** by adding an ``unlink`` here. **STORE-05**
+        is the reason: it requires that *where the data lives* (offload),
         *whether the key is tracked* (this method) and *whether the file
         outlives the object* (``purge_disk_on_gc``) remain three separate axes
         and be characterization-tested. An unlink on this route would collapse
-        the first two into one and pre-empt STORE-04's atomicity work with
-        something harder to make atomic afterwards. **Do not "finish" this
-        method.**
+        the first two into one — and the operation you would be reaching for
+        already exists, one method away, with the validate-before-mutate
+        ordering and the process guard that make it safe.
 
         No key validation runs here, and that is D-11's decision rather than an
         omission: removal builds no path, so there is nothing to contain, and a

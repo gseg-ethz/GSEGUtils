@@ -424,10 +424,12 @@ def test_a_fresh_store_re_adopts_a_deleted_key(make_store: MakeStore, tmp_cache_
 # Group F — the D-12 measurement, as the guard against making the dead branch
 # live.
 #
-# `_purge_cache_pair`'s `.npy` branch (lazy_disk_cache.py:68-82) is
-# unconditionally dead: `_load_entry` passes `cache_path=str(npy_path)` but
-# `_init_from_config` re-suffixes to `.dat`, so no route in the package produces
-# a `LazyDiskCache` whose `cache_path.suffix == ".npy"`.
+# The finalizer callback — `_purge_memmap_file` since 15-04, and named
+# `_purge_cache_pair` when this group was written against the pre-change code —
+# carried a `.npy` branch that was unconditionally dead: `_load_entry` passes
+# `cache_path=str(npy_path)` but `_init_from_config` re-suffixes to `.dat`, so
+# no route in the package produces a `LazyDiskCache` whose
+# `cache_path.suffix == ".npy"`.
 #
 # Phase 14's D-14 established the branch was DEAD. D-12 established it is
 # HARMFUL, by measurement: make it live and the codec pair is unlinked the
@@ -437,6 +439,11 @@ def test_a_fresh_store_re_adopts_a_deleted_key(make_store: MakeStore, tmp_cache_
 # read by `_load_entry`) while the finalizer's legitimate job is the `.dat`
 # memmap and nothing else. The FRAG-03/W-1 intent quoted in that helper's own
 # docstring is obsolete.
+#
+# 15-04 acted on that measurement: the branch is DELETED rather than guarded
+# (D-12), and the callback renamed to `_purge_memmap_file` so its name states
+# the one file it owns. This group is the standing guard against anyone
+# restoring the branch behind a flag, a condition or a config option.
 # ---------------------------------------------------------------------------
 
 
@@ -450,8 +457,10 @@ def test_codec_pair_survives_the_entrys_collection_and_reload_still_works(
     would fire. The finalizer takes the ``.dat`` memmap, which is its job. It must take
     nothing else.
 
-    **Anyone who "completes" ``_purge_cache_pair``'s** ``.npy`` **branch ships silent
-    cache destruction at an arbitrary GC, and this is the test that will go red.**
+    **Anyone who restores the** ``.npy`` **branch 15-04 deleted from**
+    ``_purge_memmap_file`` **(named** ``_purge_cache_pair`` **when this test was
+    written) ships silent cache destruction at an arbitrary GC, and this is the
+    test that will go red.**
     Measured (Plan 15-01 mutation proof): dropping the ``if cache_path.suffix == ".npy"``
     guard so the sidecar is unlinked for a ``.dat`` path leaves ``['feat.npy']`` in the
     directory and the reload below raises ``KeyError: 'feat'`` — the exact D-12 shape.
@@ -475,7 +484,8 @@ def test_codec_pair_survives_the_entrys_collection_and_reload_still_works(
     )
     assert meta.exists(), (
         "D-12 violated: <key>.meta.json was unlinked when the entry was collected — this is exactly what "
-        "making _purge_cache_pair's .npy branch live does, and the reload below cannot survive it"
+        "restoring the .npy branch 15-04 deleted from _purge_memmap_file does, and the reload below "
+        "cannot survive it"
     )
     assert not dat.exists(), "axis 3: the finalizer's legitimate job — unlinking <key>.dat — must still happen"
     assert np.array_equal(store[key], _PAYLOAD), (

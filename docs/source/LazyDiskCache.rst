@@ -335,8 +335,22 @@ What to catch
      - A built path would resolve outside the cache directory. Subclasses
        :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, so a broad handler
        catches both.
+   * - :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError`
+     - :meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` was called from
+       a process that did not construct the store. Subclasses
+       :class:`RuntimeError` — **not**
+       :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError` — because nothing is
+       wrong with the key; the refusal is about *the caller's process*. So the
+       broad ``except RuntimeError`` that worker code already writes catches it
+       without a new handler. Raised before any mutation, so a refused purge is
+       a bit-for-bit no-op.
+   * - :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeIncompleteError`
+     - One or more of the key's artefacts could not be unlinked. Subclasses
+       :class:`OSError`, so an existing handler around a deleting operation
+       keeps working. Raised **once**, after every artefact has been attempted,
+       with the survivors named in the message. The key stays dropped.
 
-The two types are separate on purpose. A ``StoreKeyError`` is evidence about
+The two key-flavoured types are separate on purpose. A ``StoreKeyError`` is evidence about
 *the caller's key*; a ``StoreContainmentError`` is evidence about *the
 environment* — something planted a symlink in the cache directory. A per-item
 handler that skips one bad key should not silently swallow the second kind, so
@@ -393,9 +407,11 @@ been offloaded is re-adopted by the next ``store[key]``, which falls back to the
 loader for any untracked key, and again by the rescan when the store is
 reopened. Between the removal and that read, ``key not in store`` and
 ``store[key]`` both succeed. Treat this as a known limitation rather than a
-guarantee, and unlink the artefacts yourself if you need them gone; the atomic
-drop-key-and-delete-files operation is **STORE-04**, and it is not in this
-release.
+guarantee. **You no longer have to unlink the artefacts yourself:** the atomic
+drop-key-and-delete-files operation (**STORE-04**) ships as
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` — see
+:ref:`RemovingAKeyAndItsFiles` below. An earlier revision of this page said it
+was "not in this release", which was true when written and is not now.
 
 The full per-route enumeration with migration detail lives in ``BC-GSEG-006`` in
 ``MIGRATION-v1.0.md``.
@@ -503,6 +519,141 @@ time the process restarted.
    The scan covers whichever directories you point it at. Cache directories are
    often configuration-driven and may not all live where you expect, so run it
    over each root your application configures rather than over one known path.
+
+.. _RemovingAKeyAndItsFiles:
+
+Removing a key and its files
+----------------------------
+
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` is the durable
+counterpart to ``del store[key]``. Where the removal routes above drop tracking
+and leave everything on disk, ``store.purge(key)`` drops tracking **and**
+unlinks the key's artefacts — and it is the only removal that sticks, because
+with nothing on disk there is nothing for the next read or the reopen rescan to
+re-adopt.
+
+What it removes
+~~~~~~~~~~~~~~~
+
+**Every artefact whose name derives from the key** — stated as a rule rather
+than as a list, so it stays true when an artefact is added. Today that is
+``<key>.dat``, ``<key>.dat.tmp``, ``<key>.npy``, ``<key>.npy.tmp``,
+``<key>.meta.json`` and ``<key>.meta.json.tmp``. The ``.tmp`` names are in the
+set deliberately: each persists from creation until its rename, and a crash in
+between leaves one behind indefinitely, so a purge that skipped them would leak
+the very files the atomicity work creates.
+
+You can check it the way the rule is written — list the directory afterwards and
+find nothing derived from **that** key. Note the qualifier: a prefix glob such as
+``glob(f"{key}.*")`` also matches a *longer* key's artefacts, so ``feat`` and
+``feat2`` are not independent under a naive check.
+
+The legacy ``<key>.pkl`` is **not** removed. It is unreadable by design — the
+store refuses it rather than invoking the pickle reader — and it is now also
+unremovable by the only removal verb, so a pre-0.5 cache directory keeps it
+forever and a directory listing after a *complete* purge still shows the key's
+name. That is a known, deliberate residue rather than a failed purge; nothing in
+the library will read it.
+
+When it raises :class:`KeyError`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Only when the key is absent from tracking and from disk.** Untracked-but-on-disk
+counts as present and is purgeable — and that is the case you will meet most,
+because it is exactly the state ``del store[key]`` leaves behind. A stricter
+reading ("tracked only") would make the orphan case unpurgeable through the one
+verb built to purge it.
+
+An explicit purge overrides ``purge_disk_on_gc=False``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``purge_disk_on_gc`` governs *implicit, garbage-collection-time* deletion. **It
+is not a write-protect bit**, so an explicit
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` proceeds regardless of
+its value — otherwise the method would be unusable in precisely the
+configuration that accumulates the most artefacts. Every purge that exercises
+the override logs an ``INFO`` record naming the key, so the override is
+transparent rather than merely permitted.
+
+**The counterweight is named in the same breath, because it is what makes the
+override safe rather than reckless:** a purge issued from a process that did not
+construct the store **refuses**, raising
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError` before touching
+anything. So a stray purge inside a ``joblib`` / ``loky`` worker cannot delete
+the parent process's session data. The guard is on this method and nothing else:
+workers legitimately *write* — pickling a store force-offloads it — so guarding
+the write routes would break the worker path outright. Deletion is the only
+operation where "wrong process" means "destroying someone else's data".
+
+If some artefacts survive
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+POSIX gives no atomicity across several ``unlink`` calls, so **a partial
+directory state is the contract rather than a surprise**. Every artefact is
+attempted, the failures are collected, and one
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeIncompleteError` names the survivors.
+**The key stays dropped** — re-tracking it would point a live entry at a
+half-deleted artefact set and would make the method non-idempotent, so calling
+``purge`` again after fixing the cause is the supported recovery.
+
+The residue you are most likely to meet is a surviving ``<key>.dat``. The
+``.dat`` memmap is *entry*-owned while the ``.npy`` + ``.meta.json`` codec pair
+is *store*-owned, and the two are unlinked in that order — sidecars first,
+payload last. Re-adding the key afterwards yields **the new data**, not the
+stale payload: the write routes replace the ``.dat`` rather than appending to
+it.
+
+What "atomic" does and does not mean here
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Read this before building a call site around the word.
+
+**What the guarantee is.** ``purge`` is atomic with respect to
+**store-owned ordering and refusal**:
+validation precedes every mutation, a refused purge
+touches nothing at all, and the key is dropped before the first unlink, so the
+tracking state never describes a half-deleted artefact set.
+
+**What it is not — first.** It is
+**not safe against concurrent mutation of the same key**.
+:class:`~GSEGUtils.lazy_disk_cache.DiskBackedStore` holds no
+store-level lock, so a ``store[key] = entry`` or
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.add_data_to_store` racing the
+call may have its freshly-written artefact unlinked underneath it, or may slip
+one in after the existence check.
+
+**What it is not — second.** It is **not globally atomic** across threads, or
+across processes sharing a cache directory. POSIX offers nothing that would make
+it so.
+
+**The supported model, stated rather than left as a bare warning:**
+single-threaded use per store. That is the same constraint this project states
+elsewhere — a ``PointCloudData`` is not multi-thread-mutable either. If several
+processes share a cache directory, coordinate above the store.
+
+One lock *is* taken, and it should not be mistaken for a store-wide guarantee:
+the live entry's ``RLock``, held for the finalizer detach alone and never across
+the unlinks. Holding it across the unlinks would be a guarantee that exists only
+when the key happens to be tracked — the untracked-orphan case has no entry and
+therefore no lock — and a guarantee that sometimes exists is a filter, not an
+invariant.
+
+Where the ``.dat`` atomicity guarantee holds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``<key>.dat`` memmap is written through a temporary and renamed over it, so
+an interrupted conversion cannot tear a previously-valid ``.dat``. **That route
+is POSIX-only.** It is selected on ``os.name == "posix"``; off POSIX the
+conversion falls back to a direct write on the final name, which is
+**not torn-write-safe** — an interruption there can leave a partially-written
+``.dat``.
+
+The reason is platform semantics rather than an unfinished port: replacing an
+open, memory-mapped file is not permitted on Windows, so the
+temporary-and-rename sequence cannot complete there. Note also that GSEGUtils
+declares **no OS classifiers** and is tested on Linux — so this is a scoped
+guarantee stated with its scope, not an unqualified one you should read as
+holding everywhere the package installs.
 
 Modules
 -------
