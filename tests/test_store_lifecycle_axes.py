@@ -355,3 +355,130 @@ def test_offload_moves_the_payload_to_the_codec_pair_and_reload_restores_it(
 
     assert np.array_equal(store[key], arr), "STORE-05 axis 1: the lazy reload must return the array that was written"
     assert store._store[key] is not None, "STORE-05 axis 1: the lazy reload must re-populate the in-memory slot"
+
+
+# ---------------------------------------------------------------------------
+# Group E — the D-01 measurement, promoted from transcript to assertion.
+#
+# `del store[key]` is *untrack-temporarily*. `__getitem__` does
+# `self._store.get(key, None)` and falls straight through to `_load_entry`
+# (disk_backed_store.py:451) — it never asks whether the key was DELIBERATELY
+# dropped — and the `__init__` rescan globs `*.npy` and re-adopts anything with
+# a codec pair. Both routes undo the removal.
+# ---------------------------------------------------------------------------
+
+
+def test_delitem_is_undone_by_the_very_next_read(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-01 / STORE-05 / D-01: ``del store[key]`` is not durable — the next read re-adopts it.
+
+    The three assertions are in one function on purpose, in this order, so the property
+    cannot regress half-way: ``key not in store`` → ``store[key]`` **succeeds** →
+    ``key in store`` again. Between the first two, membership answers ``False`` while the
+    subscript answers with data, which is a :class:`~typing.Mapping` contract violation.
+
+    **This is recorded as a known limitation, not a designed guarantee** —
+    ``__delitem__``'s own docstring says so — and this test is here so nobody "fixes"
+    ``__delitem__`` into a purge. It is also the whole reason ``purge`` is a distinct
+    verb (D-01) rather than a flag: ``purge`` is the only removal that sticks, and it
+    sticks *because* it unlinks, leaving nothing on disk to re-adopt.
+    """
+    key = "feat"
+    store = _offloaded_store(make_store, tmp_cache_dir, (key,))
+
+    del store[key]
+
+    assert key not in store, "D-01 step 1: __delitem__ must drop tracking"
+    reloaded = store[key]
+    assert np.array_equal(reloaded, _PAYLOAD), (
+        "D-01 step 2 regressed: store[key] no longer re-adopts a deleted-but-still-on-disk key. If this is "
+        "now a KeyError, __delitem__ has been given unlink behaviour — that is forbidden (SC-4); the durable "
+        "removal is purge()"
+    )
+    assert key in store, "D-01 step 3: the read must have re-tracked the key"
+
+
+def test_a_fresh_store_re_adopts_a_deleted_key(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-01 / STORE-05 / D-01: the reopen rescan re-adopts a key that ``__delitem__`` dropped.
+
+    The second half of the D-01 transcript, and the one a downstream consumer actually
+    meets: reopening a cache directory in a later session re-adopts every key with a
+    codec pair on disk, including ones a previous session deleted from tracking.
+    """
+    key = "feat"
+    store = _offloaded_store(make_store, tmp_cache_dir, (key,))
+    del store[key]
+    assert key not in store, "precondition: the key must be untracked in the original store"
+
+    fresh = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+
+    assert key in fresh, (
+        "D-01 regressed: a freshly constructed store over the same cache directory no longer re-adopts the "
+        "key. The rescan globs *.npy; if the codec pair is gone, something unlinked it"
+    )
+    assert list(fresh.keys()) == [key], (
+        f"D-01: the rescan must track exactly the key on disk (got {list(fresh.keys())})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group F — the D-12 measurement, as the guard against making the dead branch
+# live.
+#
+# `_purge_cache_pair`'s `.npy` branch (lazy_disk_cache.py:68-82) is
+# unconditionally dead: `_load_entry` passes `cache_path=str(npy_path)` but
+# `_init_from_config` re-suffixes to `.dat`, so no route in the package produces
+# a `LazyDiskCache` whose `cache_path.suffix == ".npy"`.
+#
+# Phase 14's D-14 established the branch was DEAD. D-12 established it is
+# HARMFUL, by measurement: make it live and the codec pair is unlinked the
+# moment the entry is collected, so the first lazy reload after GC fails with
+# `KeyError`. The `.npy`/`.meta.json` pair surviving an entry's GC is therefore
+# REQUIRED, not leaked — the pair is store-owned (written by `_store_entry`,
+# read by `_load_entry`) while the finalizer's legitimate job is the `.dat`
+# memmap and nothing else. The FRAG-03/W-1 intent quoted in that helper's own
+# docstring is obsolete.
+# ---------------------------------------------------------------------------
+
+
+def test_codec_pair_survives_the_entrys_collection_and_reload_still_works(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-01 / STORE-06 / D-12: an entry's GC must leave ``<key>.npy`` + ``<key>.meta.json`` on disk.
+
+    ``purge_disk_on_gc=True`` here — the config default, and the only configuration in
+    which the finalizer runs at all, so this is the case where a live ``.npy`` branch
+    would fire. The finalizer takes the ``.dat`` memmap, which is its job. It must take
+    nothing else.
+
+    **Anyone who "completes" ``_purge_cache_pair``'s** ``.npy`` **branch ships silent
+    cache destruction at an arbitrary GC, and this is the test that will go red.**
+    Measured (Plan 15-01 mutation proof): dropping the ``if cache_path.suffix == ".npy"``
+    guard so the sidecar is unlinked for a ``.dat`` path leaves ``['feat.npy']`` in the
+    directory and the reload below raises ``KeyError: 'feat'`` — the exact D-12 shape.
+    """
+    key = "feat"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _PAYLOAD.copy())
+    entry = store._store[key]
+    assert entry is not None and entry.purge_disk_on_gc is True, (
+        "precondition: the entry must carry the default True purge intent, or the finalizer never runs"
+    )
+    store.offload(pickle_container=True)
+    npy, meta, dat = _artefact_paths(tmp_cache_dir, key)
+
+    del entry
+    gc.collect()
+
+    assert npy.exists(), (
+        "D-12 violated: <key>.npy was unlinked when the entry was collected. The codec pair is STORE-owned; "
+        "the finalizer owns the .dat memmap and nothing else — this is silent cache destruction"
+    )
+    assert meta.exists(), (
+        "D-12 violated: <key>.meta.json was unlinked when the entry was collected — this is exactly what "
+        "making _purge_cache_pair's .npy branch live does, and the reload below cannot survive it"
+    )
+    assert not dat.exists(), "axis 3: the finalizer's legitimate job — unlinking <key>.dat — must still happen"
+    assert np.array_equal(store[key], _PAYLOAD), (
+        "D-12 violated: the first lazy reload after the entry's GC failed. The codec pair surviving the "
+        "collection is REQUIRED, not leaked"
+    )
