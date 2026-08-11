@@ -59,6 +59,41 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Phase-15 purge refusals (D-07 + the D-10 aggregate)
+# ---------------------------------------------------------------------------
+
+
+class StorePurgeRefusedError(RuntimeError):
+    """Raised when :meth:`DiskBackedStore.purge` is called from a foreign process.
+
+    It deliberately does **not** join ``StoreKeyError``'s :class:`ValueError`
+    hierarchy, and the difference is the whole point of a second type: nothing
+    is wrong with the key. :class:`RuntimeError` says *you called this in the
+    wrong place*, which is exactly what happened, and the broad
+    ``except RuntimeError`` that worker code already writes still catches it
+    (D-07). Re-parenting it under a ``StoreError`` root buys taxonomic tidiness
+    at the cost of a published-type change, which Phase 14's D-12 rated one-way.
+    """
+
+
+class StorePurgeIncompleteError(OSError):
+    """Raised when some of a key's artefacts survived :meth:`DiskBackedStore.purge`.
+
+    The D-10 aggregate. POSIX gives no atomicity across N unlinks, so the
+    contract is stated rather than implied: every artefact is attempted, the
+    failures are collected, and one exception names the survivors.
+
+    :class:`OSError` rather than a bare :class:`ExceptionGroup`, deliberately.
+    A caller of a deleting operation already writes ``except OSError``; an
+    ``ExceptionGroup`` is not caught by it, so the migrating downstream's
+    existing handler would silently stop working at exactly the moment it was
+    needed. It is published for the same reason its sibling is — a name a
+    documented migration tells you to catch, but does not export, is reachable
+    only if you insist.
+    """
+
+
+# ---------------------------------------------------------------------------
 # Phase-2 codec constants (D-02 / D-03)
 # ---------------------------------------------------------------------------
 
@@ -213,6 +248,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     _enable_caching: bool
     _automatic_offloading: bool
     _purge_disk_on_gc: bool
+    #: The pid of the process that ran ``__init__`` (D-05). Read only by
+    #: :meth:`purge`; see the assignment for the four-route measurement.
+    _owner_pid: int
 
     _factory: Factory[T]
     _value_type: Optional[type[T] | tuple[type[T], ...]]
@@ -234,6 +272,34 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._cache_dir = Path(tempfile.mkdtemp())
         else:
             self._cache_dir = config.cache_path
+        # D-05 — the worker guard's whole mechanism, captured once here and
+        # compared per `purge()` call. Measured before it was chosen, on all
+        # four routes a store can travel:
+        #
+        #   pickle.loads(pickle.dumps(store))  the attribute rides
+        #                                      `__getstate__`'s `__dict__.copy()`
+        #                                      and `__setstate__`'s
+        #                                      `__dict__.update`, so a worker
+        #                                      copy sees the PARENT's pid and
+        #                                      differs from its own -> refuses
+        #   os.fork()                          no pickle at all; the child
+        #                                      inherits `__dict__` wholesale and
+        #                                      its own pid differs -> refuses
+        #   copy.copy(store) same process      same pid -> allowed, correctly
+        #   a store CONSTRUCTED in a worker    owns its own files, gets its own
+        #                                      pid here -> allowed, correctly
+        #
+        # No new pickle plumbing is needed for any of that, which is why the
+        # attribute is a plain assignment and not a `__getstate__` special case.
+        #
+        # REJECTED, and recorded so it is not re-proposed: a `__setstate__`-
+        # stamped "reconstructed copy" flag. Measured to false-positive on
+        # `copy.copy` (refusing a legitimate same-process copy, since that route
+        # also travels `__setstate__`) and to miss `fork` entirely, since no
+        # pickle is involved there. Carrying both signals is the "symmetric
+        # hooks that must stay in sync forever" shape Phase 14's D-03 removed by
+        # re-deriving rather than storing.
+        self._owner_pid = os.getpid()
         self._automatic_offloading = config.automatic_offloading and config.cache_path is not None
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
@@ -893,6 +959,207 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         key already tracked has been through a validating write route.
         """
         del self._store[key]
+
+    def purge(self, key: str) -> None:
+        """Drop ``key`` from tracking **and** unlink every artefact derived from it.
+
+        The durable counterpart to :meth:`__delitem__`, and the half that method
+        deliberately does not do. Where ``del store[key]`` is *untrack
+        temporarily* — undone by the very next read, and by any fresh store over
+        the same directory — this is the removal that sticks, and it sticks
+        *because* it unlinks: with nothing on disk there is nothing to re-adopt.
+
+        **What it removes, by rule rather than by list.** Every artefact whose
+        name derives from ``key``: ``<key>.dat``, ``<key>.dat.tmp``,
+        ``<key>.npy``, ``<key>.npy.tmp``, ``<key>.meta.json`` and
+        ``<key>.meta.json.tmp`` (D-14). The ``.tmp`` names are in the set and
+        not an oversight — each persists from creation until its rename, and a
+        crash in between leaves one indefinitely, so a purge that skipped them
+        would leak the very files the atomicity work creates. The legacy
+        ``<key>.pkl`` is **not** removed (D-09); see the *Notes*.
+
+        **The consequence, stated rather than left to be discovered.** An
+        explicit purge wins over ``purge_disk_on_gc=False`` (D-03). That flag
+        governs *implicit, GC-time* deletion; it is not a write-protect bit, and
+        reading it as one would make this method unusable in precisely the
+        configuration that accumulates the most artefacts. Every purge that
+        exercises the override logs an INFO record naming the key, so the
+        override is transparent rather than merely permitted.
+
+        **What a future reader must not "fix".** Three things:
+
+        1. The step below detaches the live entry's finalizer **directly**, and
+           must not be routed through :meth:`LazyDiskCache.disable_purge`, which
+           looks like the tidy call and is the wrong one — it also flips
+           ``_purge_disk_on_gc``, which the ``__getstate__``/``__setstate__``
+           loky dance snapshots and replays.
+        2. The key is dropped **before** the first unlink and stays dropped even
+           when an unlink fails. Re-tracking it on failure would point a live
+           entry at a half-deleted artefact set and would make this method
+           non-idempotent (D-10).
+        3. Untracked-but-on-disk counts as present. Do not tighten this to
+           "tracked only": that is exactly the state ``del store[key]`` leaves
+           behind, and exactly the state a caller most needs to clean up, so the
+           tighter reading would make the orphan case unpurgeable through the
+           one verb built to purge it (D-02).
+
+        Parameters
+        ----------
+        key : str
+            The store key to purge. Validated lexically before anything else
+            runs, and re-validated by every path builder.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01).
+            Raised before any path is built and before anything is touched.
+        StoreContainmentError
+            If a path built for ``key`` would resolve outside the cache
+            directory (STORE-02). A subclass of ``StoreKeyError``.
+        KeyError
+            If ``key`` is present neither in tracking nor on disk (D-02).
+        StorePurgeIncompleteError
+            If one or more artefacts could not be unlinked. The key is still
+            dropped, and the message names each survivor.
+
+        Notes
+        -----
+        **The atomicity boundary, stated as what it is.** "Atomic" here — in
+        STORE-04's text and in the ordering below — means *atomic with respect
+        to store-owned ordering and refusal*: validation precedes every
+        mutation, a refused purge touches nothing, and the key is dropped before
+        the first unlink so the tracking state never describes a half-deleted
+        artefact set. It does **not** mean globally atomic, and the two
+        negatives are worth saying rather than leaving to be inferred.
+        ``DiskBackedStore`` holds no store-level lock, so this method is
+        **not safe against concurrent mutation of the same key** — a
+        ``__setitem__`` or :meth:`add_data_to_store` racing this call may write
+        an artefact between the existence check and the unlink, or have its
+        freshly-written artefact unlinked underneath it. It is likewise
+        **not globally atomic** across threads, or across processes sharing a
+        cache directory, where POSIX offers nothing that would make it so.
+
+        Do not read the one lock that *is* taken as more than it is: the live
+        entry's ``RLock`` is held for the finalizer detach alone, never across
+        the unlinks. Holding it across N unlinks would be a guarantee that
+        exists only when the key happens to be tracked — the D-02 orphan case
+        has no entry and therefore no lock — and a guarantee that sometimes
+        exists is a filter, not an invariant. Single-threaded per-store use is
+        the supported model, matching the project's threading constraint that a
+        ``PointCloudData`` is not multi-thread-mutable either.
+
+        **The legacy pickle is left alone** (D-09), with a consequence recorded
+        as deferred rather than hidden: a ``<key>.pkl`` is unreadable by design
+        and now unremovable by the only removal verb, so a pre-0.5 cache
+        directory keeps it and a listing after a "complete" purge still shows
+        the key's name.
+        """
+        # 1. LEXICAL REFUSAL FIRST. Nothing below may run for a key the STORE-01
+        #    rule rejects. SC-2 requires a refused purge to be a bit-for-bit
+        #    no-op, and the only way to guarantee that is to refuse before the
+        #    first filesystem call rather than after it — the reverse order is
+        #    what once made a missing-key error irreversibly destructive
+        #    downstream.
+        paths.validate_store_key(key, self._cache_dir)
+
+        # 2. EVERY PATH THROUGH THE BUILDERS (D-14) — never string concatenation,
+        #    never `with_suffix` on another builder's result, never a glob. Each
+        #    builder re-validates the key and verifies containment, so these six
+        #    names are the only six paths this method can ever unlink, and an
+        #    escaping key has already raised by the time the tuple exists.
+        #    `get_legacy_pickle_path` is deliberately NOT built (D-09).
+        sidecars_and_tmp = (
+            paths.get_meta_path(self._cache_dir, key),
+            paths.get_meta_tmp_path(self._cache_dir, key),
+            paths.get_npy_tmp_path(self._cache_dir, key),
+            paths.get_memmap_tmp_path(self._cache_dir, key),
+        )
+        payload = (
+            paths.get_npy_path(self._cache_dir, key),
+            paths.get_memmap_path(self._cache_dir, key),
+        )
+        artefacts = (*sidecars_and_tmp, *payload)
+
+        # 3. THE WORKER GUARD (D-05/D-06/D-08). Above the existence check and
+        #    above every mutation, because a purge issued from a forked or
+        #    unpickled copy would be deleting the PARENT process's data — so the
+        #    refusal has to happen before anything is touched, not after. It
+        #    raises rather than warn-and-no-op (D-06): in a tile worker this
+        #    fails the tile, which is the correct outcome for a call that would
+        #    otherwise have destroyed data belonging to another process.
+        #    THE ORDERING SLOT IS THE POINT: the comparison lands here, above the
+        #    existence check, and moving it below the unlink loop is what the
+        #    ordering mutation proof breaks on purpose.
+
+        # 4. EXISTENCE (D-02). The key counts as present when it is tracked OR
+        #    when any of the six derived artefacts is on disk. Untracked-but-on-
+        #    disk is exactly what `del store[key]` leaves behind, so the looser
+        #    reading is the one that makes the orphan case reachable. No `bool`
+        #    return: a silent no-op on a typo'd key would also make the removal
+        #    verbs disagree with `__delitem__` and `pop` about missing keys.
+        tracked = key in self._store
+        if not tracked and not any(p.exists() for p in artefacts):
+            raise KeyError(key)
+
+        # 5. ONLY NOW MUTATE — and the finalizer goes first. Without the detach,
+        #    a stale `weakref.finalize` survives this call and deletes whatever
+        #    occupies its recorded path when the entry is eventually collected,
+        #    eating a LATER entry created under the same key (the ABA hazard).
+        #    `disable_purge()` is the wrong call here even though it performs the
+        #    same detach: it also flips `_purge_disk_on_gc`, which the
+        #    `__getstate__`/`__setstate__` loky dance snapshots and replays, so
+        #    routing through it would silently rewrite an entry's durability
+        #    intent as a side effect of deleting a different key's files. The
+        #    entry lock is taken for the detach alone, because `enable_purge` and
+        #    `disable_purge` both take it and the detach must not race them.
+        entry = self._store.get(key) if tracked else None
+        if entry is not None and hasattr(entry, "_finalizer"):
+            with entry._lock:
+                entry._finalizer.detach()
+
+        # 6. Drop the key. Before the unlinks, so the tracking state never
+        #    describes a half-deleted artefact set.
+        if tracked:
+            del self._store[key]
+
+        # D-03 transparency. The flag is never read as a permission bit; it is
+        # read here only to record that the override happened. The key is passed
+        # as a lazy `%s` argument and never f-string-interpolated (CWE-117, the
+        # same fix Phase 14's CR-01 applied to the rescan WARNING).
+        if not self._purge_disk_on_gc:
+            logger.info(
+                "Explicit purge of key %s overrides purge_disk_on_gc=False: that flag governs "
+                "implicit GC-time deletion, not explicit removal, so this key's artefacts are "
+                "being unlinked (D-03).",
+                key,
+            )
+
+        # 7. UNLINK — sidecars and `.tmp` names first, payloads last. The order
+        #    is the D-10 contract: POSIX gives no atomicity across N unlinks, so
+        #    a partial failure must leave a state the reader ALREADY treats as a
+        #    cache miss (`_load_entry` requires both halves of the codec pair)
+        #    rather than a pair whose sidecar disagrees with its array. Failures
+        #    are collected rather than aborted on, so one unreadable artefact
+        #    does not strand the other five.
+        failures: list[OSError] = []
+        survivors: list[Path] = []
+        for artefact in artefacts:
+            try:
+                artefact.unlink(missing_ok=True)
+            except OSError as exc:
+                failures.append(exc)
+                survivors.append(artefact)
+        if failures:
+            surviving = ", ".join(repr(str(p)) for p in survivors)
+            raise StorePurgeIncompleteError(
+                f"Purge of {key!r} was incomplete: {len(survivors)} of {len(artefacts)} artefacts "
+                f"could not be unlinked and survive on disk — {surviving}. The key has been "
+                "dropped from tracking and stays dropped: re-tracking it would point a live "
+                "entry at a half-deleted artefact set and would make purge non-idempotent "
+                "(D-10). Remove the listed files, or fix the permissions on the cache "
+                "directory, and call purge again — it is safe to repeat."
+            ) from failures[0]
 
     def __iter__(self) -> Iterator[str]:
         """Iterate over the keys currently tracked by the store."""

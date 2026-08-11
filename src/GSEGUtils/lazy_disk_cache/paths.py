@@ -45,6 +45,8 @@ __all__ = [
     "get_legacy_pickle_path",
     "get_npy_tmp_path",
     "get_meta_tmp_path",
+    "get_memmap_path",
+    "get_memmap_tmp_path",
 ]
 
 from collections.abc import Callable
@@ -633,9 +635,14 @@ def is_valid_store_key(key: str) -> bool:
 # hardcodes ".npy"/".meta.json" and its FRAG-03 intent has never held). The
 # constants live here so there is one vocabulary and one seam.
 #
-# BOUNDARY: moving the vocabulary is this phase's job; actually fixing the
-# ``_purge_cache_pair`` dead branch is STORE-06 and belongs to Phase 15. The
-# move is what makes that fix a one-liner rather than a refactor.
+# BOUNDARY, and the owner has now arrived. Moving the vocabulary was Phase 14's
+# job. Phase 15 discharges STORE-06 **not** by making ``_purge_cache_pair``'s
+# dead ``.npy`` branch live — measured to empty the cache directory at entry GC
+# and to make the first lazy reload fail outright (15-CONTEXT D-12) — but by
+# moving codec-pair removal ownership up to ``DiskBackedStore.purge``, at the
+# level where the pair is written. The finalizer helper is correspondingly
+# narrowed to the single memmap file it actually owns, in plan 15-04. The
+# vocabulary move is what made both of those one-liners rather than refactors.
 
 NPY_SUFFIX: Final[str] = ".npy"
 META_SUFFIX: Final[str] = ".meta.json"
@@ -1113,6 +1120,67 @@ def get_meta_tmp_path(cache_dir: Path, key: str) -> Path:
     return _build(cache_dir, key, f"{META_SUFFIX}{TMP_SUFFIX}")
 
 
+def get_memmap_path(cache_dir: Path, key: str) -> Path:
+    """Return the on-disk ``<key>.dat`` memmap path inside ``cache_dir``.
+
+    Internal construction detail with no downstream caller, and deliberately
+    absent from the package's published surface.
+
+    Parameters
+    ----------
+    cache_dir : Path
+        The configured cache directory.
+    key : str
+        The store key.
+
+    Returns
+    -------
+    Path
+        The validated, contained memmap path.
+
+    Raises
+    ------
+    StoreKeyError
+        If ``key`` is not a legal single-segment store key.
+    StoreContainmentError
+        If the path would resolve outside ``cache_dir``.
+    """
+    return _build(cache_dir, key, MEMMAP_SUFFIX)
+
+
+def get_memmap_tmp_path(cache_dir: Path, key: str) -> Path:
+    """Return the temporary ``<key>.dat.tmp`` write path inside ``cache_dir``.
+
+    Internal construction detail with no downstream caller, and deliberately
+    absent from the package's published surface.
+
+    The name exists because ``<key>.dat.tmp`` is a real artefact with a real
+    lifetime — it persists from creation until its rename, and a crash in
+    between leaves one indefinitely — so a removal verb that did not know the
+    name would leak the very file the atomicity fix creates (D-14).
+
+    Parameters
+    ----------
+    cache_dir : Path
+        The configured cache directory.
+    key : str
+        The store key.
+
+    Returns
+    -------
+    Path
+        The validated, contained temporary memmap path.
+
+    Raises
+    ------
+    StoreKeyError
+        If ``key`` is not a legal single-segment store key.
+    StoreContainmentError
+        If the path would resolve outside ``cache_dir``.
+    """
+    return _build(cache_dir, key, f"{MEMMAP_SUFFIX}{TMP_SUFFIX}")
+
+
 #: Every builder, by name. Deliberately **not** in ``__all__``: it is a
 #: test-facing seam rather than published surface. The guarded-builder contract
 #: test iterates this registry instead of hand-listing cases, so a sixth builder
@@ -1124,4 +1192,6 @@ STORE_PATH_BUILDERS: dict[str, Callable[[Path, str], Path]] = {
     "get_legacy_pickle_path": get_legacy_pickle_path,
     "get_npy_tmp_path": get_npy_tmp_path,
     "get_meta_tmp_path": get_meta_tmp_path,
+    "get_memmap_path": get_memmap_path,
+    "get_memmap_tmp_path": get_memmap_tmp_path,
 }
