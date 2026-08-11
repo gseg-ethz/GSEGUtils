@@ -22,10 +22,12 @@ Two instrument choices in this file are deliberate and should not be "simplified
 """
 
 import copy
+import errno
 import gc
 import logging
 import os
 import pickle
+import re
 import unicodedata
 from pathlib import Path
 from typing import Callable
@@ -39,7 +41,7 @@ import pytest
 # rule cannot drift into two disagreeing definitions of "illegal key".
 from test_store_key_rules import ACCEPTED_KEYS, REFUSED_KEYS
 
-from GSEGUtils.lazy_disk_cache import StoreKeyError, StorePurgeRefusedError
+from GSEGUtils.lazy_disk_cache import StoreKeyError, StorePurgeIncompleteError, StorePurgeRefusedError
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
@@ -1218,3 +1220,244 @@ def test_two_unicode_normalization_forms_are_two_distinct_keys(
         "T-15-14b violated: the NFD key no longer loads its own data after the NFC key was purged"
     )
     assert nfd in store and nfc not in store, "only the purged key may have been dropped from tracking"
+
+
+# ===========================================================================
+# D-10 — the partial-unlink contract: attempt all, collect, raise once, and the
+# key stays dropped.
+#
+# NOTHING BELOW ASSERTS AN UNCHANGED STORE OR AN UNCHANGED DIRECTORY. That is
+# the D-10/SC-2 boundary restated at the point it would be easiest to cross:
+# POSIX gives no atomicity across N unlinks, so a partial directory state is the
+# *stated contract* here, not a discovered surprise. The properties that are
+# asserted are the ones D-10 actually promises — which artefacts survived, that
+# they are named in one raised aggregate, that the aggregate is an ``OSError``,
+# that the key stays dropped, and that the order leaves a residue the reader
+# already treats as a cache miss.
+# ===========================================================================
+
+
+def _fail_unlink_for(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Monkeypatch :meth:`pathlib.Path.unlink` to fail for ``target`` and delegate otherwise.
+
+    The failure-injection template this suite already uses for the ENOSPC
+    offload tests (``test_lazy_disk_cache.py:536-600``): capture the real
+    callable first, gate the replacement on a predicate, delegate everything the
+    predicate does not select. Gating on the exact file name rather than on a
+    call count keeps the injection independent of the order under test, which
+    matters because the order is itself asserted two tests below.
+    """
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == target:
+            raise OSError(errno.EACCES, "Permission denied")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+
+def test_a_failed_npy_unlink_raises_one_named_aggregate_and_the_key_stays_dropped(
+    make_store: MakeStore, tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 15-03 / STORE-04 / D-10 / T-15-13.
+
+    Three properties in one call, each of which was a decision:
+
+    * **One aggregate, not the first exception.** Failures are collected rather
+      than aborted on, so one unreadable artefact does not strand the other five.
+    * **``StorePurgeIncompleteError`` subclasses ``OSError``**, asserted here
+      rather than trusted from the class statement. A caller of a deleting
+      operation already writes ``except OSError``; an ``ExceptionGroup`` would
+      not be caught by it, so the migrating consumer's existing handler would
+      silently stop working at the moment it was needed.
+    * **The key stays dropped.** Re-tracking on failure was rejected because the
+      re-tracked entry would point at a half-deleted artefact set, so
+      ``store[key]`` afterwards could load garbage — and it would make ``purge``
+      non-idempotent, which the idempotency test above depends on.
+
+    The surviving ``<key>.npy`` is *inert*: ``_load_entry`` requires **both** the
+    ``.npy`` and the ``.meta.json``, so nothing can re-adopt from it. That is why
+    this case and the ``.dat`` case below are two different failures rather than
+    one failure with two suffixes.
+    """
+    key = "npy_fails"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    six = _six_artefact_paths(tmp_cache_dir, key)
+    npy = six["<key>.npy"]
+    _fail_unlink_for(monkeypatch, npy)
+
+    with pytest.raises(StorePurgeIncompleteError, match=re.escape(repr(str(npy)))) as excinfo:
+        store.purge(key)
+
+    assert isinstance(excinfo.value, OSError), (
+        "StorePurgeIncompleteError must be catchable by a downstream `except OSError` — that is why it is not "
+        "an ExceptionGroup"
+    )
+    assert key not in store.keys(), "D-10 violated: the key was re-tracked after a partial unlink failure"
+    assert key not in store._store, "D-10 violated: the key survived in the backing dict after a failed unlink"
+    assert npy.exists(), "the artefact whose unlink was made to fail must still be on disk"
+    for artefact, path in six.items():
+        if artefact == "<key>.npy":
+            continue
+        assert not path.exists(), (
+            f"D-10 violated: {artefact} survived at {str(path)!r}. Failures are collected, not aborted on, so "
+            "one unreadable artefact must not strand the other five"
+        )
+
+
+def test_a_failed_dat_unlink_leaves_a_stale_payload_that_a_re_added_key_never_serves(
+    make_store: MakeStore, tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 15-03 / STORE-04 / D-10 / T-15-13b — review finding F4.
+
+    Not the ``.npy`` case with a different suffix. The residues differ in kind:
+
+    * a surviving ``<key>.npy`` is **store-owned and inert** — ``_load_entry``
+      requires both halves of the codec pair, so the store cannot re-adopt from
+      it;
+    * a surviving ``<key>.dat`` is **entry-owned and survives on its own terms**,
+      and sitting under a key nobody tracks any more it is precisely the
+      ABA-sensitive residue this phase's finalizer detach exists to keep from
+      being eaten.
+
+    So the assertion this case adds — and the reason it is worth its own test —
+    is the **re-add**: after the failed purge, a new entry under the same key
+    must read back *its own* array and never the stale bytes the surviving
+    ``.dat`` still holds.
+
+    That last assertion is deliberately written on **the array a consumer reads
+    back**, never on which ``np.memmap`` mode produced it, so it stays honest
+    across 15-05's change to the ``.dat`` write route rather than pinning an
+    implementation detail that plan rewrites.
+    """
+    key = "dat_fails"
+    original = _PAYLOAD.copy()
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    six = _six_artefact_paths(tmp_cache_dir, key)
+    dat = six["<key>.dat"]
+    assert np.array_equal(np.frombuffer(dat.read_bytes(), dtype=np.float32), original), (
+        "precondition: the surviving .dat holds the FIRST key lifetime's bytes, which is what makes it stale"
+    )
+    _fail_unlink_for(monkeypatch, dat)
+
+    with pytest.raises(StorePurgeIncompleteError, match=re.escape(repr(str(dat)))) as excinfo:
+        store.purge(key)
+
+    # (1) and (2): the aggregate names the survivor, and the key stays dropped.
+    assert isinstance(excinfo.value, OSError)
+    assert key not in store.keys(), (
+        "D-10 violated: the key was re-tracked because its entry-owned payload survived. The key stays dropped "
+        "even then — this is the half a reader is most likely to expect the opposite of"
+    )
+    assert key not in store._store, "D-10 violated: the key survived in the backing dict"
+    # (3) everything whose unlink did not fail is gone; the payload is not.
+    assert dat.exists(), "the .dat whose unlink was made to fail must still be on disk"
+    for artefact, path in six.items():
+        if artefact == "<key>.dat":
+            continue
+        assert not path.exists(), f"D-10 violated: {artefact} survived at {str(path)!r}"
+
+    # (4) the point of covering this case separately: re-adding the same key.
+    monkeypatch.undo()
+    replacement = original + 50.0
+    store.add_data_to_store(key, replacement)
+
+    assert np.array_equal(np.asarray(store[key]), replacement), (
+        "T-15-13b violated: a key re-added over a stale entry-owned .dat did not read back its own array"
+    )
+    assert not np.array_equal(np.asarray(store[key]), original), (
+        "T-15-13b violated: the re-added key served the bytes the FAILED purge left behind. A surviving .dat "
+        "under an untracked key must never become a later entry's data"
+    )
+
+    # Nothing from the first key's lifetime resurrects once the new entry is
+    # collected and the directory is reopened by a fresh store.
+    store.offload(pickle_container=True)
+    del store[key]
+    gc.collect()
+    reopened = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+
+    assert np.array_equal(np.asarray(reopened[key]), replacement), (
+        "T-15-13b violated: a fresh store over the same directory re-adopted the key and read back something "
+        "other than the replacement array"
+    )
+
+
+def test_the_unlink_order_puts_every_sidecar_and_tmp_name_before_both_payloads(
+    make_store: MakeStore, tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 15-03 / STORE-04 / D-10 / T-15-13 — the order, recorded rather than assumed.
+
+    Why the order is the contract and not a preference. Unlinking ``<key>.npy``
+    first and then failing on ``<key>.meta.json`` leaves a sidecar with no array:
+    the reopen rescan globs ``*.npy`` and so will not rediscover the key, and
+    ``_load_entry`` requires both halves and so refuses it — a file that is
+    neither reachable nor collectable. The reverse order leaves *at most* a
+    payload without its sidecar, which is a state the reader **already** treats
+    as a cache miss. Since POSIX offers no atomicity across N unlinks, choosing
+    which partial state is possible is the only control available.
+
+    Asserted by **relative position**, not by equality against a six-element
+    list, so adding a seventh artefact to the set does not falsify a test that
+    is about ordering.
+    """
+    key = "ordered"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    six = _six_artefact_paths(tmp_cache_dir, key)
+    recorded: list[str] = []
+    real_unlink = Path.unlink
+
+    def recording_unlink(self: Path, missing_ok: bool = False) -> None:
+        recorded.append(self.name)
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", recording_unlink)
+    recorded.clear()
+
+    store.purge(key)
+
+    monkeypatch.undo()
+    for artefact, path in six.items():
+        assert path.name in recorded, (
+            f"purge did not attempt to unlink {artefact}; missing_ok=True means every one of the six is "
+            f"attempted whether or not it is on disk. Recorded: {recorded}"
+        )
+    position = {artefact: recorded.index(path.name) for artefact, path in six.items()}
+    for sidecar in ("<key>.meta.json", "<key>.meta.json.tmp", "<key>.npy.tmp", "<key>.dat.tmp"):
+        for payload in ("<key>.npy", "<key>.dat"):
+            assert position[sidecar] < position[payload], (
+                f"D-10 violated: {sidecar} was unlinked after {payload} (positions {position[sidecar]} and "
+                f"{position[payload]} in {recorded}). Sidecars and .tmp names go first so a partial failure "
+                "leaves a state the reader already treats as a cache miss"
+            )
+
+
+def test_purging_a_tracked_key_with_no_artefacts_on_disk_raises_nothing(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-03 / STORE-04 / D-10 — ``missing_ok=True`` pinned end to end.
+
+    A bare ``path.unlink()`` raises ``FileNotFoundError`` — itself an
+    ``OSError`` — for every artefact that is not there, which for a tracked key
+    that was never written to disk is *all six*. The purge would then collect six
+    failures and raise ``StorePurgeIncompleteError`` for a key that is, in every
+    sense the caller cares about, gone. This is the test that pins the flag
+    rather than the comment that claims it.
+
+    ``enable_caching=False`` is how the zero-artefact state is reached: with
+    caching on, ``add_data_to_store`` materialises the ``.dat`` memmap eagerly,
+    so even an un-offloaded key owns one file.
+    """
+    key = "nofiles"
+    store = make_store(tmp_cache_dir, enable_caching=False, purge_disk_on_gc=False)
+    store.add_data_to_store(key, _PAYLOAD.copy())
+    assert key in store, "precondition: the key is tracked"
+    assert sorted(path.name for path in tmp_cache_dir.iterdir()) == [], (
+        "precondition: enable_caching=False writes no artefact, so the key owns nothing on disk"
+    )
+
+    store.purge(key)
+
+    assert key not in store, "a purge of a tracked, artefact-less key must still drop the key"
+    assert sorted(path.name for path in tmp_cache_dir.iterdir()) == [], "and must not have created anything"
