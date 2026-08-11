@@ -328,21 +328,24 @@ def test_loaded_entry_has_cache_path_populated(tmp_cache_dir: Path) -> None:
 # codec pair is produced by :meth:`DiskBackedStore._store_entry`, not by
 # :meth:`LazyDiskCache.offload`. The finalizer registered in
 # :meth:`LazyDiskCache._init_from_config` therefore targets the ``.dat`` file
-# in the canonical path; the ``_purge_memmap_file`` helper's ``.meta.json``
-# branch is defensive belt-and-suspenders code that fires only when an
-# integrator hands a ``.npy``-suffixed path through to ``LazyDiskCache``
-# directly (and bypasses the ``_MEMMAP_SUFFIX`` re-suffix).
+# in the canonical path. The ``_purge_memmap_file`` helper unlinks that one
+# file and nothing else: the codec pair is store-owned, and its removal belongs
+# to ``DiskBackedStore.purge`` (plan 15-04, STORE-06 / D-12).
 #
-# We therefore split the W-1 coverage:
+# The ``.meta.json`` branch this comment used to describe as "defensive
+# belt-and-suspenders code" is **deleted**. It was not defensive: measured, a
+# live branch empties the cache directory at an arbitrary entry GC and the next
+# lazy reload fails with ``KeyError``. It was also unreachable, because
+# ``_init_from_config`` re-suffixes every configured path to ``.dat``.
+#
+# We therefore split the coverage:
 #   * ``test_finalizer_re_registered_on_unpickle`` / ``test_purge_disk_on_gc_false_preserves_file_after_unpickle``
 #     exercise the actual pickle round-trip on a directly-constructed
 #     :class:`DiskBackedNDArray` (the FRAG-03 happy/sad path) and assert on
 #     the ``.dat`` memmap file unlink semantics.
-#   * ``test_finalizer_unlinks_both_npy_and_meta_after_unpickle`` exercises
-#     the helper's ``.npy + .meta.json`` branch directly + via an in-memory
-#     finalizer whose ``cache_path`` is constructed with a ``.npy`` suffix
-#     (bypassing the constructor's re-suffix by setting ``_cache_path``
-#     after construction).
+#   * ``test_finalizer_unlinks_the_memmap_and_leaves_the_codec_pair`` asserts
+#     the deletion, from both sides: directly on the helper, and through a real
+#     store-backed entry whose codec pair must outlive its collection.
 
 
 def test_finalizer_re_registered_on_unpickle(tmp_path: Path) -> None:
@@ -442,29 +445,74 @@ def test_purge_disk_on_gc_false_preserves_file_after_unpickle(tmp_path: Path) ->
     assert dat_path.exists(), "purge_disk_on_gc=False regressed: cache file was unlinked despite the False intent"
 
 
-def test_finalizer_unlinks_both_npy_and_meta_after_unpickle(tmp_path: Path) -> None:
-    """Plan 02-04 / W-1: ``_purge_memmap_file`` unlinks BOTH ``<key>.npy`` and ``<key>.meta.json``.
+def test_purge_memmap_file_on_a_dat_path_leaves_every_sibling_alone(tmp_path: Path) -> None:
+    """Plan 15-04 / STORE-06 / D-12: the canonical ``.dat`` call is unchanged by the branch deletion.
 
-    Two checks:
+    The deleted ``.npy`` branch was the only conditional in the helper, so the
+    risk of removing it is that the *surviving* path changed with it. This is
+    the direct proof that it did not: the canonical case — the only one
+    ``_init_from_config`` can produce — still unlinks exactly the ``.dat`` it
+    was handed, with a full codec pair sitting beside it untouched.
 
-    1.  Direct unit test of the helper: plant a ``.npy + .meta.json`` pair on
-        disk, call ``_purge_memmap_file`` with the ``.npy`` path, assert both
-        files are gone.
-    2.  Indirect test via a :class:`DiskBackedNDArray` instance whose
-        ``_cache_path`` is post-construction overridden to a ``.npy``-suffixed
-        path (bypassing ``_init_from_config``'s ``_MEMMAP_SUFFIX`` re-suffix).
-        Construction-time finalizer registration is then re-applied via
-        ``enable_purge()``; GC of the instance must unlink both files via the
-        helper's ``.npy`` branch.
-
-    Why two checks: the canonical ``LazyDiskCache`` constructor always
-    re-suffixes ``cache_path`` to ``.dat``, so the ``.meta.json`` branch of
-    ``_purge_memmap_file`` is dead code on the happy path. The helper exists
-    to harden future integrations (or any code path that hands a ``.npy``
-    path directly to ``weakref.finalize`` via ``enable_purge``). This test
-    locks in the behaviour without depending on a future caller materialising.
+    Kept separate from the pair-survival check below because it defends a
+    different claim: that one is about what the deletion removed, this one is
+    about what it left behind.
     """
-    # --- check 1: direct helper unit test ------------------------------------
+    dat_path = tmp_path / "kw0.dat"
+    npy_path = tmp_path / "kw0.npy"
+    meta_path = tmp_path / "kw0.meta.json"
+    dat_path.write_bytes(b"unused")
+    npy_path.write_bytes(b"unused")
+    meta_path.write_text("{}", encoding="utf-8")
+
+    _purge_memmap_file(dat_path)
+
+    assert not dat_path.exists(), "STORE-06 regressed: the canonical .dat unlink stopped happening"
+    assert npy_path.exists(), (
+        "D-12 violated: <key>.npy was unlinked by a .dat call. The codec pair is store-owned and is removed by "
+        "DiskBackedStore.purge, never by an entry's finalizer"
+    )
+    assert meta_path.exists(), (
+        "D-12 violated: <key>.meta.json was unlinked by a .dat call — this is precisely the shape that empties "
+        "the cache directory at an arbitrary GC and makes the next lazy reload raise KeyError"
+    )
+
+
+def test_finalizer_unlinks_the_memmap_and_leaves_the_codec_pair(
+    tmp_path: Path,
+    tmp_cache_dir: Path,
+) -> None:
+    """Plan 15-04 / STORE-06 / D-12: ``_purge_memmap_file`` takes one file and leaves the codec pair.
+
+    **This test asserts the inverse of what it asserted before plan 15-04, and
+    the inversion is the point.** Its predecessor,
+    ``test_finalizer_unlinks_both_npy_and_meta_after_unpickle``, required the
+    helper to unlink a paired ``<key>.meta.json`` sidecar alongside a
+    ``<key>.npy`` path — the Phase-2 ``FRAG-03 / W-1`` intent, taken from the
+    helper's own docstring. That intent was never reached (``_init_from_config``
+    re-suffixes every configured path to ``.dat``) and honouring it would be a
+    bug, not a fix: measured, a live sidecar branch empties the cache directory
+    at an arbitrary entry GC and the first lazy reload afterwards fails with
+    ``KeyError`` (15-CONTEXT D-12). The branch is deleted; the two checks below
+    are what go red if anyone restores it.
+
+    Two checks, kept from the predecessor because both still carry information:
+
+    1.  Direct unit check on the helper — plant a ``.npy + .meta.json`` pair,
+        call the helper with the ``.npy`` path, and assert the sidecar
+        **survives**. Then call it again on the same path: a finalizer callback
+        must tolerate a path that is already gone.
+    2.  Indirect check through a real store-backed entry — offload so a genuine
+        codec pair exists on disk, collect the entry, and assert the finalizer
+        took the ``.dat`` memmap it owns and neither of the two files the store
+        owns.
+
+    The predecessor's post-construction ``_cache_path`` override is gone with
+    it: the path setter is sealed as of Phase 14 D-01, and the scenario it
+    simulated — a live entry whose cache path carries a ``.npy`` suffix — is one
+    no route in the package produces.
+    """
+    # --- check 1: direct unit check on the helper ----------------------------
     npy_path = tmp_path / "kw1.npy"
     meta_path = npy_path.with_suffix(".meta.json")
     npy_path.write_bytes(b"unused")
@@ -472,35 +520,48 @@ def test_finalizer_unlinks_both_npy_and_meta_after_unpickle(tmp_path: Path) -> N
     assert npy_path.exists()
     assert meta_path.exists()
     _purge_memmap_file(npy_path)
-    assert not npy_path.exists(), "W-1 regressed: .npy not unlinked by _purge_memmap_file"
-    assert not meta_path.exists(), "W-1 regressed: .meta.json sidecar not unlinked by _purge_memmap_file"
+    assert not npy_path.exists(), "STORE-06 regressed: _purge_memmap_file did not unlink the path it was given"
+    assert meta_path.exists(), (
+        "D-12 violated: _purge_memmap_file unlinked a .meta.json sidecar. The codec pair is store-owned and is "
+        "removed by DiskBackedStore.purge; the deleted .npy branch must not be restored"
+    )
 
-    # The helper is also idempotent / safe on a missing pair.
+    # A finalizer callback runs at an arbitrary GC — it must tolerate a path
+    # that is already gone rather than raise into the collector.
     _purge_memmap_file(npy_path)  # MUST NOT raise
 
-    # --- check 2: indirect via DiskBackedNDArray with overridden _cache_path -
-    arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
-    obj = DiskBackedNDArray(
-        arr,
-        enable_caching=False,
-        cache_path=tmp_path / "kw2",
-        purge_disk_on_gc=False,  # we'll override below
+    # --- check 2: indirect, through a real store-backed entry ----------------
+    expected = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+    store = _make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("kw2", expected.copy())
+    entry = store._store["kw2"]
+    assert entry is not None and entry.purge_disk_on_gc is True, (
+        "precondition: the entry must carry a True purge intent, or no finalizer is registered and this "
+        "check cannot see the behaviour it defends"
     )
-    # Override _cache_path to a .npy-suffixed path post-construction, then
-    # plant matching files and re-register the finalizer via enable_purge().
-    npy2 = tmp_path / "kw2.npy"
-    meta2 = npy2.with_suffix(".meta.json")
-    npy2.write_bytes(b"unused")
-    meta2.write_text("{}", encoding="utf-8")
-    obj._cache_path = npy2
-    obj.enable_purge()
-    assert hasattr(obj, "_finalizer") and obj._finalizer.alive
+    store.offload(pickle_container=True)
 
-    del obj
+    npy2 = tmp_cache_dir / "kw2.npy"
+    meta2 = tmp_cache_dir / "kw2.meta.json"
+    dat2 = tmp_cache_dir / "kw2.dat"
+    assert npy2.exists() and meta2.exists(), "precondition: the offload must have written a real codec pair"
+
+    del entry
     gc.collect()
-    # W-1 success: both files unlinked through the .npy branch of the helper.
-    assert not npy2.exists(), "W-1 regressed: .npy persisted after GC of instance with .npy cache_path"
-    assert not meta2.exists(), "W-1 regressed: .meta.json sidecar persisted after GC"
+
+    assert not dat2.exists(), "STORE-06 regressed: the finalizer's legitimate job — unlinking <key>.dat — did not run"
+    assert npy2.exists(), (
+        "D-12 violated: <key>.npy was unlinked when the entry was collected. The codec pair is store-owned; "
+        "an entry's finalizer owns the .dat memmap and nothing else"
+    )
+    assert meta2.exists(), (
+        "D-12 violated: <key>.meta.json was unlinked when the entry was collected — the measured consequence is "
+        "an emptied cache directory and a KeyError on the next lazy reload"
+    )
+    assert np.array_equal(store["kw2"], expected), (
+        "D-12 violated: the first lazy reload after the entry's GC failed. The codec pair surviving the "
+        "collection is REQUIRED, not leaked"
+    )
 
 
 # ---------------------------------------------------------------------------
