@@ -569,6 +569,52 @@ def test_a_symlink_planted_at_the_temporary_name_is_refused_and_its_target_untou
     assert sentinel.stat().st_size == len(sentinel_bytes), "the sentinel was truncated despite the refusal"
 
 
+def test_a_symlink_at_the_final_name_resolving_outside_is_refused_and_its_target_untouched(
+    tmp_cache_dir: Path, tmp_path: Path
+) -> None:
+    """Plan 15-05 / STORE-02 / D-31 — the outward escape at the **final** name.
+
+    The negative half of the pair this module was missing. The two neighbouring
+    tests each cover a different quadrant and neither covers this one: the
+    ``T-15-18`` test above plants its link at the **temporary** name, and the
+    adopted-entry test below points its link at a payload **inside** the cache
+    directory. This is a link at the *final* name resolving *outward* — the case
+    that must be refused.
+
+    ``test_lazy_disk_cache.py`` carries a Phase-14 sibling of this test, and the
+    duplication is deliberate rather than an oversight. That one was written
+    against the pre-15-05 route and pins the ``w+``/``r+`` opens that no longer
+    exist. What is asserted here and cannot be asserted there is the third
+    assertion below: the refusal happens **before the temporary is created**, so
+    the guard sits ahead of the platform branch rather than inside the atomic
+    route. A future edit that moved the containment check into the POSIX branch
+    would still pass the Phase-14 test and fail this one.
+
+    Not POSIX-marked: refusing an outward escape is a property of every
+    platform, and marking it would hide a real regression off POSIX.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "victim.bin"
+    sentinel_bytes = b"do-not-overwrite-me" * 8
+    sentinel.write_bytes(sentinel_bytes)
+    (tmp_cache_dir / "k.dat").symlink_to(sentinel)
+
+    entry = _make_entry(tmp_cache_dir, np.arange(64, dtype=np.float32))
+    with pytest.raises(StoreContainmentError):
+        entry._convert_to_memmap()
+
+    assert sentinel.read_bytes() == sentinel_bytes, (
+        "STORE-02 regressed: the sentinel outside the cache directory was modified through a "
+        "symlink planted at the <key>.dat name. A truncating write escaped the cache directory"
+    )
+    assert sentinel.stat().st_size == len(sentinel_bytes), "the sentinel was truncated despite the refusal"
+    assert _temporaries_in(tmp_cache_dir) == [], (
+        "the refusal came too late: a <key>.dat.tmp was created before the final name was "
+        "containment-checked. The guard belongs ahead of the platform branch, not inside it"
+    )
+
+
 def test_an_adopted_entry_symlink_still_receives_the_data_through_the_atomic_route(
     tmp_cache_dir: Path,
 ) -> None:
