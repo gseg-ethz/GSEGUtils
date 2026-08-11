@@ -26,6 +26,7 @@ import gc
 import logging
 import os
 import pickle
+import unicodedata
 from pathlib import Path
 from typing import Callable
 
@@ -36,7 +37,7 @@ import pytest
 # ``sys.path``, so a sibling test module is importable by its plain name. The
 # refusal matrix is imported rather than restated so this file and Phase 14's
 # rule cannot drift into two disagreeing definitions of "illegal key".
-from test_store_key_rules import REFUSED_KEYS
+from test_store_key_rules import ACCEPTED_KEYS, REFUSED_KEYS
 
 from GSEGUtils.lazy_disk_cache import StoreKeyError, StorePurgeRefusedError
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
@@ -791,3 +792,429 @@ def test_purge_validates_before_it_mutates(
     assert sorted(store.keys()) == tracked_before, (
         "SC-2 violated: purge dropped the key from tracking before its validation raised"
     )
+
+
+# ---------------------------------------------------------------------------
+# SC-3 — the ABA hazard, forced with an explicit collection.
+# ---------------------------------------------------------------------------
+
+
+def test_the_aba_hazard_cannot_fire_under_a_forced_collection(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-03 / STORE-04 / SC-3 / T-15-12.
+
+    A ``weakref.finalize`` deletes whatever occupies **its recorded path at
+    collection time**, not the object it was registered for. Purge a key and
+    re-add it and the recorded path now names a *different* entry's file, so a
+    surviving finalizer from the first lifetime is a delayed deletion of the
+    second entry's data — attributable to nothing in the caller's code and
+    arriving at whichever arbitrary GC happens to collect the original. The
+    detach in ``purge`` is the whole of what prevents it.
+
+    Two things make this test different from
+    ``test_a_purged_keys_stale_finalizer_cannot_eat_a_later_entry_under_the_same_key``,
+    which 15-02 wrote, rather than a restatement of it:
+
+    * the replacement carries a **different array**, so the readback assertion
+      distinguishes "the new entry's data" from "the old entry's data", which an
+      equal-payload version cannot;
+    * both finalizers are asserted on directly — the original's dead, the
+      replacement's alive — which pins that the detach was scoped to the purged
+      entry rather than applied to the key's registration generally.
+
+    The collection is forced with an explicit ``del`` plus ``gc.collect()``, the
+    idiom this suite uses throughout (``test_lazy_disk_cache.py:380-505``), never
+    a scope exit: CPython's refcount would usually collect at the ``del`` anyway,
+    but "usually" is not an assertion and a reference cycle would defer it.
+
+    **The replacement is deliberately not offloaded**, and the reason is measured
+    rather than assumed: under ``purge_disk_on_gc=True``,
+    ``offload(pickle_container=True)`` collects the entry during the offload and
+    its own live finalizer takes the ``.dat`` right there — leaving
+    ``['<key>.meta.json', '<key>.npy']`` and nothing for a stale finalizer to
+    eat. ``add_data_to_store`` materialises the ``.dat`` eagerly, so the file
+    this test needs on disk is already there without the offload.
+    """
+    key = "aba_forced"
+    replacement = _PAYLOAD.copy() + 100.0
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _PAYLOAD.copy())
+    original_entry = store[key]
+    original_finalizer = original_entry._finalizer
+    assert original_finalizer.alive, "precondition: a purge_disk_on_gc=True entry registers a finalizer"
+
+    store.purge(key)
+    store.add_data_to_store(key, replacement)
+    replacement_entry = store[key]
+    dat = paths_mod.get_memmap_path(tmp_cache_dir, key)
+    assert dat.exists(), "precondition: re-adding the key allocates a fresh <key>.dat"
+    assert original_entry is not replacement_entry, "precondition: the re-add produced a genuinely new entry"
+    # Recorded, not asserted, *here*: the file assertion below is the headline
+    # property and must be the one that fires first when the detach is removed.
+    # Captured before the collection because a stale finalizer that has already
+    # fired also reports ``alive is False`` — after the collection the flag no
+    # longer distinguishes "detached" from "fired and ate the file".
+    detached_before_collection = not original_finalizer.alive
+
+    del original_entry
+    gc.collect()
+
+    assert dat.exists(), (
+        "SC-3 violated (ABA): forcing collection of the purged entry deleted the LATER entry's <key>.dat. "
+        "purge must detach the stale finalizer before unlinking, because the finalizer deletes whatever "
+        "occupies its recorded path at collection time"
+    )
+    assert np.array_equal(np.asarray(store[key]), replacement), (
+        "SC-3 violated: after collecting the purged entry the key no longer reads back the replacement array"
+    )
+    assert detached_before_collection, (
+        "purge left the purged entry's finalizer live. The file survived this run only because the collection "
+        "happened to be harmless; the hazard is still armed"
+    )
+    assert replacement_entry._finalizer.alive, (
+        "the detach must be scoped to the purged entry: the replacement registered under the same key still "
+        "needs its own live finalizer, or the key's artefacts would leak forever after any purge"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STORE-04 / idempotency probe — the second call changes nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_purging_the_same_key_twice_changes_nothing_the_second_time(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-03 / STORE-04 — the idempotency probe, answered rather than assumed.
+
+    **The answer:** ``purge`` is idempotent *in effect* — the second call changes
+    nothing — and it signals the already-gone state with ``KeyError`` rather than
+    a ``bool`` return. Two reasons, both of which are decisions rather than
+    accidents. A ``-> bool`` would make a typo'd key a silent no-op, which is the
+    failure mode a destructive verb can least afford; and it would put the
+    removal verbs out of step with ``__delitem__`` and ``pop``, which raise on a
+    missing key, so a reader could no longer carry one mental model across the
+    three.
+
+    The property is only true *because* D-10 rejected re-tracking the key on
+    failure: a purge that put the key back would leave the second call with
+    something to do, and the two calls would differ.
+    """
+    key = "twice"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+
+    store.purge(key)
+    after_first = _snapshot(tmp_cache_dir)
+
+    with pytest.raises(KeyError):
+        store.purge(key)
+
+    assert _snapshot(tmp_cache_dir) == after_first, (
+        "idempotency violated: the second purge of an already-purged key changed the cache directory"
+    )
+
+    with pytest.raises(KeyError):
+        store.purge("never_inserted_at_all")
+
+    assert _snapshot(tmp_cache_dir) == after_first, (
+        "purging a key that was never inserted and is not on disk must change nothing"
+    )
+    assert list(store.keys()) == [], "neither failed call may have re-tracked anything"
+
+
+# ---------------------------------------------------------------------------
+# D-02 — the orphan case, stated against what a reopen would have done.
+# ---------------------------------------------------------------------------
+
+
+def test_purge_reaches_an_orphan_a_fresh_store_would_have_re_adopted(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-03 / STORE-04 / D-02.
+
+    ``del store[key]`` untracks *temporarily*: the reopen rescan globs ``*.npy``
+    and re-adopts anything with a codec pair, so the key comes back on the next
+    fresh store over the same directory. That is what makes the state an
+    **orphan** rather than a deletion, and it is measured here on both sides of
+    the purge rather than described — a fresh store sees the key before, and does
+    not after.
+
+    A "tracked only" reading of ``purge`` would make exactly this state
+    unpurgeable through the one verb built to purge it, which is why D-02 takes
+    the looser reading of "present".
+    """
+    key = "orphan_readopt"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    del store[key]
+    assert key not in store, "precondition: __delitem__ drops tracking"
+    assert key in make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False), (
+        "precondition: the artefacts are still on disk, so a fresh store re-adopts the key — that is the "
+        "orphan state D-02 is about"
+    )
+
+    store.purge(key)
+
+    _assert_all_six_gone(tmp_cache_dir, key)
+    assert key not in make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False), (
+        "D-02 violated: a fresh store still re-adopts the key, so the orphan's artefacts were not removed"
+    )
+    assert sorted(p.name for p in tmp_cache_dir.iterdir()) == [], (
+        "the cache directory must be empty after purging its only (orphaned) key"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D-03 — the override record, and the shape it is logged in.
+# ---------------------------------------------------------------------------
+
+
+def test_the_override_record_passes_the_key_as_a_lazy_logging_argument(
+    make_store: MakeStore, tmp_cache_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Plan 15-03 / STORE-04 / D-03 / CWE-117.
+
+    ``purge_disk_on_gc=False`` is iof3D's configured mode, so this is the
+    configuration the primitive is actually used in, and the one that accumulates
+    the most artefacts. The override is permitted (the flag governs *implicit,
+    GC-time* deletion, not write protection) **and** recorded, which is what keeps
+    a destructive override of a configured durability intent from being silent.
+
+    What this test adds over 15-02's message assertion is the *shape*: the key
+    must arrive as a lazy ``%s`` **argument** and must not appear in the format
+    string. An f-string-interpolated key would render identically in ``caplog``
+    and would carry a caller-controlled string straight into the log record's
+    template — the CWE-117 log-injection shape Phase 14's CR-01 fixed on the
+    rescan warning. Only asserting on ``record.args`` versus ``record.msg`` can
+    tell the two apart.
+    """
+    key = "durable_args"
+    store = _offloaded_store(make_store, tmp_cache_dir, key, purge_disk_on_gc=False)
+
+    with caplog.at_level(logging.INFO, logger=_STORE_LOGGER):
+        store.purge(key)
+
+    _assert_all_six_gone(tmp_cache_dir, key)
+    override_records = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO and record.args is not None and key in tuple(record.args)  # type: ignore[arg-type]
+    ]
+    assert override_records, (
+        "D-03 transparency violated: no INFO record carried the key as a logging argument. "
+        f"Records seen: {[(r.msg, r.args) for r in caplog.records]}"
+    )
+    assert all(key not in str(record.msg) for record in override_records), (
+        "CWE-117: the key was interpolated into the log record's format string instead of being passed as a "
+        "lazy %s argument, so a caller-controlled string is now part of the template"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D-09 — the legacy pickle survives, and stays unreachable.
+# ---------------------------------------------------------------------------
+
+
+def test_the_surviving_legacy_pickle_is_not_re_adopted_by_a_fresh_store(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-03 / STORE-04 / D-09 — the deferred consequence, made concrete.
+
+    D-09 keeps ``<key>.pkl`` out of the six derived paths, and 15-02 pinned that
+    it survives. The half worth adding is what that survival *means* for a
+    reader: a ``.pkl`` is unreadable by design (``_load_entry`` treats a legacy
+    pickle without a codec pair as a cache miss and says so at INFO), so after a
+    "complete" purge the directory still shows the key's name while no store can
+    reach it. Permanently unreachable garbage in pre-0.5 cache directories —
+    recorded as deferred rather than hidden, and asserted here so the deferral is
+    a measured state rather than a claim.
+    """
+    key = "legacy_unreachable"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    pkl = paths_mod.get_legacy_pickle_path(tmp_cache_dir, key)
+    pkl.write_bytes(b"pre-0.5 pickle")
+
+    store.purge(key)
+
+    _assert_all_six_gone(tmp_cache_dir, key)
+    assert pkl.exists() and pkl.read_bytes() == b"pre-0.5 pickle", "D-09 violated: purge touched the legacy pickle"
+
+    reopened = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+
+    assert key not in reopened, "the surviving .pkl must not make the key re-adoptable"
+    with pytest.raises(KeyError):
+        _ = reopened[key]
+
+
+# ---------------------------------------------------------------------------
+# SC-4 — the removal verbs stay in-memory-only.
+# ---------------------------------------------------------------------------
+
+
+def test_clear_pop_and_del_never_reach_purge(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-03 / STORE-04 / SC-4.
+
+    Asserted from the *purge* side, complementing 15-01's axis tests: the three
+    ``MutableMapping`` removal routes untrack and nothing more. If any of them
+    ever grew a call to ``purge``, the byte snapshot would change and this test
+    would say which route did it.
+
+    The distinction is the phase's whole reason for existing. ``del`` / ``pop`` /
+    ``clear`` are *untrack temporarily* — undone by the next reopen rescan —
+    while ``purge`` is the removal that sticks. Collapsing the two would make
+    every ``del store[key]`` in existing downstream code silently destructive.
+    """
+    keys = ("by_del", "by_pop", "by_clear")
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    for index, key in enumerate(keys):
+        store.add_data_to_store(key, _PAYLOAD.copy() + index)
+    store.offload(pickle_container=True)
+    before = _snapshot(tmp_cache_dir)
+    assert len(before) == 9, f"precondition: three offloaded keys own three artefacts each, saw {sorted(before)}"
+
+    del store[keys[0]]
+    _ = store.pop(keys[1])
+    store.clear()
+
+    assert list(store.keys()) == [], "precondition: all three routes untracked their keys"
+    assert _snapshot(tmp_cache_dir) == before, (
+        "SC-4 violated: one of __delitem__, pop or clear unlinked an artefact. The removal verbs are "
+        "in-memory-only; purge is the only route that touches disk"
+    )
+    reopened = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    assert sorted(reopened.keys()) == sorted(keys), (
+        "SC-4 violated: the untracked keys were not re-adopted by a fresh store, so something removed their "
+        "codec pairs after all"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T-15-14 — prefix adjacency, asserted over exact names only (review finding F6).
+# ---------------------------------------------------------------------------
+
+
+def test_purging_foo_leaves_every_exact_artefact_of_foo_bar(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-03 / STORE-08 adjacency probe / T-15-14 / review finding F6.
+
+    Two keys whose derived names share a prefix must neither merge nor collide.
+    ``purge`` unlinks six enumerated builder-produced paths and never globs, so
+    the property should hold — and the point of the test is that the *assertion*
+    must be able to detect it if it stopped.
+
+    **Why every assertion here is over exact names and not over a prefix.**
+    ``"foo."`` is a prefix of ``"foo.bar.npy"``. A check of the form "no name
+    beginning ``foo.`` remains" is therefore not a weaker version of the right
+    assertion, it is a *different and false* one: it fires on every one of
+    ``foo.bar``'s artefacts, which must all survive. Filtering the family back
+    out restores a hand-written exclusion list that can itself be wrong, at which
+    point it is a worse spelling of the exact-name checks. The instrument is
+    withdrawn phase-wide.
+
+    SC-1's whole-directory listing check reads as "nothing derived from *this*
+    key", and a listing *equality* is a valid instrument only in a directory
+    known to hold one key — which is why 15-02's headline test may use the
+    equality form and why this one uses it against ``foo.bar``'s exact expected
+    names rather than against the empty list.
+    """
+    survivor_payload = _PAYLOAD.copy() + 7.0
+    assert "foo.bar" in ACCEPTED_KEYS, "precondition: 'foo.bar' is a legal store key under the Phase-14 rule"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store("foo", _PAYLOAD.copy())
+    store.add_data_to_store("foo.bar", survivor_payload)
+    store.offload(pickle_container=True)
+
+    foo_six = _six_artefact_paths(tmp_cache_dir, "foo")
+    bar_six = _six_artefact_paths(tmp_cache_dir, "foo.bar")
+    bar_present = {artefact: path for artefact, path in bar_six.items() if path.exists()}
+    assert set(bar_present) == {"<key>.npy", "<key>.meta.json", "<key>.dat"}, (
+        f"precondition: the adjacent key must own its three offloaded artefacts, saw {sorted(bar_present)}"
+    )
+
+    store.purge("foo")
+
+    for artefact, path in foo_six.items():
+        assert not path.exists(), f"SC-1 violated: foo's {artefact} survived its own purge at {str(path)!r}"
+    for artefact, path in bar_present.items():
+        assert path.exists(), (
+            f"T-15-14 violated: purging 'foo' removed the adjacent key's {artefact} at {str(path)!r}. "
+            "purge must reach only artefacts derived from the exact key it was given"
+        )
+    assert np.array_equal(np.asarray(store["foo.bar"]), survivor_payload), (
+        "T-15-14 violated: the adjacent key no longer loads its own data after its neighbour was purged"
+    )
+    assert sorted(path.name for path in tmp_cache_dir.iterdir()) == sorted(
+        path.name for path in bar_present.values()
+    ), (
+        "the directory must hold exactly the adjacent key's artefacts and nothing else — the equality is the "
+        "secondary instrument that catches a seventh artefact no exact-name check enumerated"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STORE-08 encoding probe — whose definition of key equality applies.
+# ---------------------------------------------------------------------------
+
+
+def test_two_unicode_normalization_forms_are_two_distinct_keys(
+    make_store: MakeStore, tmp_cache_dir: Path, tmp_path: Path
+) -> None:
+    """Plan 15-03 / STORE-08 encoding probe / T-15-14b.
+
+    **The contract this pins: key equality is byte equality of the key string as
+    the filesystem stores it.** The package normalises nothing — Phase 14's rule
+    refuses control characters, separators, absolute paths, reserved names and a
+    trailing space or dot, and *nothing else*, which is asserted here rather than
+    assumed by running the published predicate over both forms. So two keys
+    differing only in Unicode normalization form are two legal, distinct keys
+    with two distinct artefact sets, and purging one leaves the other whole.
+
+    That is a statement of what **is**, not an endorsement. A caller who obtains
+    one key from a filename read off disk and another from a string typed into a
+    config can hold two keys that render identically and behave as two. Folding
+    them would be a change to the *key contract* Phase 14 settled and is out of
+    scope here; naming the consequence is what keeps it from being discovered
+    downstream instead.
+
+    The premise is filesystem-dependent, so it is **probed at runtime rather than
+    guessed from the platform**: both names are created as empty files and the
+    resulting entry count is counted. A normalizing filesystem (APFS, HFS+)
+    folds them into one, and there the test skips with that reason — a recorded
+    platform fact rather than a flaky assertion.
+    """
+    nfc = unicodedata.normalize("NFC", "café")
+    nfd = unicodedata.normalize("NFD", "café")
+    assert nfc != nfd, "precondition: the two normalization forms must be distinct Python strings"
+
+    probe_dir = tmp_path / "normalization_probe"
+    probe_dir.mkdir()
+    (probe_dir / nfc).touch()
+    (probe_dir / nfd).touch()
+    if len(list(probe_dir.iterdir())) != 2:
+        pytest.skip(
+            "this filesystem normalizes Unicode filenames (APFS/HFS+ fold NFC and NFD into one name), so two "
+            "keys differing only in normalization form cannot have two distinct artefact sets here"
+        )
+
+    assert paths_mod.is_valid_store_key(nfc), "the key rule must accept the NFC form — it normalizes nothing"
+    assert paths_mod.is_valid_store_key(nfd), "the key rule must accept the NFD form — it normalizes nothing"
+
+    nfd_payload = _PAYLOAD.copy() + 13.0
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store(nfc, _PAYLOAD.copy())
+    store.add_data_to_store(nfd, nfd_payload)
+    store.offload(pickle_container=True)
+    nfd_present = {
+        artefact: path for artefact, path in _six_artefact_paths(tmp_cache_dir, nfd).items() if path.exists()
+    }
+    assert set(nfd_present) == {"<key>.npy", "<key>.meta.json", "<key>.dat"}, (
+        f"precondition: the NFD key must own its three offloaded artefacts, saw {sorted(nfd_present)}"
+    )
+
+    store.purge(nfc)
+
+    _assert_all_six_gone(tmp_cache_dir, nfc)
+    for artefact, path in nfd_present.items():
+        assert path.exists(), (
+            f"T-15-14b violated: purging the NFC key removed the NFD key's {artefact} at {str(path)!r}. "
+            "The two are distinct keys because the filesystem stores them as distinct names"
+        )
+    assert np.array_equal(np.asarray(store[nfd]), nfd_payload), (
+        "T-15-14b violated: the NFD key no longer loads its own data after the NFC key was purged"
+    )
+    assert nfd in store and nfc not in store, "only the purged key may have been dropped from tracking"
