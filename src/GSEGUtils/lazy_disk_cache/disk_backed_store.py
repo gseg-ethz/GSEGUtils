@@ -1017,6 +1017,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         StoreContainmentError
             If a path built for ``key`` would resolve outside the cache
             directory (STORE-02). A subclass of ``StoreKeyError``.
+        StorePurgeRefusedError
+            If the calling process is not the one that constructed this store
+            (D-05). Raised before any mutation, so a refused purge is a no-op.
         KeyError
             If ``key`` is present neither in tracking nor on disk (D-02).
         StorePurgeIncompleteError
@@ -1048,6 +1051,14 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         exists is a filter, not an invariant. Single-threaded per-store use is
         the supported model, matching the project's threading constraint that a
         ``PointCloudData`` is not multi-thread-mutable either.
+
+        **The process guard is on this method and nothing else** (D-08), and the
+        asymmetry is deliberate rather than an omission. Workers legitimately
+        *write*: ``__getstate__`` force-calls ``offload(pickle_container=True)``
+        before pickling, so a guard on the write routes would break the joblib
+        path outright. Deletion is the only operation where "wrong process" means
+        "destroying someone else's data", so it is the only one guarded. Do not
+        generalise the check to ``__setitem__`` or :meth:`add_data_to_store`.
 
         **The legacy pickle is left alone** (D-09), with a consequence recorded
         as deferred rather than hidden: a ``<key>.pkl`` is unreadable by design
@@ -1088,9 +1099,24 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         #    raises rather than warn-and-no-op (D-06): in a tile worker this
         #    fails the tile, which is the correct outcome for a call that would
         #    otherwise have destroyed data belonging to another process.
-        #    THE ORDERING SLOT IS THE POINT: the comparison lands here, above the
-        #    existence check, and moving it below the unlink loop is what the
-        #    ordering mutation proof breaks on purpose.
+        #    THE ORDERING IS THE POINT: the comparison lives here, above the
+        #    existence check and above every mutation. Moving it below the unlink
+        #    loop still raises and still looks like a guard, and is what the
+        #    ordering mutation proof breaks on purpose — measured, with the
+        #    forked child exiting `_CHILD_PURGED` rather than `_CHILD_REFUSED`.
+        current_pid = os.getpid()
+        if current_pid != self._owner_pid:
+            raise StorePurgeRefusedError(
+                f"Refusing to purge {key!r}: this store was constructed by process "
+                f"{self._owner_pid} and purge was called from process {current_pid}. "
+                "A store's cache files belong to the process that constructed it, so a purge "
+                "issued here would delete another process's data — which is why deletion is "
+                "the one route guarded on process identity while the write routes are not "
+                "(D-08: workers legitimately write, and pickling a store force-offloads it, "
+                "so guarding writes would break the joblib path outright). Construct a store "
+                "in this process for files this process owns, or return the key to the "
+                "constructing process for cleanup."
+            )
 
         # 4. EXISTENCE (D-02). The key counts as present when it is tracked OR
         #    when any of the six derived artefacts is on disk. Untracked-but-on-
