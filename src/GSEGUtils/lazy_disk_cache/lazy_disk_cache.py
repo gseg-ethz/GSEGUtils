@@ -268,7 +268,11 @@ class LazyDiskCache(ABC):
     pickle protocol.
     """
 
-    _MEMMAP_SUFFIX = ".dat"
+    # NOTE: the memmap suffix is deliberately NOT a class attribute here. It was
+    # one (``_MEMMAP_SUFFIX = ".dat"``) until plan 15-05, and a class attribute a
+    # subclass can repoint is a second vocabulary for the same fact -- the exact
+    # override surface Phase 14's D-27 withdrew from ``DiskBackedStore`` for the
+    # same reason. The one home is ``paths.MEMMAP_SUFFIX``.
 
     @validate_call(config=ConfigDict(arbitrary_types_allowed=True))
     def __init__(
@@ -285,15 +289,15 @@ class LazyDiskCache(ABC):
         self._enable_caching = config.enable_caching
         if config.cache_path is None:
             fd, cache_path = tempfile.mkstemp(
-                suffix=self._MEMMAP_SUFFIX
+                suffix=paths.MEMMAP_SUFFIX
             )  # Todo: Think about a case where the provided path is a dir
             os.close(fd)
             self._cache_path = Path(cache_path)
         else:
-            self._cache_path = config.cache_path.with_suffix(self._MEMMAP_SUFFIX)
+            self._cache_path = config.cache_path.with_suffix(paths.MEMMAP_SUFFIX)
         # elif cache_path.is_dir():
 
-        # self._cache_path = cache_path.with_suffix(self._MEMMAP_SUFFIX) if cache_path else None
+        # self._cache_path = cache_path.with_suffix(paths.MEMMAP_SUFFIX) if cache_path else None
         self._automatic_offloading = config.automatic_offloading  # and (cache_path is not None)
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
@@ -312,7 +316,7 @@ class LazyDiskCache(ABC):
             self._finalizer = weakref.finalize(self, _purge_memmap_file, self._cache_path)
 
     def _convert_to_memmap(self) -> None:
-        """Allocate (or reopen) the persistent memmap and adopt it as the live buffer.
+        """Write the persistent memmap and adopt it as the live buffer.
 
         Notes
         -----
@@ -322,6 +326,31 @@ class LazyDiskCache(ABC):
         ``_MEMMAP_FALLBACK_CHUNK_BYTES`` when psutil is unavailable) are
         streamed in row-chunks. The new code never materialises a full-RAM
         copy of the source array on the streaming path.
+
+        **Atomicity, and the platform it holds on -- stated together, because a
+        claim without its limit is a trap (STORE-08, 15-CONTEXT D-15, D-15b).**
+        On POSIX this method is torn-write-safe: the array is written into
+        ``<key>.dat.tmp``, flushed, fsynced, and only then renamed onto
+        ``<key>.dat``, so the final name is never opened for writing and a crash
+        at any point before the rename leaves a previously-valid ``<key>.dat``
+        exactly as it was. That route is **POSIX-only**. Off POSIX the
+        conversion falls back to a direct write on the final name and is
+        **not torn-write-safe** -- an interrupted write there can still tear a
+        good file, which is the pre-phase status quo. The reason is not
+        laziness: replacing an *open, mapped* file is not permitted on Windows,
+        and the guard ``DiskBackedStore._store_entry`` already carries covers
+        only its directory fsync, not the rename of a mapping. GSEGUtils
+        declares no OS classifiers, CI is Linux, and every named downstream
+        consumer is Linux, so the shipped surface and the guarantee agree. The
+        atomic-path tests in ``tests/test_memmap_atomicity.py`` are
+        ``skipif``-marked rather than deleted, so a future port inherits them.
+
+        **Nothing observable is repointed before the write commits (D-15a).**
+        The temporary mapping lives in a local. ``self._mmap``, the subclass
+        buffer and ``self._in_memory`` keep their previous values until the
+        rename *and* the directory fsync have both returned. On any failure the
+        local is dropped, the temporary is unlinked best-effort, and the entry
+        is left reading exactly what it was reading before the call.
         """
         with self._lock:
             # D-31 / STORE-02: verify containment before ANY write on this path.
@@ -334,17 +363,20 @@ class LazyDiskCache(ABC):
             # store constructed the entry and false when a caller constructed
             # one directly with an arbitrary `cache_path=`.
             #
-            # SCOPE, and the limit of it. This call and the one in `load()`
-            # cover the three mutable opens the Plan 14-20 enumeration found:
-            # the allocate-or-reopen `np.memmap` under `if self._mmap is None`,
-            # the reopen `np.memmap` under the `elif`, and `load()`'s open on
-            # its mutating modes. Completeness rests on **re-running that
-            # enumeration whenever this module changes** -- no test would notice
-            # a fourth mutable open added later; it would simply be unguarded
-            # and the suite would stay green. A structural pin (a test asserting
-            # the line-set of `np.memmap(` opens here) was considered and
-            # rejected by the maintainer as a brittle line-number pin over a
-            # module this phase is not otherwise restructuring.
+            # SCOPE, and the limit of it. UPDATED by plan 15-05, which changed
+            # the mutable-open set this sentence enumerates. It used to read
+            # "the allocate-or-reopen `np.memmap` under `if self._mmap is None`,
+            # the reopen `np.memmap` under the `elif`, and `load()`'s open" --
+            # both of the first two are gone. The set is now: the temporary open
+            # on the POSIX route, the single fallback open on the final name off
+            # POSIX, and `load()`'s open on its mutating modes. The first is
+            # covered by the SECOND containment call below, not by this one.
+            # Completeness still rests on **re-running that enumeration whenever
+            # this module changes** -- no test would notice a fourth mutable
+            # open added later; it would simply be unguarded and the suite would
+            # stay green. A structural pin (a test asserting the line-set of
+            # `np.memmap(` opens here) was considered and rejected by the
+            # maintainer as a brittle line-number pin.
             #
             # PLACEMENT, twice over. Ahead of the parent `mkdir` below, because
             # creating a directory is itself a write. And ahead of the mode
@@ -364,15 +396,46 @@ class LazyDiskCache(ABC):
             # statement that the case is safe. The file that branch leaks is
             # deferred item D-14-01.
             #
-            # BOUNDARY -- STORE-08 owns the other half. This adds containment and
-            # **not** torn-write safety: the temp-file / fsync / atomic-replace
-            # machinery `DiskBackedStore._store_entry` already applies to the
-            # `.npy` + `.meta.json` codec pair does not apply to this artefact,
-            # so an interrupted write can still leave a partial `.dat`. That
-            # half, and the purge-family interaction, is STORE-08 (Phase 15),
-            # paired with D-14-01. A reader who finds a containment check beside
-            # an unguarded truncating write needs to know the gap is filed.
+            # BOUNDARY -- DISCHARGED by plan 15-05 (STORE-08, D-15). This note
+            # used to say that the temp-file / fsync / atomic-replace machinery
+            # `DiskBackedStore._store_entry` applies to the codec pair "does not
+            # apply to this artefact, so an interrupted write can still leave a
+            # partial `.dat`". That is no longer true on POSIX: the same
+            # sequence now runs below, on this artefact, and the containment
+            # check has an atomic write beside it rather than an unguarded
+            # truncating one. It remains true off POSIX, where the fallback
+            # route writes the final name directly -- see the method docstring,
+            # which states that limit in the same paragraph as the claim (D-15b).
+            # D-14-01 (the `mkstemp` branch's leaked file) is untouched and
+            # still open.
             paths._assert_write_contained(self._cache_path.parent, self._cache_path)
+
+            # STORE-08 / D-15: the temporary is a SECOND write target, and the
+            # call above does not cover it. That check verifies the FINAL name
+            # only; `<key>.dat.tmp` is a different name, which an attacker with
+            # write access to the cache directory can occupy with a symlink
+            # independently -- and the `w+` open below truncates whatever it
+            # lands on (T-15-18). Same base, same helper, different candidate:
+            # one vocabulary, two targets, neither assumed from the other.
+            #
+            # Two seams, one vocabulary. `paths.get_memmap_tmp_path` is the
+            # STORE-side builder and takes `(cache_dir, key)`; this method has
+            # no key -- it has `self._cache_path`, already a full path, which on
+            # the unconfigured branch is a `tempfile.mkstemp` file with no cache
+            # root at all. So the name is derived here from the SHARED suffix
+            # constants rather than through the key-shaped builder. `with_suffix`
+            # replaces the last suffix, so `<key>.dat` becomes `<key>.dat.tmp`.
+            tmp_path = self._cache_path.with_suffix(paths.MEMMAP_SUFFIX + paths.TMP_SUFFIX)
+            paths._assert_write_contained(self._cache_path.parent, tmp_path)
+
+            # HOISTED by plan 15-05. This `mkdir` used to sit inside the
+            # `if self._mmap is None:` body, so the reopen branch had none --
+            # the same defect shape the PLACEMENT note above describes for the
+            # containment check ("so ONE call covers both opens rather than
+            # being duplicated into two branches a later edit could fix one of
+            # and miss the other"). Every route below now writes a file in this
+            # directory, so every route needs it to exist.
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
 
             shape, dtype, array = self._describe_buffer()
 
@@ -383,24 +446,156 @@ class LazyDiskCache(ABC):
             )
             chunk_rows = max(1, chunk_bytes // max(1, item_size_per_row))
 
-            # 1) allocate or reopen the mmap file (unchanged from pre-rewrite)
-            if self._mmap is None:
-                self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-                mode: Literal["w+", "r+"] = "w+" if not self._cache_path.exists() else "r+"
-                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode=mode, shape=shape)
-            elif self._mmap.mode != "r+":
-                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode="r+", shape=shape)
+            # The populate step, kept as ONE implementation rather than copied
+            # into each platform route. Its body is unchanged from the
+            # pre-15-05 code (D-06 fast path / D-06 streaming path); only the
+            # target is now a parameter, because the POSIX route writes into a
+            # temporary and the fallback route writes into the final file. Two
+            # copies of this would be two chunking behaviours waiting to drift,
+            # and the C1/C2 tests exercise both branches of it by name.
+            def _populate(target: np.memmap) -> None:
+                # D-06 fast path: small arrays use today's one-shot copy semantics.
+                if array.nbytes < chunk_bytes:
+                    array_copy = np.array(array, dtype=dtype, copy=True)
+                    target[:] = array_copy
+                else:
+                    # D-06 streaming path: chunked slice-write, no full-RAM copy.
+                    for start in range(0, shape[0], chunk_rows):
+                        target[start : start + chunk_rows] = array[start : start + chunk_rows]
 
-            # D-06 fast path: small arrays use today's one-shot copy semantics.
-            if array.nbytes < chunk_bytes:
-                array_copy = np.array(array, dtype=dtype, copy=True)
-                self._mmap[:] = array_copy
+            if os.name == "posix":
+                # THE ATOMIC ROUTE (STORE-08 / D-15), and why it is one route
+                # where there were three. Before plan 15-05 this method reached
+                # the same file three ways: the `w+` fresh-allocate when no
+                # `.dat` existed, the `r+` reopen when one did, and a silent
+                # third case where a live `r+` mapping was already present so
+                # neither branch ran and the populate wrote straight through
+                # into the existing, VALID `.dat`. Exactly one of those -- the
+                # third, and the `r+` reopen that shares its shape -- is the
+                # in-place overwrite of a good file that STORE-08 names.
+                # Write-fresh-then-replace makes all three identical, which is
+                # what "atomic at every write route" means literally rather
+                # than in the majority of cases.
+                #
+                # The platform predicate is decided ONCE, here, and reused --
+                # not respelled as a `sys.platform` test somewhere below. Off
+                # POSIX see the fallback branch and the docstring's stated limit.
+                #
+                # REJECTED PLACEMENT, recorded so it is not re-proposed: doing
+                # the rename in `offload()` instead. An entry that is never
+                # offloaded would never get its real name, and an entry with
+                # `purge_disk_on_gc=False` that is simply collected would leave
+                # a temporary behind forever. The rename belongs at the moment
+                # the data is complete, which is between populate and hand-off.
+                #
+                # D-15a: `tmp_mmap` is a LOCAL. The naive shape -- assigning the
+                # temporary straight to `self._mmap` -- reads correctly and is
+                # wrong: the live object would then be reading THROUGH the
+                # temporary, and the cleanup below would unlink the very file it
+                # is mapping. The final bytes would survive and the object would
+                # not, which is invisible to any test that asserts on file bytes.
+                #
+                # THE RENAME TARGET IS THE RESOLVED PATH, NOT THE NAME -- and
+                # this is load-bearing rather than tidy. `os.replace` never
+                # follows a symlink: it replaces the LINK. An `<key>.dat` that
+                # is a symlink pointing at a real payload file inside the cache
+                # directory is the legitimate **adopted entry** that D-17 and
+                # STORE-03 exist to protect, and `_assert_write_contained`
+                # deliberately admits it. Renaming onto the bare name would
+                # silently convert that link into a regular file and orphan the
+                # payload the caller adopted -- the caller's file would simply
+                # stop receiving data, with no error. Writing through to the
+                # resolved target is what the pre-15-05 `w+`/`r+` opens did, and
+                # it is exactly as contained: the check that just ran resolves
+                # this same final component and requires the result to be inside
+                # the base, so renaming onto it is covered by the guard rather
+                # than an escape from it. On the ordinary (non-symlink) path
+                # `resolve()` is just an absolutisation and this is a no-op.
+                final_path = self._cache_path.resolve()
+                tmp_mmap: Optional[np.memmap] = None
+                try:
+                    tmp_mmap = np.memmap(tmp_path, dtype=dtype, mode="w+", shape=shape)
+                    # A failure anywhere in here is harmless to the previously
+                    # valid `.dat`: the partial bytes are in the temporary, and
+                    # the temporary never gets the final name.
+                    _populate(tmp_mmap)
+
+                    # COMMIT, in the order `DiskBackedStore._store_entry` already
+                    # uses for the codec pair -- flush, fsync, replace, dir-fsync.
+                    # Not a second atomicity pattern; the same one, ported.
+                    tmp_mmap.flush()
+                    # `np.memmap` exposes no file descriptor (no `fileno`, and
+                    # the underlying `mmap` object is private), so the data
+                    # fsync is taken on a descriptor opened on the temporary's
+                    # own name. That is a real fsync of this file's data rather
+                    # than an approximation of one -- it is only the ROUTE to
+                    # the descriptor that differs from `_store_entry`'s.
+                    tmp_fd = os.open(str(tmp_path), os.O_RDONLY)
+                    try:
+                        os.fsync(tmp_fd)
+                    finally:
+                        os.close(tmp_fd)
+                    os.replace(str(tmp_path), str(final_path))
+                    # POSIX dir-fsync so the rename itself is crash-durable.
+                    # It lives INSIDE this branch and carries no guard of its
+                    # own: a second platform test here would be a second place
+                    # for the decision to drift. The directory fsynced is the
+                    # one whose entry actually changed, which on the adopted
+                    # shape is the resolved target's parent rather than the
+                    # link's.
+                    dir_fd = os.open(str(final_path.parent), os.O_RDONLY)
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+
+                    # ADOPTION -- the commit point, and nothing above it may be
+                    # observable (D-15a). POSIX keeps a mapping valid across a
+                    # rename because the mapping follows the inode, not the
+                    # name, so this mapping is a live buffer backed by the file
+                    # that now carries the final name. `np.memmap` records the
+                    # name it was opened under, and that record is now stale --
+                    # correcting it is what makes `self._mmap.filename` a true
+                    # statement about where these bytes live rather than a
+                    # pointer to a name that no longer exists.
+                    tmp_mmap.filename = final_path
+                    self._mmap = tmp_mmap
+                except Exception:
+                    # ORDER MATTERS (D-15a). Drop the local reference FIRST:
+                    # `np.memmap` has no `close`, so releasing the mapping means
+                    # dropping every reference to it, and only then is the file
+                    # safe to unlink. Doing it the other way round unlinks a
+                    # file something is still mapping.
+                    tmp_mmap = None
+                    del tmp_mmap
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    # `self._mmap`, the subclass buffer and `self._in_memory`
+                    # were never touched, so the entry is left reading exactly
+                    # what it was reading before this call.
+                    raise
             else:
-                # D-06 streaming path: chunked slice-write, no full-RAM copy.
-                for start in range(0, shape[0], chunk_rows):
-                    self._mmap[start : start + chunk_rows] = array[start : start + chunk_rows]
+                # NON-POSIX FALLBACK -- today's direct write on the final name,
+                # and NOT torn-write-safe (D-15b; the docstring says so beside
+                # the atomicity claim). Renaming over an open, mapped file is
+                # not permitted on Windows, so the atomic route cannot simply be
+                # run here; a close-before-replace sequence was rejected because
+                # it puts a reopen on the hot path of every conversion for a
+                # platform this package does not ship to, and an untested
+                # Windows code path is a claim rather than a capability.
+                mode: Literal["w+", "r+"] = "r+" if self._cache_path.exists() else "w+"
+                self._mmap = np.memmap(self._cache_path, dtype=dtype, mode=mode, shape=shape)
+                _populate(self._mmap)
 
-            # 2) hand the memmap off to your subclass as the live buffer
+            # ONE hand-off for the whole method, shared by both routes and
+            # placed after them. The POSIX route arrives here having adopted
+            # `tmp_mmap` only after the rename and the directory fsync both
+            # returned; the fallback route arrives having written through
+            # `self._mmap` directly. A hand-off per branch would put one of them
+            # textually before the rename and make the commit-ordering gate
+            # unable to tell the correct shape from the broken one.
             self._set_buffer(self._mmap)
             self._in_memory = True
             logger.debug(f"Switched buffer to memmap @ {self._cache_path}")
