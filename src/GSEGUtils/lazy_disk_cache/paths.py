@@ -631,18 +631,29 @@ def is_valid_store_key(key: str) -> bool:
 # class attributes, ``LazyDiskCache._MEMMAP_SUFFIX`` on the ABC, and bare
 # literals inside ``_store_entry`` — because ``disk_backed_store.py`` imports
 # *from* ``lazy_disk_cache.py`` and neither could reach the other's constants.
-# That split has already produced one shipped defect (``_purge_cache_pair``
-# hardcodes ".npy"/".meta.json" and its FRAG-03 intent has never held). The
-# constants live here so there is one vocabulary and one seam.
+# That split has already produced one shipped defect: the finalizer helper
+# hardcoded ".npy"/".meta.json" and asserted a FRAG-03 intent that no route in
+# the package could reach. The constants live here so there is
+# one vocabulary and one seam.
 #
-# BOUNDARY, and the owner has now arrived. Moving the vocabulary was Phase 14's
-# job. Phase 15 discharges STORE-06 **not** by making ``_purge_cache_pair``'s
-# dead ``.npy`` branch live — measured to empty the cache directory at entry GC
-# and to make the first lazy reload fail outright (15-CONTEXT D-12) — but by
-# moving codec-pair removal ownership up to ``DiskBackedStore.purge``, at the
-# level where the pair is written. The finalizer helper is correspondingly
-# narrowed to the single memmap file it actually owns, in plan 15-04. The
-# vocabulary move is what made both of those one-liners rather than refactors.
+# DISCHARGED — plan 15-04, STORE-06. This block used to end "BOUNDARY, and the
+# owner has now arrived", pointing forward at a fix Phase 15 owed. The fix has
+# landed, so the pointer is replaced by its outcome and the two claims above it
+# are corrected in place rather than silently dropped — the pattern D-31 used
+# when it extended D-17.
+#
+# First correction: the hardcoded suffixes are gone. The finalizer callback is
+# now ``lazy_disk_cache._purge_memmap_file`` and unlinks exactly one file, the
+# entry's own memmap.
+#
+# Second correction: the FRAG-03 intent not holding was recorded here as the
+# defect. It is not — it is the only reason the code was safe. Making that dead
+# ``.npy`` branch live was measured to empty the cache directory at entry GC
+# and to make the first lazy reload fail with ``KeyError`` (15-CONTEXT D-12),
+# so the branch was **deleted rather than completed**. Codec-pair removal is
+# owned by ``DiskBackedStore.purge``, at the level where the pair is written.
+# The vocabulary move is what made both of those one-liners rather than
+# refactors.
 
 NPY_SUFFIX: Final[str] = ".npy"
 META_SUFFIX: Final[str] = ".meta.json"

@@ -27,7 +27,7 @@ from GSEGUtils.lazy_disk_cache.disk_backed_store import (
     _resolve_lazy_disk_cache_class,
     register_lazy_disk_cache_class,
 )
-from GSEGUtils.lazy_disk_cache.lazy_disk_cache import LazyDiskCacheConfig, _purge_cache_pair
+from GSEGUtils.lazy_disk_cache.lazy_disk_cache import LazyDiskCacheConfig, _purge_memmap_file
 
 
 @pytest.fixture
@@ -328,7 +328,7 @@ def test_loaded_entry_has_cache_path_populated(tmp_cache_dir: Path) -> None:
 # codec pair is produced by :meth:`DiskBackedStore._store_entry`, not by
 # :meth:`LazyDiskCache.offload`. The finalizer registered in
 # :meth:`LazyDiskCache._init_from_config` therefore targets the ``.dat`` file
-# in the canonical path; the ``_purge_cache_pair`` helper's ``.meta.json``
+# in the canonical path; the ``_purge_memmap_file`` helper's ``.meta.json``
 # branch is defensive belt-and-suspenders code that fires only when an
 # integrator hands a ``.npy``-suffixed path through to ``LazyDiskCache``
 # directly (and bypasses the ``_MEMMAP_SUFFIX`` re-suffix).
@@ -443,12 +443,12 @@ def test_purge_disk_on_gc_false_preserves_file_after_unpickle(tmp_path: Path) ->
 
 
 def test_finalizer_unlinks_both_npy_and_meta_after_unpickle(tmp_path: Path) -> None:
-    """Plan 02-04 / W-1: ``_purge_cache_pair`` unlinks BOTH ``<key>.npy`` and ``<key>.meta.json``.
+    """Plan 02-04 / W-1: ``_purge_memmap_file`` unlinks BOTH ``<key>.npy`` and ``<key>.meta.json``.
 
     Two checks:
 
     1.  Direct unit test of the helper: plant a ``.npy + .meta.json`` pair on
-        disk, call ``_purge_cache_pair`` with the ``.npy`` path, assert both
+        disk, call ``_purge_memmap_file`` with the ``.npy`` path, assert both
         files are gone.
     2.  Indirect test via a :class:`DiskBackedNDArray` instance whose
         ``_cache_path`` is post-construction overridden to a ``.npy``-suffixed
@@ -459,7 +459,7 @@ def test_finalizer_unlinks_both_npy_and_meta_after_unpickle(tmp_path: Path) -> N
 
     Why two checks: the canonical ``LazyDiskCache`` constructor always
     re-suffixes ``cache_path`` to ``.dat``, so the ``.meta.json`` branch of
-    ``_purge_cache_pair`` is dead code on the happy path. The helper exists
+    ``_purge_memmap_file`` is dead code on the happy path. The helper exists
     to harden future integrations (or any code path that hands a ``.npy``
     path directly to ``weakref.finalize`` via ``enable_purge``). This test
     locks in the behaviour without depending on a future caller materialising.
@@ -471,12 +471,12 @@ def test_finalizer_unlinks_both_npy_and_meta_after_unpickle(tmp_path: Path) -> N
     meta_path.write_text("{}", encoding="utf-8")
     assert npy_path.exists()
     assert meta_path.exists()
-    _purge_cache_pair(npy_path)
-    assert not npy_path.exists(), "W-1 regressed: .npy not unlinked by _purge_cache_pair"
-    assert not meta_path.exists(), "W-1 regressed: .meta.json sidecar not unlinked by _purge_cache_pair"
+    _purge_memmap_file(npy_path)
+    assert not npy_path.exists(), "W-1 regressed: .npy not unlinked by _purge_memmap_file"
+    assert not meta_path.exists(), "W-1 regressed: .meta.json sidecar not unlinked by _purge_memmap_file"
 
     # The helper is also idempotent / safe on a missing pair.
-    _purge_cache_pair(npy_path)  # MUST NOT raise
+    _purge_memmap_file(npy_path)  # MUST NOT raise
 
     # --- check 2: indirect via DiskBackedNDArray with overridden _cache_path -
     arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)

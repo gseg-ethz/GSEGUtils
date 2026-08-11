@@ -65,21 +65,51 @@ _MEMMAP_FALLBACK_CHUNK_BYTES = 64 * 1024**2  # 64 MB (D-04 default)
 _MUTATING_MEMMAP_MODES: Final[frozenset[str]] = frozenset({"r+", "w+"})
 
 
-def _purge_cache_pair(cache_path: Path) -> None:
-    """Unlink ``cache_path`` and its paired ``.meta.json`` sidecar (FRAG-03 / W-1).
+def _purge_memmap_file(cache_path: Path) -> None:
+    """Unlink ``cache_path`` -- the entry's own memmap file -- and nothing else.
 
-    The Plan-02-01 codec writes each entry as a ``<key>.npy + <key>.meta.json``
-    pair. The finalizer must unlink both files; otherwise the sidecar leaks
-    across the GC of the owning :class:`LazyDiskCache` instance.
+    Parameters
+    ----------
+    cache_path : pathlib.Path
+        The memmap path this entry was configured with. A missing file is
+        tolerated, so the callback is safe to run twice on the same path.
 
-    Safe to call with a path whose suffix is not ``.npy`` — only the primary
-    ``cache_path`` is unlinked in that case (backwards-compatible with the
-    canonical ``_MEMMAP_SUFFIX`` (``.dat``) memmap path produced by
-    :meth:`LazyDiskCache._init_from_config`).
+    Notes
+    -----
+    This callback is registered on a :func:`weakref.finalize` and therefore
+    runs at an arbitrary garbage collection, with no caller in scope to observe
+    what it removed. The only artefact a :class:`LazyDiskCache` owns is its
+    memmap file, so that is the only file it may take.
+
+    **The** ``<key>.npy`` **+** ``<key>.meta.json`` **codec pair is
+    store-owned** -- written by ``DiskBackedStore._store_entry``, read by
+    ``DiskBackedStore._load_entry`` -- and removing it is the job of
+    :meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge`, at the level
+    where the pair is written.
+
+    A predecessor of this function (``FRAG-03 / W-1``, Phase 2) also unlinked
+    the paired ``.meta.json`` sidecar whenever ``cache_path`` ended in
+    ``.npy``. That branch is **deleted rather than guarded**, and must not be
+    restored behind a flag, a condition or a configuration option. Making it
+    live was measured (15-CONTEXT D-12)::
+
+        dead branch (today)   files=['feat.dat','feat.meta.json','feat.npy']   reload OK [0. 1. 2. 3.]
+        branch made live      FIRST reload after GC FAILED: KeyError: 'feat'   files=[]
+
+    That is: the cache directory is emptied the moment an entry is collected,
+    and the next lazy reload fails outright with ``KeyError``. The codec pair
+    surviving a :class:`LazyDiskCache`'s collection is *required*, not leaked.
+
+    The intent the predecessor's docstring asserted -- "the finalizer must
+    unlink both files; otherwise the sidecar leaks" -- is obsolete, and it
+    never held in the first place: :meth:`LazyDiskCache._init_from_config`
+    unconditionally re-suffixes every configured path to the memmap suffix, so
+    no route in the package produces an entry whose ``cache_path`` ends in
+    ``.npy``. Phase 14 (D-14) established that the branch was dead; Phase 15
+    (D-12, STORE-06) established that honouring it would be a bug rather than a
+    fix.
     """
     cache_path.unlink(missing_ok=True)
-    if cache_path.suffix == ".npy":
-        cache_path.with_suffix(".meta.json").unlink(missing_ok=True)
 
 
 class LazyDiskCacheKw(TypedDict, total=False):
@@ -279,7 +309,7 @@ class LazyDiskCache(ABC):
         if config.automatic_offloading:
             self.offload()
         if self._cache_path and self._purge_disk_on_gc:
-            self._finalizer = weakref.finalize(self, _purge_cache_pair, self._cache_path)
+            self._finalizer = weakref.finalize(self, _purge_memmap_file, self._cache_path)
 
     def _convert_to_memmap(self) -> None:
         """Allocate (or reopen) the persistent memmap and adopt it as the live buffer.
@@ -488,10 +518,9 @@ class LazyDiskCache(ABC):
                 # already enabled
                 self._purge_disk_on_gc = True
                 return
-            # register a new finalizer (FRAG-03 / W-1: unlinks both <key>.npy + sidecar
-            # when the path uses the .npy convention; falls through to single-file
-            # unlink for the canonical ``.dat`` memmap path).
-            self._finalizer = weakref.finalize(self, _purge_cache_pair, self._cache_path)
+            # The callback removes this entry's memmap file; the <key>.npy + <key>.meta.json
+            # codec pair belongs to the store and is removed by DiskBackedStore.purge.
+            self._finalizer = weakref.finalize(self, _purge_memmap_file, self._cache_path)
             self._purge_disk_on_gc = True
             logger.debug(f"Enabled purge for {self._cache_path}")
 
