@@ -37,7 +37,7 @@ Those eight names — the six key-contract names above plus the two purge refusa
 types — are the **published key-and-purge contract surface**. That figure counts
 the contract, not the module: ``__all__`` itself carries fourteen names, the
 remaining six being the four classes, the ``LazyDiskCacheKw`` typed dict and the
-:func:`register_lazy_disk_cache_class` registration helper, which are not part of
+``register_lazy_disk_cache_class`` registration helper, which are not part of
 the contract this paragraph is about. The raising validator behind
 :func:`is_valid_store_key`, and the four internal-construction builders the store
 writes through — the two temporary codec names and the two memmap names —
