@@ -28,6 +28,7 @@ copies are the deliberate exception documented at ``conftest.py`` lines 7-10.
 """
 
 import gc
+import pickle
 from pathlib import Path
 from typing import Callable
 
@@ -216,3 +217,141 @@ def test_purge_disk_on_gc_false_preserves_the_memmap_at_collection(tmp_cache_dir
         "STORE-05 axis 3 regressed: purge_disk_on_gc=False must leave <key>.dat on disk across the entry's "
         "collection — this is the durable mode iof3D's session resume depends on"
     )
+
+
+# ---------------------------------------------------------------------------
+# Group C — the purge-intent pickle round-trip (STORE-05's third clause).
+#
+# This is the loky-facing axis: a store travels to a joblib worker by pickle,
+# and the property that matters is that collecting the worker's copy does not
+# delete the parent process's cache. The intent is carried in the `.meta.json`
+# sidecar (`_store_entry` writes `purge_disk_on_gc`; `_load_entry` replays it
+# into the reconstructed entry), so a round-trip that dropped it would silently
+# flip a `False` entry to the `True` default and start deleting on GC.
+# ---------------------------------------------------------------------------
+
+
+def test_pickle_round_trip_restores_purge_intent_per_entry(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-01 / STORE-05 / D-05: an in-process pickle round-trip preserves each entry's purge intent.
+
+    Two entries with opposite intents, so the assertion cannot pass by the round-trip
+    defaulting everything to ``True`` (the config default) or everything to ``False``.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store("keep", _PAYLOAD.copy(), purge_disk_on_gc_override=False)
+    store.add_data_to_store("gone", _PAYLOAD.copy(), purge_disk_on_gc_override=True)
+    assert store["keep"].purge_disk_on_gc is False, "precondition: the 'keep' entry must be constructed False"
+    assert store["gone"].purge_disk_on_gc is True, "precondition: the 'gone' entry must be constructed True"
+
+    restored = pickle.loads(pickle.dumps(store))
+
+    assert restored["keep"].purge_disk_on_gc is False, (
+        "STORE-05 purge-intent round-trip regressed: a False entry came back True — a worker would start "
+        "deleting files the parent configured to survive"
+    )
+    assert restored["gone"].purge_disk_on_gc is True, (
+        "STORE-05 purge-intent round-trip regressed: a True entry came back False — the memmap would leak"
+    )
+    assert restored._cache_dir == store._cache_dir, (
+        "STORE-05 purge-intent round-trip regressed: the restored store must point at the same cache directory"
+    )
+
+
+def test_collecting_the_restored_store_leaves_the_originals_files_on_disk(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-01 / STORE-05 / T-15-02: collecting an unpickled copy must not destroy the parent's cache.
+
+    This is the destructive half of the axis, and the reason the assertion is on **file
+    existence** rather than on a flag: the failure it guards is a joblib worker's copy
+    being collected and taking the parent process's cache with it.
+
+    **The artefact set is snapshotted after ``pickle.dumps``, deliberately.**
+    ``DiskBackedStore.__getstate__`` force-calls ``offload(pickle_container=True)``,
+    which writes each codec pair, clears the in-memory slot and drops the entry — so the
+    ``purge_disk_on_gc=True`` entry is collected *during pickling* and its ``.dat`` is
+    unlinked right there (measured, Plan 15-01). The parent's own artefact set at the
+    moment the copy exists is therefore both codec pairs plus the ``False`` entry's
+    ``.dat``, and that is exactly the set this test requires to survive. A ``<key>.dat``
+    that the *restored* store recreates on reload belongs to the copy, not to the parent.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store("keep", _PAYLOAD.copy(), purge_disk_on_gc_override=False)
+    store.add_data_to_store("gone", _PAYLOAD.copy(), purge_disk_on_gc_override=True)
+
+    blob = pickle.dumps(store)
+    owned_by_parent = sorted(p.name for p in tmp_cache_dir.iterdir())
+    assert owned_by_parent == ["gone.meta.json", "gone.npy", "keep.dat", "keep.meta.json", "keep.npy"], (
+        "precondition drifted: the parent's post-pickle artefact set is not what Plan 15-01 measured "
+        f"(got {owned_by_parent})"
+    )
+
+    restored = pickle.loads(blob)
+    del restored
+    gc.collect()
+
+    survivors = sorted(p.name for p in tmp_cache_dir.iterdir())
+    missing = [name for name in owned_by_parent if name not in survivors]
+    assert missing == [], (
+        "T-15-02 violated: collecting the unpickled copy destroyed files belonging to the original store "
+        f"({missing}); this is a joblib worker deleting the parent process's cache"
+    )
+    assert np.array_equal(store["keep"], _PAYLOAD), "the parent must still be able to reload 'keep' after the copy died"
+    assert np.array_equal(store["gone"], _PAYLOAD), "the parent must still be able to reload 'gone' after the copy died"
+
+
+def test_getstate_detaches_the_entry_mapping(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-01 / Phase-14 D-19 / CR-02: ``__getstate__`` hands back a detached ``_store``.
+
+    One line, and it is the invariant the Group E re-adoption test would otherwise be
+    able to corrupt: if the snapshot shared the live mapping, a write into retained state
+    would land in a store that validated every key it was shown.
+    """
+    store = _offloaded_store(make_store, tmp_cache_dir, ("feat",))
+
+    state = store.__getstate__()
+
+    assert "_cache_dir" in state, "__getstate__ must carry _cache_dir (it is the restored containment base)"
+    assert "_store" in state, "__getstate__ must carry _store"
+    assert state["_store"] is not store._store, (
+        "Phase-14 D-19/CR-02 regressed: __getstate__ returned the LIVE entry mapping, making the snapshot a "
+        "write route into the store with no key validation on it"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group D — axis 1: where the data lives.
+#
+# The offload axis, observed at the store's own bookkeeping (`_store[key]`)
+# rather than inferred from the files alone. Reaching into `_store` is
+# established practice in this suite; it is what distinguishes "offloaded"
+# (slot cleared, payload on disk) from "never inserted".
+# ---------------------------------------------------------------------------
+
+
+def test_offload_moves_the_payload_to_the_codec_pair_and_reload_restores_it(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-01 / STORE-05 axis 1: insert → offload → lazy reload, each step observable.
+
+    The three states of the axis, in order: in memory (slot populated, no ``.npy``); on
+    disk (codec pair written, slot cleared); and back in memory after a subscript read.
+    ``purge`` must leave every step of this sequence exactly as it is.
+    """
+    key = "x"
+    arr = np.arange(6, dtype=np.float32)
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store(key, arr.copy())
+    npy, meta, _dat = _artefact_paths(tmp_cache_dir, key)
+
+    assert store._store[key] is not None, "STORE-05 axis 1: a freshly inserted entry lives in memory"
+    assert not npy.exists(), "STORE-05 axis 1: no codec pair may be written before offload(pickle_container=True)"
+
+    store.offload(pickle_container=True)
+
+    assert npy.exists(), "STORE-05 axis 1: offload(pickle_container=True) must write <key>.npy"
+    assert meta.exists(), "STORE-05 axis 1: offload(pickle_container=True) must write <key>.meta.json"
+    assert store._store[key] is None, "STORE-05 axis 1: offload must clear the in-memory slot"
+
+    assert np.array_equal(store[key], arr), "STORE-05 axis 1: the lazy reload must return the array that was written"
+    assert store._store[key] is not None, "STORE-05 axis 1: the lazy reload must re-populate the in-memory slot"
