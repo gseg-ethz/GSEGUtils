@@ -21,15 +21,18 @@ Two instrument choices in this file are deliberate and should not be "simplified
 ``pytest-randomly`` shuffles test order, so nothing here carries cross-test state.
 """
 
+import copy
 import gc
 import logging
+import os
+import pickle
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import pytest
 
-from GSEGUtils.lazy_disk_cache import StoreKeyError
+from GSEGUtils.lazy_disk_cache import StoreKeyError, StorePurgeRefusedError
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
@@ -355,3 +358,202 @@ def test_a_purged_keys_stale_finalizer_cannot_eat_a_later_entry_under_the_same_k
         "purge must detach the finalizer before unlinking"
     )
     assert np.array_equal(np.asarray(store[key]), _PAYLOAD), "the later entry's payload must still be readable"
+
+
+# ---------------------------------------------------------------------------
+# T-15-06 — the worker guard (D-05 / D-06 / D-08).
+#
+# Raw `os.fork` rather than a loky worker, deliberately: `joblib` is not a
+# GSEGUtils dependency, `os.fork` needs none, and D-05's own measurement used it.
+# The child always leaves via `os._exit`, never `sys.exit` — the latter would run
+# the parent's pytest atexit handlers inside the child and corrupt the report.
+# ---------------------------------------------------------------------------
+
+#: Child exit statuses. Distinct per outcome so a red assertion names *which*
+#: wrong thing the child did rather than merely that it did not refuse.
+_CHILD_REFUSED = 17
+_CHILD_PURGED = 18
+_CHILD_WRONG_EXCEPTION = 19
+_CHILD_UNREACHED = 20
+
+_FORK_ONLY = pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is POSIX-only")
+
+
+def _status_from_fork(child: Callable[[], int]) -> int:
+    """Run ``child`` in a forked process and return its exit status.
+
+    The child never returns through this frame: it leaves via ``os._exit`` in the
+    ``finally``, so no pytest teardown, no ``atexit`` handler and no buffered stream
+    of the parent's is ever flushed twice.
+    """
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - executes only in the forked child
+        status = _CHILD_UNREACHED
+        try:
+            status = child()
+        finally:
+            os._exit(status)
+    _, wait_status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(wait_status), f"forked child did not exit normally: {wait_status}"
+    return os.WEXITSTATUS(wait_status)
+
+
+def _purge_outcome(store: DiskBackedStore[DiskBackedNDArray], key: str) -> int:
+    """Attempt ``store.purge(key)`` and report the outcome as an exit status."""
+    try:
+        store.purge(key)
+    except StorePurgeRefusedError:
+        return _CHILD_REFUSED
+    except BaseException:
+        return _CHILD_WRONG_EXCEPTION
+    return _CHILD_PURGED
+
+
+@_FORK_ONLY
+def test_a_forked_childs_purge_refuses_and_the_parents_files_survive(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-02 / STORE-04 / D-05 + D-06 / T-15-06 / SC-3.
+
+    The whole point of the guard, and the reason D-03 is safe: a downstream
+    consumer runs ``purge_disk_on_gc=False`` for session resume, so a stray purge in
+    a tile worker would delete the parent process's session data. It refuses, and it
+    refuses *before touching anything* — which is what the second half of this test
+    measures. A guard placed after the unlink loop would still raise and would still
+    fail this.
+    """
+    key = "parentdata"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    six = _six_artefact_paths(tmp_cache_dir, key)
+
+    status = _status_from_fork(lambda: _purge_outcome(store, key))
+
+    assert status == _CHILD_REFUSED, (
+        f"SC-3 violated: a purge from a forked child exited {status} rather than {_CHILD_REFUSED}. "
+        f"{_CHILD_PURGED} means it destroyed the parent's data; {_CHILD_WRONG_EXCEPTION} means it "
+        "raised something other than StorePurgeRefusedError"
+    )
+    for artefact in ("<key>.npy", "<key>.meta.json", "<key>.dat"):
+        assert six[artefact].exists(), (
+            f"SC-3 violated: the forked child unlinked the parent's {artefact}. The refusal must "
+            "precede every mutation, not follow it"
+        )
+
+
+@_FORK_ONLY
+def test_a_forked_child_that_unpickles_the_store_also_refuses(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-02 / STORE-04 / D-05 — the pickle route, end to end.
+
+    The route a real loky worker takes. The pid rides ``__getstate__``'s
+    ``__dict__.copy()`` and ``__setstate__``'s ``__dict__.update`` with no pickle
+    plumbing of its own, so the restored copy carries the *parent's* pid and compares
+    unequal to the child's own.
+    """
+    key = "shipped"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    blob = pickle.dumps(store)
+    six = _six_artefact_paths(tmp_cache_dir, key)
+
+    def child() -> int:
+        return _purge_outcome(pickle.loads(blob), key)
+
+    assert _status_from_fork(child) == _CHILD_REFUSED, "SC-3 violated: an unpickled store purged from a foreign process"
+    for artefact in ("<key>.npy", "<key>.meta.json", "<key>.dat"):
+        assert six[artefact].exists(), f"SC-3 violated: the unpickled child unlinked the parent's {artefact}"
+
+
+@_FORK_ONLY
+def test_a_forked_child_may_still_offload_the_guard_is_on_purge_only(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-02 / STORE-04 / D-08 — the positive control.
+
+    Workers legitimately **write**: ``__getstate__`` force-calls
+    ``offload(pickle_container=True)`` before pickling, so a guard on the write routes
+    would break the joblib path outright. Deletion is the only operation where "wrong
+    process" means "destroying someone else's data". Without this control the guard
+    could spread to every disk-mutating route and every other test here would still
+    pass.
+    """
+    key = "written_by_worker"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store(key, _PAYLOAD.copy())
+    six = _six_artefact_paths(tmp_cache_dir, key)
+    assert not six["<key>.npy"].exists(), "precondition: the codec pair is not written until offload"
+
+    def child() -> int:
+        store.offload(pickle_container=True)
+        return 0
+
+    assert _status_from_fork(child) == 0, (
+        "D-08 violated: the process guard spread to a write route — a forked child could not offload"
+    )
+    assert six["<key>.npy"].exists() and six["<key>.meta.json"].exists(), (
+        "D-08 violated: the forked child's offload produced no codec pair, so the control proves nothing"
+    )
+
+
+def test_copy_copy_in_the_constructing_process_purges_normally(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-02 / STORE-04 / D-05 — the case the rejected alternative got wrong.
+
+    ``copy.copy`` travels ``__reduce_ex__`` → ``__getstate__`` → ``__setstate__``, so a
+    "reconstructed copy" flag stamped in ``__setstate__`` would refuse here — a
+    false positive on a legitimate same-process copy, and the measured reason that
+    alternative was rejected. The pid comparison gets it right because the pid *is*
+    the same. Asserted on the file listing, not merely on the absence of an exception.
+    """
+    key = "sameproc"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    twin = copy.copy(store)
+
+    twin.purge(key)
+
+    _assert_all_six_gone(tmp_cache_dir, key)
+    assert sorted(p.name for p in tmp_cache_dir.iterdir()) == [], (
+        "a same-process copy must purge exactly as the original would"
+    )
+
+
+def test_the_owner_pid_survives_the_pickle_protocol(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-02 / STORE-04 / D-05 — the mechanism, pinned independently of the fork harness.
+
+    If this ever goes red while the fork tests stay green, the guard has started
+    working by accident rather than by the attribute it is documented to use.
+    """
+    store = _offloaded_store(make_store, tmp_cache_dir, "roundtrip")
+
+    restored = pickle.loads(pickle.dumps(store))
+
+    assert restored._owner_pid == os.getpid(), (
+        "D-05 violated: _owner_pid did not ride __getstate__/__setstate__, so a worker copy would "
+        "compare its own pid against a value this process never set"
+    )
+    assert store._owner_pid == os.getpid()
+
+
+def test_the_refusal_message_names_the_key_and_both_pids(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-02 / STORE-04 / D-06 + Phase-14 D-13's message register.
+
+    The foreign process is simulated in-process by moving the *owner* pid rather than
+    the caller's, so the message can be matched deterministically without a fork. A
+    refusal that does not say which key, which owner and which caller leaves the
+    reader of a worker traceback with nothing to act on.
+    """
+    key = "named"
+    store = _offloaded_store(make_store, tmp_cache_dir, key)
+    foreign_owner = os.getpid() + 1
+    store._owner_pid = foreign_owner
+
+    with pytest.raises(StorePurgeRefusedError, match=rf"'{key}'.*{foreign_owner}.*{os.getpid()}"):
+        store.purge(key)
+
+    _assert_at_least_the_offloaded_three_survive(tmp_cache_dir, key)
+
+
+def _assert_at_least_the_offloaded_three_survive(cache_dir: Path, key: str) -> None:
+    """Assert the three artefacts an offloaded key owns survived a refused purge."""
+    six = _six_artefact_paths(cache_dir, key)
+    for artefact in ("<key>.npy", "<key>.meta.json", "<key>.dat"):
+        assert six[artefact].exists(), (
+            f"SC-2 violated: a refused purge unlinked {artefact} — the refusal must precede every mutation"
+        )
