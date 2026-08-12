@@ -19,6 +19,7 @@ Defines the offload-to-memmap / load-back-into-memory protocol that
 
 import logging
 import os
+import stat
 import tempfile
 import threading
 import weakref
@@ -535,6 +536,61 @@ class LazyDiskCache(ABC):
                         os.fsync(tmp_fd)
                     finally:
                         os.close(tmp_fd)
+
+                    # CARRY THE DESTINATION'S MODE ACROSS THE RENAME
+                    # (STORE-08 / G-3 / CR-02, CWE-732). The mechanism is
+                    # invisible from the call site, so it is written down:
+                    # `os.replace` moves the temporary's **inode**, carrying its
+                    # mode, owner and ACLs and discarding whatever the
+                    # destination had -- so preserving the destination's
+                    # permissions is something the rename cannot do for you. The
+                    # temporary is created by `np.memmap(..., mode="w+")`, i.e.
+                    # at `0o666 & ~umask`, and without this step plan 15-05's
+                    # atomic route silently widened `tempfile.mkstemp`'s
+                    # deliberate `0o600` to `0o644` on the DEFAULT, unconfigured
+                    # branch. Measured: `0o600` at phase base 9c80f64, `0o644`
+                    # at 0956838.
+                    #
+                    # `final_path`, not `self._cache_path`: the two differ on the
+                    # adopted-symlink shape, and it is the resolved target whose
+                    # mode the rename actually replaces -- the same reason the
+                    # rename itself targets the resolved path.
+                    #
+                    # THE ABSENT DESTINATION GETS NO CHMOD, and that is the
+                    # correct spelling rather than an omission -- a future reader
+                    # arriving from CR-02, which writes `desired = 0o600` here,
+                    # will try to "finish" this branch and must not. What is
+                    # being preserved is *the mode the destination would have
+                    # been created with*, and the pre-change code created it with
+                    # this very same `np.memmap(..., mode="w+")` call on the
+                    # final name -- so the temporary already carries exactly that
+                    # value and leaving it alone reproduces it byte for byte.
+                    # Forcing `0o600` would tighten every configured-cache-dir
+                    # first write, which is a policy change rather than a
+                    # regression fix; and computing the umask to derive it has no
+                    # race-free spelling, since `os.umask(0)` is process-global
+                    # and would trade a permissions defect for a thread-safety
+                    # one.
+                    #
+                    # PLACEMENT IS LOAD-BEARING, not incidental: this sits inside
+                    # the commit `try`, so a failing `chmod` is caught by the
+                    # handler below, which drops the local reference, unlinks the
+                    # temporary and re-raises with the live object and the
+                    # previously-valid `.dat` -- bytes *and* mode -- untouched. A
+                    # chmod outside the handler would leave a temporary behind
+                    # and a half-committed permission state, which is precisely
+                    # the D-15a property this branch already owns. It is also
+                    # textually before the rename: chmod-ing after the replace
+                    # would reach the same final mode in the simple case but
+                    # would publish the artefact under its final name, briefly
+                    # world-readable, before tightening it.
+                    try:
+                        destination_mode: Optional[int] = stat.S_IMODE(os.stat(final_path).st_mode)
+                    except FileNotFoundError:
+                        destination_mode = None
+                    if destination_mode is not None:
+                        os.chmod(tmp_path, destination_mode)
+
                     os.replace(str(tmp_path), str(final_path))
                     # POSIX dir-fsync so the rename itself is crash-durable.
                     # It lives INSIDE this branch and carries no guard of its

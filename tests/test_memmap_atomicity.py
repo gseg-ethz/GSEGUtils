@@ -200,6 +200,16 @@ def _temporaries_in(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir() if p.name.endswith(paths.TMP_SUFFIX))
 
 
+def _mode_of(path: Path) -> int:
+    """Return the permission bits of ``path`` (Plan 15-07 / G-3).
+
+    ``S_IMODE`` rather than a raw ``st_mode & 0o777`` so the spelling matches
+    the one the source side uses to *capture* the mode, and so a failure prints
+    the same quantity the fix reads.
+    """
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
 def _fail_replace_on_temporaries(monkeypatch: pytest.MonkeyPatch, errno: int = 28) -> None:
     """Make ``os.replace`` raise ``ENOSPC`` for renames whose source is a temporary.
 
@@ -809,4 +819,61 @@ def test_write_order_is_flush_then_fsync_then_replace_then_dir_fsync(
     assert i_replace < i_dir_fsync, (
         f"D-15 regressed: the directory fsync preceded the rename it exists to make durable. "
         f"Recorded sequence: {events}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group G — the destination's permissions survive the atomic rename
+# (POSIX-marked: both `os.replace`'s inode semantics and the mode bits
+# themselves are POSIX-scoped, exactly like Groups A/B/C/F)
+# ---------------------------------------------------------------------------
+
+
+@POSIX_ONLY
+def test_the_default_unconfigured_branch_keeps_mkstemps_0600_across_the_atomic_rename() -> None:
+    """Plan 15-07 / G-3 / CR-02 / CWE-732 — the phase-introduced permission regression.
+
+    ``os.replace`` moves the temporary's **inode** onto the final name, carrying
+    that inode's mode and discarding the destination's. The victim is the
+    default, unconfigured branch: ``_init_from_config`` creates the ``.dat``
+    with ``tempfile.mkstemp``, whose entire purpose is ``0o600``, and the first
+    conversion threw that away for ``0o666 & ~umask``.
+
+    Measured, not read (same script against both trees)::
+
+        9c80f64 (phase base)  mkstemp created: 0o600   after convert: 0o600
+        0956838 (phase HEAD)  mkstemp created: 0o600   after convert: 0o644
+
+    On a shared ``/scratch`` or a multi-user ``/tmp`` that is the whole payload
+    of every cache entry built without an explicit ``cache_path``, readable by
+    any local user, with nothing logged and nothing raised.
+
+    ``enable_caching=True`` so the *construction* itself takes the conversion —
+    with the ``enable_caching=False`` default no write happens at build time and
+    the first reading would be ``mkstemp``'s own mode, which asserts nothing
+    about the route under test.
+    """
+    entry = DiskBackedNDArray(
+        np.arange(64, dtype=np.float32),
+        enable_caching=True,
+        purge_disk_on_gc=False,
+        automatic_offloading=False,
+    )
+    dat = Path(entry.cache_path)
+    try:
+        after_construction = _mode_of(dat)
+        entry._convert_to_memmap()
+        after_second = _mode_of(dat)
+    finally:
+        dat.unlink(missing_ok=True)
+
+    assert after_construction == 0o600, (
+        f"STORE-08 / CWE-732: the unconfigured branch's <key>.dat is {oct(after_construction)} after "
+        f"construction, not tempfile.mkstemp's 0o600. Measured 0o600 at phase base 9c80f64 and "
+        f"0o644 at 0956838 — os.replace carried the temporary's umask-default mode onto the final name"
+    )
+    assert after_second == 0o600, (
+        f"STORE-08 / CWE-732: a second conversion widened the unconfigured branch's <key>.dat to "
+        f"{oct(after_second)}. The destination's mode must be carried across the rename on every "
+        f"conversion, not merely on the first. Measured 0o600 at 9c80f64, 0o644 at 0956838"
     )
