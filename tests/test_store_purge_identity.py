@@ -27,8 +27,10 @@ are not deleted: they remain valid narrow assertions on the ``tracked`` route.
 ``pytest-randomly`` shuffles test order, so nothing here carries cross-test state.
 """
 
+import copy
 import gc
 import os
+import pickle
 import weakref
 from pathlib import Path
 from typing import Callable, Iterable
@@ -330,6 +332,127 @@ def test_the_registry_does_not_keep_an_entry_alive(make_store: MakeStore, tmp_ca
         "default purge_disk_on_gc=True. A registry that merely DEFERRED the collection would show up exactly "
         "here, so this half is asserted as well as the weakref's death"
     )
+
+
+def _assert_purge_detaches(store: DiskBackedStore[DiskBackedNDArray], key: str, entry: DiskBackedNDArray) -> None:
+    """Drive the purge-then-ABA sequence on ``store`` and assert ``entry`` was disarmed.
+
+    Factored out because three of the tests below differ only in *which store object*
+    they drive -- the original, its unpickled twin, its shallow copy -- and the
+    sequence they drive is the same one
+    ``test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping`` established.
+    """
+    finalizer = entry._finalizer
+    assert finalizer.alive, "precondition: a purge_disk_on_gc=True entry registers a finalizer"
+
+    store.purge(key)
+
+    assert finalizer.alive is False, (
+        f"purge({key!r}) on this store left the entry's weakref.finalize ARMED against <key>.dat. The registry "
+        f"did not survive whatever boundary this store crossed, so the detach found nothing to disarm"
+    )
+
+
+def test_a_pickled_store_still_detaches_on_purge(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-09 / D-15-G1 / STORE-05 concurrency -- the loky round-trip.
+
+    Two properties, and the first is the one a forgotten ``__getstate__`` line breaks
+    outright: ``pickle.dumps(store)`` must not raise. A ``weakref.ref`` is not
+    picklable and the registry rides ``self.__dict__.copy()`` unless it is explicitly
+    removed, so leaving it in would raise
+    ``TypeError: cannot pickle 'weakref.ReferenceType' object`` -- and the joblib path
+    force-offloads and pickles on **every** dispatch, making that the common failure
+    rather than a rare one.
+
+    The second is that the reconstructed store's ``purge`` still detaches. The
+    reconstructed store reloads its entries from disk through ``_load_entry``, so it
+    gets fresh registrations by the adoption route whether or not ``__setstate__``
+    re-registers -- which is exactly why the copy test below is the one that pins the
+    re-registration, and why this test cannot substitute for it.
+    """
+    key = "pickled"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _FIRST.copy())
+
+    revived = pickle.loads(pickle.dumps(store))
+
+    assert key in revived, "precondition: the round-trip must carry the key across"
+    revived_entry = revived.store[key]
+    assert revived_entry is not None, "precondition: the reconstructed store reloaded the entry from disk"
+    _assert_purge_detaches(revived, key, revived_entry)
+    assert_nothing_derived_from(tmp_cache_dir, key)
+
+
+def test_a_copied_store_still_detaches_on_purge(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-09 / D-15-G1 -- the regression ``__setstate__``'s re-registration prevents.
+
+    ``copy.copy(store)`` travels ``__reduce_ex__`` -> ``__getstate__`` ->
+    ``__setstate__`` in-process, and ``__getstate__`` hands over the **same entry
+    objects**. So a copy that came back with an empty registry would have a ``purge``
+    that no longer detaches even on the ``tracked`` route -- the one route that worked
+    *before* ``15-09``. That makes the re-registration a guard against a silent
+    regression of existing behaviour, not a nicety attached to a new feature, and this
+    test is what says so: delete the re-registration and this goes red while
+    ``test_a_pickled_store_still_detaches_on_purge`` stays green.
+
+    The **original** entry is held and asserted on, deliberately: it is the object the
+    copy shares, and it is the one whose finalizer would outlive the copy's purge.
+
+    ``enable_caching=False`` is **required**, not incidental, and the reason is a
+    correction to the premise as ``15-09`` stated it: ``__getstate__`` opens with
+    ``if self._enable_caching: self.offload(pickle_container=True)``, so with caching
+    **on** every entry is offloaded to ``None`` before the snapshot is taken and
+    ``__setstate__`` reloads a genuinely *different* object from disk. The
+    same-object shape the re-registration exists for is therefore reachable only on
+    the caching-off configuration -- which is also the one where ``__setstate__``
+    skips its reload loop entirely, leaving the restored mapping as the only source
+    of registrations. ``purge_disk_on_gc=True`` still arms a finalizer here: it is
+    gated on ``_cache_path`` and the flag, never on ``enable_caching``.
+    """
+    key = "copied"
+    store = make_store(tmp_cache_dir, enable_caching=False, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _FIRST.copy())
+    original_entry = store.store[key]
+    assert original_entry is not None, "precondition: add_data_to_store tracks a live entry"
+
+    twin = copy.copy(store)
+
+    assert twin.store[key] is original_entry, (
+        "precondition: __getstate__ hands over the same entry OBJECT, which is what makes an empty registry "
+        "on the copy a regression rather than a missing feature"
+    )
+    _assert_purge_detaches(twin, key, original_entry)
+
+
+def test_a_store_reopened_over_an_existing_directory_purges_a_key_it_never_registered(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-09 / D-15-G1 / D-02 -- the reopen rescan is not a registration route.
+
+    The rescan in ``__init__`` installs ``None``, not an entry, so a store reopened
+    over an existing cache directory carries an **empty** registry by construction.
+    That must not make the key unpurgeable: ``purge`` reaches it through the
+    untracked-orphan path D-02 widened the existence check for, and the detach loop
+    simply finds nothing to disarm -- which is correct, because there is no live entry
+    in this process whose finalizer could fire.
+    """
+    key = "reopened"
+    first = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    first.add_data_to_store(key, _FIRST.copy())
+    first.offload(pickle_container=True)
+    del first
+    gc.collect()
+
+    reopened = make_store(tmp_cache_dir, enable_caching=False, purge_disk_on_gc=False)
+    assert key in reopened, "precondition: the rescan re-adopts the key from its codec pair"
+    assert reopened._entry_registry == {}, (
+        "precondition: the rescan installs None rather than an entry, so it registers nothing -- if this ever "
+        "becomes non-empty the comment at the rescan's `self._store[key] = None` has become wrong"
+    )
+
+    reopened.purge(key)
+
+    assert_nothing_derived_from(tmp_cache_dir, key)
 
 
 # ---------------------------------------------------------------------------

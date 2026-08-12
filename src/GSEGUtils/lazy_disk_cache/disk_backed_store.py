@@ -529,6 +529,12 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                     key,
                 )
                 continue
+            # D-15-G1 — NOT a registration site, and the absence is a fact
+            # rather than an omission. This route installs `None`, not an
+            # entry: there is no object to weakly reference and no finalizer to
+            # disarm later. A store reopened over an existing directory
+            # therefore carries an EMPTY registry and reaches such a key
+            # through the untracked-orphan path in `purge` (D-02) instead.
             self._store[key] = None
 
     def _check_T(self, value: object) -> T:
@@ -642,6 +648,11 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
         loaded_obj = self._load_entry(key)
         self._store[key] = loaded_obj
+        # D-15-G1 — registration route 3 of 4: the ADOPTION route. A key
+        # reloaded from disk installs a live entry with its own freshly-armed
+        # finalizer, so it is a registration site for exactly the same reason
+        # the two write routes are.
+        self._register_entry(key, loaded_obj)
         return loaded_obj
 
     @overload
@@ -1010,6 +1021,15 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         """
         paths.validate_store_key(key, self._cache_dir)
         self._store[key] = self._check_T(value)
+        # D-15-G1 — registration route 2 of 4, and it HONOURS the no-syscall
+        # property this method's own docstring publishes: `_register_entry`
+        # performs no filesystem access at all, by contract stated in its
+        # docstring rather than by luck. Naming the coupling here because it
+        # runs the wrong way round — a future edit that added a path
+        # computation inside `_register_entry` would break a documented
+        # guarantee of THIS method from inside a different function, and
+        # nothing in the type system would notice.
+        self._register_entry(key, value)
 
     def __delitem__(self, key: str) -> None:
         """Remove ``key`` from the in-memory store, **leaving its files on disk**.
