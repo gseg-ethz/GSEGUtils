@@ -28,8 +28,9 @@ are not deleted: they remain valid narrow assertions on the ``tracked`` route.
 """
 
 import gc
+import os
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 import numpy as np
 import pytest
@@ -53,6 +54,116 @@ _SECOND = np.arange(4, dtype=np.float32) + 100.0
 #: Every open marker's reason names ``15-09``, so the plan obliged to remove them can
 #: find all of them with one ``grep -c '15-09'``.
 _G1_OPEN = "G-1 open at 0956838 - closed by 15-09; remove this marker there"
+_G2A_OPEN = "G-2a open at 0956838 - closed by 15-09; remove this marker there"
+
+_POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="planting a <key>.dat symlink is POSIX-only")
+
+
+# ---------------------------------------------------------------------------
+# The SC-1 instrument. One helper, shared, prefix-safe.
+# ---------------------------------------------------------------------------
+
+
+def assert_nothing_derived_from(
+    cache_dir: Path,
+    key: str,
+    *,
+    expected_survivors: Iterable[str] = (),
+    expected_files: Iterable[str] = (),
+) -> None:
+    """Assert SC-1's universal quantifier for ``key``: nothing derived from it is left.
+
+    Two checks, and the second is the one that catches G-2.
+
+    1. **None of the six builder-produced names exists.** Membership is derived
+       through ``paths.get_{meta,meta_tmp,npy,npy_tmp,memmap,memmap_tmp}_path`` --
+       the same seam ``purge`` builds through (D-14) -- so this test and the
+       implementation cannot drift into two vocabularies. ``is_symlink()`` is checked
+       alongside ``exists()`` because a *dangling* ``<key>.dat`` link is still
+       something derived from the key, and ``exists()`` alone reports ``False`` for it.
+    2. **Nothing unaccounted-for is left in the directory.** The listing minus the
+       artefacts of every key in ``expected_survivors`` and every name in
+       ``expected_files`` must be empty. This is what makes the helper able to see a
+       *residual payload* -- a file whose name does not derive from the key but whose
+       bytes are the key's data, which is exactly the adopted-symlink defect.
+
+    **Why a prefix glob is the wrong instrument.** The published contract page
+    (``docs/source/LazyDiskCache.rst:546-549``) warns that globbing the key followed by
+    a dot and a star *"also matches a longer key's artefacts, so ``feat`` and
+    ``feat2`` are not independent under a naive check."* Both naive forms fail, in
+    different directions: a bare ``startswith(key)`` claims ``feat2.dat`` belongs to
+    ``feat``, and the dotted glob claims ``feat.bar.dat`` does. The builder-derived set
+    is immune to both, and
+    ``test_the_listing_helper_does_not_confuse_a_prefix_neighbour`` is the standing
+    control that stops a future edit from weakening this back into a glob.
+
+    Parameters
+    ----------
+    cache_dir : pathlib.Path
+        The store's cache directory, listed non-recursively.
+    key : str
+        The purged key. None of its six derived artefacts may remain.
+    expected_survivors : Iterable[str], optional
+        Other **store keys** whose artefacts are legitimately still present. Their six
+        derived names each become an accounted-for file.
+    expected_files : Iterable[str], optional
+        Literal file **names** that are legitimately still present (a legacy
+        ``<key>.pkl`` under D-09, say). Nothing is guessed: a helper that inferred
+        which files were legitimate would hide the very defect this one exists to
+        catch, so every survivor is declared by the caller.
+    """
+    derived = {
+        "<key>.meta.json": paths_mod.get_meta_path(cache_dir, key),
+        "<key>.meta.json.tmp": paths_mod.get_meta_tmp_path(cache_dir, key),
+        "<key>.npy": paths_mod.get_npy_path(cache_dir, key),
+        "<key>.npy.tmp": paths_mod.get_npy_tmp_path(cache_dir, key),
+        "<key>.dat": paths_mod.get_memmap_path(cache_dir, key),
+        "<key>.dat.tmp": paths_mod.get_memmap_tmp_path(cache_dir, key),
+    }
+    survived = sorted(name for name, path in derived.items() if path.exists() or path.is_symlink())
+    assert not survived, (
+        f"SC-1 violated for key {key!r}: {survived} still exist after purge. Every artefact whose name "
+        f"derives from the key must be gone -- that is the rule the contract page states and the one a "
+        f"directory listing is supposed to confirm"
+    )
+
+    accounted: set[str] = set()
+    for survivor_key in expected_survivors:
+        accounted.update(path.name for path in _derived_names(cache_dir, survivor_key))
+    accounted.update(expected_files)
+    unaccounted = sorted(path.name for path in cache_dir.iterdir() if path.name not in accounted)
+    assert not unaccounted, (
+        f"SC-1 violated for key {key!r}: the cache directory still holds {unaccounted}, which belongs to "
+        f"neither a declared survivor key {sorted(expected_survivors)!r} nor a declared survivor file "
+        f"{sorted(expected_files)!r}. A purge the method reported as complete left the key's data in the "
+        f"directory under a name that does not derive from the key"
+    )
+
+
+def _derived_names(cache_dir: Path, key: str) -> tuple[Path, ...]:
+    """Return the six builder-produced artefact paths for ``key``."""
+    return (
+        paths_mod.get_meta_path(cache_dir, key),
+        paths_mod.get_meta_tmp_path(cache_dir, key),
+        paths_mod.get_npy_path(cache_dir, key),
+        paths_mod.get_npy_tmp_path(cache_dir, key),
+        paths_mod.get_memmap_path(cache_dir, key),
+        paths_mod.get_memmap_tmp_path(cache_dir, key),
+    )
+
+
+def _plant_adopted_symlink(cache_dir: Path, key: str, payload_name: str) -> Path:
+    """Plant a real payload inside ``cache_dir`` and point ``<key>.dat`` at it.
+
+    Planted **before the store exists**, which is what makes Phase 14's D-31
+    resolved-containment check admit the shape, as it is meant to: the target is
+    inside the cache directory, so the resolved final component is contained.
+    """
+    payload = cache_dir / payload_name
+    payload.write_bytes(b"")
+    link = paths_mod.get_memmap_path(cache_dir, key)
+    link.symlink_to(payload)
+    return payload
 
 
 def _apply_route(store: DiskBackedStore[DiskBackedNDArray], key: str, route: str) -> None:
@@ -162,4 +273,107 @@ def test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping(
     assert np.array_equal(np.asarray(store[key]), _SECOND), (
         f"G-1 / SC-3 violated on route={route!r}: <key>.dat exists but does not hold the replacement array. "
         f"A file that exists holding the wrong bytes is a different defect wearing the same green tick"
+    )
+
+
+# ---------------------------------------------------------------------------
+# G-2a — the adopted symlink, reachable through the library's own write route.
+# ---------------------------------------------------------------------------
+
+
+def test_the_listing_helper_does_not_confuse_a_prefix_neighbour(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-08 / SC-1 -- the helper's own positive control.
+
+    Purge ``feat`` in a directory that also holds the artefacts of two neighbours a
+    naive check gets wrong in *different* directions: ``feat2`` defeats a bare
+    ``startswith(key)``, and the dotted key ``feat.bar`` defeats a glob of the key
+    followed by a dot and a star. Both are legal store keys (``test_store_key_rules.py``
+    accepts ``foo.bar``). The helper must pass here -- if a future edit weakens it
+    into either naive form, this test is what goes red.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("feat", _FIRST.copy())
+    store.add_data_to_store("feat2", _FIRST.copy())
+    store.add_data_to_store("feat.bar", _FIRST.copy())
+    for neighbour in ("feat2", "feat.bar"):
+        assert paths_mod.get_memmap_path(tmp_cache_dir, neighbour).exists(), (
+            f"precondition: neighbour {neighbour!r} must have a materialised <key>.dat to be confusable at all"
+        )
+
+    store.purge("feat")
+
+    assert_nothing_derived_from(tmp_cache_dir, "feat", expected_survivors=("feat2", "feat.bar"))
+    for neighbour in ("feat2", "feat.bar"):
+        assert paths_mod.get_memmap_path(tmp_cache_dir, neighbour).exists(), (
+            f"purging 'feat' removed the prefix-adjacent neighbour {neighbour!r}'s <key>.dat"
+        )
+
+
+@_POSIX_ONLY
+def test_an_adopted_symlink_dat_is_written_through_not_replaced(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-08 / D-17 / STORE-03 -- 15-05's adoption behaviour, held as a control.
+
+    ``lazy_disk_cache.py:508-524`` renames onto ``self._cache_path.resolve()`` rather
+    than onto the bare name, precisely so an adopted ``<key>.dat`` keeps being a link
+    and the caller's payload keeps receiving data. This test asserts only that.
+
+    It exists so that a "fix" for G-2a which made ``purge`` pass by breaking adoption
+    at *write* time -- replacing the link with a regular file, orphaning the caller's
+    payload silently -- would show up as a regression rather than as progress.
+    """
+    key = "adopted_control"
+    payload = _plant_adopted_symlink(tmp_cache_dir, key, "innocuous_control.bin")
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+
+    store.add_data_to_store(key, _FIRST.copy())
+
+    link = paths_mod.get_memmap_path(tmp_cache_dir, key)
+    assert link.is_symlink(), (
+        "adoption broken: the library replaced the adopted <key>.dat symlink with a regular file, so the "
+        "payload the caller adopted has silently stopped receiving data (D-17 / STORE-03)"
+    )
+    assert np.array_equal(np.fromfile(payload, dtype=np.float32), _FIRST), (
+        f"adoption broken: the payload behind the adopted link does not hold the key's data. The library "
+        f"must write THROUGH the link -- read back {np.fromfile(payload, dtype=np.float32)!r}"
+    )
+
+
+@_POSIX_ONLY
+@pytest.mark.xfail(strict=True, reason=_G2A_OPEN)
+def test_purge_removes_the_payload_behind_an_adopted_symlink_dat(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-08 / G-2a / SC-1 / STORE-04 -- the shape the library itself calls first-class.
+
+    ``lazy_disk_cache.py:510-513`` names it: *"An ``<key>.dat`` that is a symlink
+    pointing at a real payload file inside the cache directory is the legitimate
+    **adopted entry** that D-17 and STORE-03 exist to protect."* The library then
+    writes the key's data through it.
+
+    ``purge`` builds six names and calls ``artefact.unlink(missing_ok=True)``
+    (``disk_backed_store.py:1188``), which removes the **link** and never the resolved
+    target. So it reports a complete removal while the key's exact payload is still
+    sitting in the cache directory -- and SC-1's binding verification clause, *"verified
+    by listing the directory afterwards"*, reads ``['innocuous.bin']``.
+
+    Reconstructs the verifier's ``sc1_reachable.py``.
+    """
+    key = "adopted"
+    payload = _plant_adopted_symlink(tmp_cache_dir, key, "innocuous.bin")
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _FIRST.copy())
+
+    # Assert the SHAPE before asserting the defect: a test that quietly failed to set
+    # up an adopted entry would pass by testing the ordinary path instead.
+    link = paths_mod.get_memmap_path(tmp_cache_dir, key)
+    assert link.is_symlink(), "precondition: <key>.dat must still be a symlink after the library's own write"
+    assert np.array_equal(np.fromfile(payload, dtype=np.float32), _FIRST), (
+        "precondition: the library must have written the key's data through the link into the payload"
+    )
+
+    store.purge(key)  # returns cleanly today; that is half the defect, so it is recorded, not routed around
+
+    assert_nothing_derived_from(tmp_cache_dir, key)
+    assert not payload.exists(), (
+        f"G-2a / SC-1 violated: purge unlinked the LINK and left the key's payload at {payload.name!r} "
+        f"inside the cache directory, holding the key's exact bytes. purge must resolve <key>.dat and "
+        f"remove what it points at when the target is inside the cache directory"
     )
