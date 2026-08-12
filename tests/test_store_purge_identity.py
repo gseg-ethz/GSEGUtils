@@ -55,6 +55,7 @@ _SECOND = np.arange(4, dtype=np.float32) + 100.0
 #: find all of them with one ``grep -c '15-09'``.
 _G1_OPEN = "G-1 open at 0956838 - closed by 15-09; remove this marker there"
 _G2A_OPEN = "G-2a open at 0956838 - closed by 15-09; remove this marker there"
+_G2B_OPEN = "G-2b open at 0956838 - closed by 15-09; remove this marker there"
 
 _POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="planting a <key>.dat symlink is POSIX-only")
 
@@ -377,3 +378,182 @@ def test_purge_removes_the_payload_behind_an_adopted_symlink_dat(make_store: Mak
         f"inside the cache directory, holding the key's exact bytes. purge must resolve <key>.dat and "
         f"remove what it points at when the target is inside the cache directory"
     )
+
+
+# ---------------------------------------------------------------------------
+# G-2b — a foreign `_cache_path`, entirely inside the public API.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason=_G2B_OPEN)
+def test_purge_does_not_orphan_a_foreign_cache_path_entry(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-08 / G-2b / SC-1 / STORE-04 -- the leak ``purge`` creates itself.
+
+    An entry constructed with a ``cache_path`` outside the store's cache directory and
+    inserted with ``store[key] = entry`` writes its ``.dat`` out there.
+    ``disk_backed_store.py:1096-1106`` builds six paths from
+    ``(self._cache_dir, key)`` and nothing in ``purge`` ever reads the entry's own
+    ``_cache_path``, so the method raises nothing -- not even
+    ``StorePurgeIncompleteError``, because the six names it built never existed --
+    drops the key, and **detaches the finalizer that was the only thing that would
+    ever have removed the file**. A file GC would have cleaned becomes permanently
+    orphaned, by the verb whose whole purpose is removal. Reproduces the verifier's
+    ``sc1_repro.py``.
+
+    **The path is set at construction, not by assignment**: the ``cache_path`` setter
+    is sealed (``lazy_disk_cache.py:792-812``, D-01) and assigning to it raises, so a
+    test that reached for the setter would fail with the seal's own error and prove
+    nothing about ``purge``.
+
+    **Deliberately no assertion on an exception type.** ``15-09`` introduces a
+    dedicated refusal error class for this shape; naming that symbol from a wave-7
+    test would raise ``AttributeError`` at *import* and turn a strict-xfail into a
+    collection error -- reported as an error rather than an ``xfail``, and it would
+    take the whole module down with it. So this test pins the three invariants that
+    need no new type name, and ``15-09`` Task 3 adds the typed companion once the
+    symbol exists. The split is *behaviour pinned first, contract pinned second*, and
+    it is deliberate rather than an oversight.
+    """
+    key = "foreign"
+    elsewhere = tmp_cache_dir.parent / "elsewhere"
+    elsewhere.mkdir()
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+
+    entry = DiskBackedNDArray(
+        _FIRST.copy(),
+        enable_caching=True,
+        cache_path=elsewhere / key,
+        purge_disk_on_gc=True,
+    )
+    store[key] = entry
+
+    foreign_dat = elsewhere / f"{key}{paths_mod.MEMMAP_SUFFIX}"
+    assert foreign_dat.exists(), "precondition: the entry must have written its .dat outside the cache directory"
+    assert foreign_dat.stat().st_size > 0, "precondition: the foreign .dat must hold real bytes"
+    assert_nothing_derived_from(tmp_cache_dir, key)
+
+    # The subject is the invariants, not the control flow: today purge returns
+    # cleanly, in 15-09 it is expected to raise, and this test must pass in both.
+    observed: str = "no exception"
+    try:
+        store.purge(key)
+    except Exception as exc:  # noqa: BLE001 - the type is recorded, never asserted on
+        observed = type(exc).__name__
+
+    assert entry._finalizer.alive is True, (
+        f"G-2b violated (purge raised: {observed}): purge detached the finalizer for a file it did not "
+        f"remove. That finalizer was the ONLY thing that would ever have unlinked the foreign .dat, so "
+        f"purge has converted a GC-cleanable file into a permanent leak it created itself"
+    )
+    assert key in store, (
+        f"G-2b violated (purge raised: {observed}): purge dropped the key while removing none of its data. "
+        f"A refusal must leave the key tracked -- SC-2's no-op property, extended to this refusal"
+    )
+
+    # Drop BOTH references, and drop the store's through `pop`, which is in-memory
+    # only and unlinks nothing (STORE-05). Written world-agnostically on purpose: at
+    # HEAD the key is already untracked here, and after 15-09 the store still holds
+    # it, so a bare `del entry` would not be enough to collect the entry there.
+    store.pop(key, None)
+    del entry
+    gc.collect()
+
+    assert not foreign_dat.exists(), (
+        f"G-2b violated (purge raised: {observed}): after dropping the entry and forcing a collection the "
+        f"foreign .dat is STILL on disk -- a permanent leak. purge must not disarm the only cleanup that "
+        f"exists for a file it declined to remove"
+    )
+
+
+# ---------------------------------------------------------------------------
+# STORE-04 / idempotency and STORE-05 / boundary — the controls, green today.
+# ---------------------------------------------------------------------------
+
+
+def test_purging_twice_is_safe_and_the_second_call_raises_key_error(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-08 / STORE-04 / D-02 -- the idempotency probe.
+
+    ``purge`` is idempotent *in effect*: the second call changes nothing on disk. It
+    is not idempotent *in signalling*, and that is D-02's deliberate contract -- a key
+    present neither in tracking nor on disk raises ``KeyError``, because a silent
+    no-op on a typo'd key would make the removal verbs disagree with ``__delitem__``
+    and ``pop`` about missing keys.
+
+    The prefix-adjacent neighbour is added **between** the two purges, so the repeat
+    is the only thing that could have touched it. That is the assertion a naive
+    prefix-based implementation of ``purge`` would fail.
+    """
+    key = "feat"
+    neighbour = "feat2"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    store.add_data_to_store(key, _FIRST.copy())
+
+    store.purge(key)
+    assert_nothing_derived_from(tmp_cache_dir, key)
+
+    store.add_data_to_store(neighbour, _SECOND.copy())
+    neighbour_dat = paths_mod.get_memmap_path(tmp_cache_dir, neighbour)
+    assert neighbour_dat.exists(), "precondition: the neighbour must be on disk before the repeat purge"
+
+    with pytest.raises(KeyError):
+        store.purge(key)
+
+    assert neighbour_dat.exists(), (
+        "the repeat purge of 'feat' removed the prefix-adjacent neighbour 'feat2'.dat. The six names are "
+        "built from the exact key (D-14), so no neighbour can ever be in the set"
+    )
+    assert np.array_equal(np.asarray(store[neighbour]), _SECOND), (
+        "the repeat purge left the neighbour's file in place but corrupted its contents"
+    )
+    assert_nothing_derived_from(tmp_cache_dir, key, expected_survivors=(neighbour,))
+
+
+def test_the_three_axes_are_still_in_memory_only_beside_this_net(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-08 / STORE-05 -- the boundary probe, sited here on purpose.
+
+    ``del``, ``pop`` and ``clear`` each drop tracking and unlink **nothing**;
+    ``purge`` is the only removal that reaches the filesystem. ``STORE-05`` requires
+    that *where the data lives*, *whether the key is tracked* and *whether the file
+    outlives the object* stay three separate axes.
+
+    ``tests/test_store_lifecycle_axes.py`` already owns this property and remains its
+    canonical home -- this is a **deliberate second assertion**, not a duplicate that
+    escaped review. It is sited in the module that is about to teach ``purge`` to
+    reach further (``15-09`` makes it resolve symlinks and consult a registry), so a
+    change that accidentally made a *drop* route durable fails right here, next to the
+    change that caused it, rather than in a file nobody was looking at.
+
+    ``purge_disk_on_gc=False`` throughout: with it ``True`` the entries' own
+    finalizers would unlink the ``.dat`` files at the collection that follows each
+    drop, and the test would be measuring the GC axis instead of the tracking axis.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    keys = ("axis_del", "axis_pop", "axis_clear")
+    for key in keys:
+        store.add_data_to_store(key, _FIRST.copy())
+    dats = {key: paths_mod.get_memmap_path(tmp_cache_dir, key) for key in keys}
+    for key, dat in dats.items():
+        assert dat.exists(), f"precondition: {key!r} must have a materialised <key>.dat"
+
+    del store["axis_del"]
+    gc.collect()
+    assert dats["axis_del"].exists(), (
+        "STORE-05 violated: `del store[key]` unlinked the key's <key>.dat. It drops tracking and must "
+        "unlink nothing -- purge is the durable counterpart, one method away"
+    )
+
+    store.pop("axis_pop")
+    gc.collect()
+    assert dats["axis_pop"].exists(), (
+        "STORE-05 violated: `store.pop(key)` unlinked the key's <key>.dat. pop routes through "
+        "__delitem__ and is in-memory only"
+    )
+
+    store.clear()
+    gc.collect()
+    assert dats["axis_clear"].exists(), (
+        "STORE-05 violated: `store.clear()` unlinked a key's <key>.dat. clear routes through "
+        "__delitem__ for every key and is in-memory only"
+    )
+    for key, dat in dats.items():
+        assert dat.exists(), f"STORE-05 violated: {key!r}'s <key>.dat did not survive the three drop routes"
