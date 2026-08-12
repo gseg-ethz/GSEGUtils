@@ -65,15 +65,81 @@ logger = logging.getLogger(__name__)
 
 
 class StorePurgeRefusedError(RuntimeError):
-    """Raised when :meth:`DiskBackedStore.purge` is called from a foreign process.
+    """Root of the :meth:`DiskBackedStore.purge` refusal family.
 
-    It deliberately does **not** join ``StoreKeyError``'s :class:`ValueError`
-    hierarchy, and the difference is the whole point of a second type: nothing
-    is wrong with the key. :class:`RuntimeError` says *you called this in the
-    wrong place*, which is exactly what happened, and the broad
-    ``except RuntimeError`` that worker code already writes still catches it
-    (D-07). Re-parenting it under a ``StoreError`` root buys taxonomic tidiness
-    at the cost of a published-type change, which Phase 14's D-12 rated one-way.
+    ↻ **WIDENED by Plan 15-09 (D-15-G2a).** This class used to describe itself
+    as one case — *"raised when* :meth:`DiskBackedStore.purge` *is called from a
+    foreign process"* — and that stopped being the whole truth the moment it
+    acquired a child. The widening is corrected here in text rather than left to
+    be inferred, because a caller who wrote ``except StorePurgeRefusedError``
+    around a purge, which the migration note tells them to, now catches a shape
+    whose *message* says "wrong process" and whose *reason* is something else.
+
+    **What every member of this family guarantees, and it is the load-bearing
+    part: nothing was touched.** The refusal is raised before the first
+    mutation, so the key is still tracked, every artefact is byte-identical, and
+    every finalizer is still armed (SC-2). That is a property a caller can act
+    on with one ``except``: *do not retry blindly, and do not go looking for
+    damage, because there is none.*
+
+    Two members today:
+
+    * this class, raised directly for the **foreign-process** case (D-05/D-08) —
+      a purge issued from a forked or unpickled copy would be deleting the
+      constructing process's data;
+    * :exc:`StorePurgeForeignArtefactError`, for the **foreign-artefact** case
+      (D-15-G2) — an artefact of the key resolves outside the store's own cache
+      directory, so removing it would make ``purge`` an arbitrary-delete verb.
+
+    The hierarchy choice is unchanged and still correct. It deliberately does
+    **not** join ``StoreKeyError``'s :class:`ValueError` hierarchy, and the
+    difference is the whole point of a second type: nothing is wrong with the
+    key. :class:`RuntimeError` says *you called this in the wrong place*, which
+    is exactly what happened in both cases, and the broad
+    ``except RuntimeError`` that worker code already writes still catches them
+    (D-07). Re-parenting this class under a ``StoreError`` root buys taxonomic
+    tidiness at the cost of a published-type change, which Phase 14's D-12 rated
+    one-way; **adding a child below it is not that change** — no existing handler
+    stops catching anything it caught before.
+    """
+
+
+class StorePurgeForeignArtefactError(StorePurgeRefusedError):
+    """Raised when an artefact of the key resolves outside the store's cache directory.
+
+    **What it means.** :meth:`DiskBackedStore.purge` reconciled the key's
+    effective artefact set — the resolved target of each of the six built paths
+    that exists, plus the resolved ``_cache_path`` of each live registered entry
+    — and found a member outside ``cache_dir``. Rather than reach out there and
+    unlink it, the method refused and touched nothing.
+
+    **Why it refuses rather than reaches** (D-15-G2). A removal verb that
+    deletes arbitrary caller-supplied filesystem locations is precisely the
+    shape Phase 14's containment layer exists to prevent. The offending path is
+    not built from the key — it is either an entry's own ``cache_path``, chosen
+    by whoever constructed the entry, or the target of a symlink someone planted
+    in the cache directory — so unlinking it would let a caller aim ``purge`` at
+    any file the process can write.
+
+    **What a caller can do about it.** ``purge`` is not the tool for this file.
+    Drop the entry and let garbage collection reclaim it — which still works,
+    and works *because* this method did **not** detach the entry's finalizer.
+    Disarming the only cleanup a file has while declining to remove it is how a
+    removal verb manufactures a permanent leak; see the *What a future reader
+    must not "fix"* list on :meth:`DiskBackedStore.purge`. For an outward
+    symlink, remove or repoint the link and purge again.
+
+    **Why it subclasses** :exc:`StorePurgeRefusedError` **rather than standing
+    alone** (D-15-G2a). Its defining property is not "bad key" and not "wrong
+    process" — it is *nothing was touched*, which is exactly the parent's
+    contract minus the parent's original reason. Subclassing turns
+    "refused implies no-op" into a type-level statement one ``except`` can rely
+    on, instead of a coincidence two sibling types happen to share. Rejected: a
+    standalone :class:`RuntimeError` subclass, which a carefully-written
+    ``except StorePurgeRefusedError`` would stop catching on a shape it wants to
+    treat identically; and parenting under ``StoreContainmentError``, whose
+    family is :class:`ValueError`-rooted and is about a path built **from the
+    key**, which this one by definition is not.
     """
 
 
@@ -610,6 +676,139 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._entry_registry.pop(key, None)
         return entries
 
+    def _reconcile_artefact_targets(
+        self, artefacts: tuple[Path, ...], registered: list[T]
+    ) -> tuple[dict[Path, Path], Optional[tuple[str, Path, Path]]]:
+        """Resolve ``key``'s effective artefact set and report the first foreign member.
+
+        The reconcile step D-15-G2 puts in :meth:`purge`, factored out so the
+        method's body reads as *reconcile, refuse, detach, drop, unlink*. It
+        performs **reads only** — no mutation of any kind — which is what lets
+        :meth:`purge` call it above its first mutation and keep SC-2's
+        bit-for-bit no-op true for the refusal it may raise as a result.
+
+        The effective artefact set, in full and as one rule rather than two
+        special cases:
+
+        * for each of the six built paths **that exists**, its resolved target;
+        * for each **live registered entry**, its resolved ``_cache_path``.
+
+        A member outside the cache directory is reported rather than raised on,
+        so the ``raise`` itself stays visible in :meth:`purge`'s own body above
+        the detach — the ordering SC-2 rests on should be readable in the method
+        that owns it, not delegated out of sight.
+
+        Containment goes through :func:`paths._assert_write_contained`, which is
+        the existing expression of *"the resolved path is inside this base"*: it
+        delegates the parent chain to :func:`paths._assert_contained` and adds
+        final-component resolution when — and only when — the component is a
+        symlink. That is exactly the discrimination needed here, and it is the
+        **write-flavoured** check for the right reason: an unlink is a mutation,
+        so the adopted-entry leniency D-17 grants a *read* must not apply. No
+        third containment comparison is written in this module.
+
+        Parameters
+        ----------
+        artefacts : tuple[pathlib.Path, ...]
+            The six paths :meth:`purge` built from the key.
+        registered : list[T]
+            The key's live entries, already read out of the weak registry by the
+            caller so the registry is consulted exactly once per purge.
+
+        Returns
+        -------
+        tuple[dict[pathlib.Path, pathlib.Path], tuple[str, pathlib.Path, pathlib.Path] or None]
+            The link-target map — populated **only** for artefacts that are
+            symlinks, so the ordinary shape adds no unlink call at all — and
+            either ``None`` or ``(origin, offending_path, resolved_target)`` for
+            the first member found outside the cache directory.
+        """
+        link_targets: dict[Path, Path] = {}
+        for artefact in artefacts:
+            if not artefact.exists():
+                # A path that is not there has no target to resolve and nothing
+                # outside to protect. A DANGLING `<key>.dat` link falls here and
+                # stays purgeable: unlinking the link itself is an in-cache
+                # operation whatever it points at, so refusing would be strictly
+                # unhelpful.
+                continue
+            try:
+                paths._assert_write_contained(self._cache_dir, artefact)
+            except paths.StoreContainmentError:
+                return link_targets, ("a built artefact path", artefact, artefact.resolve())
+            if artefact.is_symlink():
+                link_targets[artefact] = artefact.resolve()
+
+        for entry in registered:
+            cache_path = getattr(entry, "_cache_path", None)
+            if cache_path is None:
+                continue
+            entry_path = Path(cache_path)
+            try:
+                paths._assert_write_contained(self._cache_dir, entry_path)
+            except paths.StoreContainmentError:
+                return link_targets, ("a live entry's own cache_path", entry_path, entry_path.resolve())
+
+        return link_targets, None
+
+    def _unlink_artefacts(self, key: str, artefacts: tuple[Path, ...], link_targets: dict[Path, Path]) -> None:
+        """Unlink every artefact of ``key``, collecting failures and raising once (D-10).
+
+        The last step of :meth:`purge`, and the only one that is a *step* rather
+        than a decision: everything above it validates, refuses or reconciles.
+        It lives here rather than inline because ``purge``'s ordering argument is
+        the thing a reader has to follow, and a fourteen-line failure-collection
+        loop sitting under it competes for attention with the four guards that
+        actually carry the contract.
+
+        **Order: sidecars and ``.tmp`` names first, payloads last.** POSIX gives
+        no atomicity across N unlinks, so a partial failure must leave a state
+        the reader ALREADY treats as a cache miss — :meth:`_load_entry` requires
+        both halves of the codec pair — rather than a pair whose sidecar
+        disagrees with its array. The caller supplies ``artefacts`` already in
+        that order; this method preserves it and does not re-sort.
+
+        **Failures are collected, not aborted on**, so one unreadable artefact
+        does not strand the other five, and one aggregate names every survivor.
+
+        **Each built path's resolved target goes first** where there is one
+        (D-15-G2a). ``link_targets`` is populated only for artefacts that ARE
+        symlinks, so on the ordinary shape this issues no extra syscall at all:
+        for a regular file ``resolve()`` is mere absolutisation and a second
+        unlink would be a no-op, so it is not performed rather than performed
+        and wasted. That keeps behaviour identical on a host whose temp
+        directory is itself a symlink (macOS ``/var``, ETH ``/scratch``) and
+        keeps the per-artefact failure injection in ``test_store_purge.py``
+        aimed at exactly one call. Both unlinks share one ``try``, so a failure
+        on either is collected and named by the built path a caller knows.
+
+        Raises
+        ------
+        StorePurgeIncompleteError
+            If one or more artefacts could not be unlinked.
+        """
+        failures: list[OSError] = []
+        survivors: list[Path] = []
+        for artefact in artefacts:
+            try:
+                target = link_targets.get(artefact)
+                if target is not None:
+                    target.unlink(missing_ok=True)
+                artefact.unlink(missing_ok=True)
+            except OSError as exc:
+                failures.append(exc)
+                survivors.append(artefact)
+        if failures:
+            surviving = ", ".join(repr(str(p)) for p in survivors)
+            raise StorePurgeIncompleteError(
+                f"Purge of {key!r} was incomplete: {len(survivors)} of {len(artefacts)} artefacts "
+                f"could not be unlinked and survive on disk — {surviving}. The key has been "
+                "dropped from tracking and stays dropped: re-tracking it would point a live "
+                "entry at a half-deleted artefact set and would make purge non-idempotent "
+                "(D-10). Remove the listed files, or fix the permissions on the cache "
+                "directory, and call purge again — it is safe to repeat."
+            ) from failures[0]
+
     def __getitem__(self, key: str) -> T:
         """Return the entry for ``key``, loading it from disk on a cache miss.
 
@@ -1101,6 +1300,24 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         would leak the very files the atomicity work creates. The legacy
         ``<key>.pkl`` is **not** removed (D-09); see the *Notes*.
 
+        **And one file whose name does NOT derive from the key** (D-15-G2a):
+        each built path is followed to its **resolved target**, so an adopted
+        ``<key>.dat`` — a symlink pointing at a real payload inside the cache
+        directory, the legitimate *adopted entry* D-17 and STORE-03 protect —
+        takes that payload with it. Without this the method removed the link,
+        left the key's exact bytes sitting in the directory under another name,
+        and reported a complete removal. The rule is still "everything belonging
+        to this key and nothing else"; what changed is that belonging is decided
+        by what a path *resolves to* rather than by what it is *named*.
+
+        **A known limit, stated rather than guarded.** Two keys whose
+        ``<key>.dat`` links point at the *same* payload are handled badly:
+        purging one removes the other's data. It is not reachable through any
+        store-owned write route — each key builds its own ``<key>.dat`` name —
+        only by an operator planting two links at one target. Guarding it would
+        mean scanning every other key's link target on every purge, which is a
+        cost paid by every caller for a shape none of them can produce.
+
         **The consequence, stated rather than left to be discovered.** An
         explicit purge wins over ``purge_disk_on_gc=False`` (D-03). That flag
         governs *implicit, GC-time* deletion; it is not a write-protect bit, and
@@ -1109,7 +1326,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         exercises the override logs an INFO record naming the key, so the
         override is transparent rather than merely permitted.
 
-        **What a future reader must not "fix".** Three things:
+        **What a future reader must not "fix".** Four things:
 
         1. The step below detaches the live entry's finalizer **directly**, and
            must not be routed through :meth:`LazyDiskCache.disable_purge`, which
@@ -1125,6 +1342,15 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
            behind, and exactly the state a caller most needs to clean up, so the
            tighter reading would make the orphan case unpurgeable through the
            one verb built to purge it (D-02).
+        4. A **foreign artefact is refused, never reached** (D-15-G2), and the
+           refusal deliberately does **not** detach that entry's finalizer. Both
+           halves are load-bearing and both look like omissions. Unlinking the
+           path wherever it points would make this a verb that deletes arbitrary
+           caller-supplied filesystem locations — the shape Phase 14's
+           containment layer exists to prevent. Detaching anyway, "for
+           consistency", would destroy the only cleanup that file has and
+           convert a GC-reclaimable file into a permanent leak created by the
+           removal verb itself. Do not add either.
 
         Parameters
         ----------
@@ -1143,6 +1369,14 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         StorePurgeRefusedError
             If the calling process is not the one that constructed this store
             (D-05). Raised before any mutation, so a refused purge is a no-op.
+        StorePurgeForeignArtefactError
+            If any artefact of ``key`` — a built path's resolved target, or a
+            live registered entry's resolved ``cache_path`` — lies outside this
+            store's cache directory (D-15-G2). A **subclass** of
+            :exc:`StorePurgeRefusedError`, so one ``except`` on the parent
+            catches both refusals and gets the same guarantee from each: raised
+            before the first mutation, so nothing was touched and no finalizer
+            was disarmed.
         KeyError
             If ``key`` is present neither in tracking nor on disk (D-02).
         StorePurgeIncompleteError
@@ -1158,6 +1392,11 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         the first unlink so the tracking state never describes a half-deleted
         artefact set. It does **not** mean globally atomic, and the two
         negatives are worth saying rather than leaving to be inferred.
+        **The registry changes none of this** (D-15-G1). It is per-process state
+        that says nothing about another process, and it is consulted without any
+        lock of its own, so both negatives below stand exactly as they did —
+        adding it improved *which entries* the detach reaches, never *what
+        happens under concurrent mutation*.
         ``DiskBackedStore`` holds no store-level lock, so this method is
         **not safe against concurrent mutation of the same key** — a
         ``__setitem__`` or :meth:`add_data_to_store` racing this call may write
@@ -1281,6 +1520,47 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         #    so this loop reaches every live entry the key has ever had, tracked
         #    or not.
         registered = self._registered_entries(key)
+
+        # 4b. RECONCILE, AND REFUSE RATHER THAN REACH (D-15-G2). Build the key's
+        #     effective artefact set — the resolved target of each built path
+        #     that exists, plus each live registered entry's resolved
+        #     `_cache_path` — and refuse outright if any member lies outside
+        #     this store's cache directory.
+        #
+        #     THE PLACEMENT IS THE PROPERTY, and it is the same ordering
+        #     argument the PID guard above makes, applied a second time rather
+        #     than a second coincidence: this check sits ABOVE THE FIRST
+        #     MUTATION, beside the lexical refusal and the worker guard. Moved
+        #     into the unlink loop it would still raise and would still look
+        #     like a guard, while having already detached a finalizer and
+        #     dropped a key — destroying the no-op that is the entire shared
+        #     contract of the `StorePurgeRefusedError` family (SC-2). Pinned by
+        #     `test_a_refused_purge_leaves_the_key_tracked_and_every_finalizer_armed`
+        #     and mutation-proven by moving this block below the detach.
+        #
+        #     WHY REFUSE RATHER THAN UNLINK WHEREVER IT POINTS: a removal verb
+        #     that deletes arbitrary caller-supplied filesystem locations is the
+        #     exact shape Phase 14's containment layer exists to prevent. And
+        #     the refusal must NOT detach — the finalizer it would disarm is the
+        #     only cleanup that foreign file has, so disarming it converts a
+        #     GC-reclaimable file into a permanent leak created by the removal
+        #     verb itself (G-2b, measured: purge returned CLEANLY and the file
+        #     was still on disk after a forced collection).
+        link_targets, foreign = self._reconcile_artefact_targets(artefacts, registered)
+        if foreign is not None:
+            origin, offending, resolved_target = foreign
+            raise StorePurgeForeignArtefactError(
+                f"Refusing to purge {key!r}: {origin}, {str(offending)!r}, resolves to "
+                f"{str(resolved_target)!r}, which is outside this store's cache directory "
+                f"{str(self._cache_dir)!r}. Nothing has been touched — the key is still tracked, every "
+                "artefact is byte-identical and every finalizer is still armed — because unlinking a path "
+                "outside its own root would make purge a verb that deletes arbitrary filesystem locations, "
+                "which is the shape the containment layer exists to prevent. purge is not the tool for this "
+                "file: drop the entry and let garbage collection reclaim it, which still works precisely "
+                "because this call did not detach its finalizer. For a symlink pointing out of the cache "
+                "directory, remove or repoint the link and purge again."
+            )
+
         for entry in registered:
             if hasattr(entry, "_finalizer"):
                 with entry._lock:
@@ -1309,31 +1589,17 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 key,
             )
 
-        # 7. UNLINK — sidecars and `.tmp` names first, payloads last. The order
-        #    is the D-10 contract: POSIX gives no atomicity across N unlinks, so
-        #    a partial failure must leave a state the reader ALREADY treats as a
-        #    cache miss (`_load_entry` requires both halves of the codec pair)
-        #    rather than a pair whose sidecar disagrees with its array. Failures
-        #    are collected rather than aborted on, so one unreadable artefact
-        #    does not strand the other five.
-        failures: list[OSError] = []
-        survivors: list[Path] = []
-        for artefact in artefacts:
-            try:
-                artefact.unlink(missing_ok=True)
-            except OSError as exc:
-                failures.append(exc)
-                survivors.append(artefact)
-        if failures:
-            surviving = ", ".join(repr(str(p)) for p in survivors)
-            raise StorePurgeIncompleteError(
-                f"Purge of {key!r} was incomplete: {len(survivors)} of {len(artefacts)} artefacts "
-                f"could not be unlinked and survive on disk — {surviving}. The key has been "
-                "dropped from tracking and stays dropped: re-tracking it would point a live "
-                "entry at a half-deleted artefact set and would make purge non-idempotent "
-                "(D-10). Remove the listed files, or fix the permissions on the cache "
-                "directory, and call purge again — it is safe to repeat."
-            ) from failures[0]
+        # 7. UNLINK — sidecars and `.tmp` names first, payloads last, each built
+        #    path's resolved target ahead of the path itself where there is one.
+        #    The whole step is `_unlink_artefacts`, which owns the D-10
+        #    collect-and-raise-once contract and D-15-G2(a)'s resolved-target
+        #    rule; the ordering argument this method is built around lives in the
+        #    four guards above it, and inlining a failure-collection loop under
+        #    them competed with that for the reader's attention. It is also what
+        #    keeps `purge` inside the module's complexity budget after two new
+        #    branches landed in it, which is a real constraint rather than a
+        #    stylistic one.
+        self._unlink_artefacts(key, artefacts, link_targets)
 
     def __iter__(self) -> Iterator[str]:
         """Iterate over the keys currently tracked by the store."""

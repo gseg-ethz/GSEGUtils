@@ -305,6 +305,15 @@ def test_purge_leaves_the_legacy_pickle_beside_the_codec_pair(make_store: MakeSt
 
 # ---------------------------------------------------------------------------
 # T-15-07 — the ABA seam: detach the finalizer, do not flip the flag.
+#
+# The four-route coverage lives in `tests/test_store_purge_identity.py`
+# (`test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping`), added by
+# 15-08 and turned green by 15-09. This test and the two ABA tests below it stay:
+# WR-05 was about their REACH — all three take the `tracked` route, the one route
+# where the pre-15-09 lookup happened to be correct — and not about their
+# correctness, which is undiminished. They remain valid narrow assertions on that
+# route, and they assert things the parameterised body does not (the purge-intent
+# flag, the replacement entry's own finalizer).
 # ---------------------------------------------------------------------------
 
 

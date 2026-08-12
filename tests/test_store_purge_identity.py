@@ -1,22 +1,25 @@
-"""Plan 15-08 / gaps G-1 and G-2 / SC-1 and SC-3 / STORE-04.
+"""Plan 15-08 and 15-09 / gaps G-1 and G-2 / SC-1 and SC-3 / STORE-04.
 
-This module pins the two verification gaps the phase shipped with: **G-1**, the ABA
-hazard surviving on three of the four routes an entry can leave the mapping, and
-**G-2**, ``purge`` reporting a complete removal while the key's payload is still in
-the cache directory (the adopted symlink) or permanently orphaned outside it (a
-foreign ``cache_path``). Every case still open at HEAD carries
-``pytest.mark.xfail(strict=True)`` with a reason naming ``15-09`` -- the plan obliged
-to close the defect and remove the marker -- and *strict* is the operative word: the
-moment the defect closes, an unexpected pass turns this suite red until the marker
-comes out, so no marker here can rot into a permanent excuse.
+``15-08`` wrote this module to **pin** the two verification gaps the phase shipped
+with: **G-1**, the ABA hazard surviving on three of the four routes an entry can leave
+the mapping, and **G-2**, ``purge`` reporting a complete removal while the key's
+payload is still in the cache directory (the adopted symlink) or permanently orphaned
+outside it (a foreign ``cache_path``). Five cases carried
+``pytest.mark.xfail(strict=True)`` with reasons naming ``15-09``.
+
+``15-09`` **closed both gaps and removed all five markers**, and *strict* is why that
+was obligatory rather than optional: the moment a defect closed, the unexpected pass
+turned this suite red until its marker came out, so no marker here could rot into a
+permanent excuse. The module now reports **zero** xfailed cases, and that count is
+itself the headline assertion -- a marker reappearing here means a defect reopened.
 
 **Why the 821 tests that already existed could not see any of this** (§ WR-05,
 independently confirmed by ``15-VERIFICATION.md`` § SC-3): every shipped
 finalizer/ABA test binds the entry straight from the subscript -- ``store[key]`` --
-immediately before purging, and that is the *single* route on which
-``self._store.get(key)`` returns a live object. A net that never leaves that route cannot observe the defect no matter
-how many assertions it carries. Hence the shape below -- the sequence is the test and
-the **route is the only thing that varies**.
+immediately before purging, and that was the *single* route on which the pre-``15-09``
+mapping lookup returned a live object. A net that never leaves that route cannot
+observe the defect no matter how many assertions it carries. Hence the shape below --
+the sequence is the test and the **route is the only thing that varies**.
 
 The three narrow tests this supersedes in *reach* (``test_store_purge.py``'s
 ``test_purge_detaches_the_live_entrys_finalizer_without_flipping_its_purge_intent``,
@@ -29,6 +32,7 @@ are not deleted: they remain valid narrow assertions on the ``tracked`` route.
 
 import copy
 import gc
+import hashlib
 import os
 import pickle
 import weakref
@@ -38,6 +42,7 @@ from typing import Callable, Iterable
 import numpy as np
 import pytest
 
+from GSEGUtils.lazy_disk_cache import StorePurgeForeignArtefactError, StorePurgeRefusedError
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
@@ -64,8 +69,11 @@ _SECOND = np.arange(4, dtype=np.float32) + 100.0
 #: landed. ``strict=True`` made that immediate rather than optional: the ``offload``
 #: and ``pop`` parameters reported ``XPASS(strict)``, i.e. hard failures, until their
 #: markers came out.
-_G2A_OPEN = "G-2a open at 0956838 - closed by 15-09; remove this marker there"
-_G2B_OPEN = "G-2b open at 0956838 - closed by 15-09; remove this marker there"
+#: ``_G2A_OPEN`` and ``_G2B_OPEN`` are gone with their markers too: ``15-09`` Task 3
+#: made ``purge`` unlink resolved targets and refuse rather than reach, so this module
+#: now reports **zero** xfailed cases. That is the state ``15-09``'s headline criterion
+#: asserts, and ``strict=True`` is what made every removal obligatory rather than
+#: optional tidying.
 
 _POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="planting a <key>.dat symlink is POSIX-only")
 
@@ -149,6 +157,26 @@ def assert_nothing_derived_from(
         f"{sorted(expected_files)!r}. A purge the method reported as complete left the key's data in the "
         f"directory under a name that does not derive from the key"
     )
+
+
+def _digest_tree(directory: Path) -> dict[str, str]:
+    """Return a name -> sha256 map of ``directory``, non-recursively.
+
+    The SC-2 instrument, in the shape the verifier's ``sc2_repro.py`` used: a listing
+    of *names* cannot see a file that was rewritten in place, and "a refused purge is a
+    bit-for-bit no-op" is a claim about bytes. A symlink is digested by its **target
+    text**, so repointing a link registers as a change even when the bytes behind both
+    targets are identical.
+    """
+    digests: dict[str, str] = {}
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink():
+            digests[path.name] = "symlink -> " + os.readlink(path)
+        elif path.is_file():
+            digests[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:  # pragma: no cover - no test plants a subdirectory in the cache dir
+            digests[path.name] = "<not a file>"
+    return digests
 
 
 def _derived_names(cache_dir: Path, key: str) -> tuple[Path, ...]:
@@ -518,7 +546,6 @@ def test_an_adopted_symlink_dat_is_written_through_not_replaced(make_store: Make
 
 
 @_POSIX_ONLY
-@pytest.mark.xfail(strict=True, reason=_G2A_OPEN)
 def test_purge_removes_the_payload_behind_an_adopted_symlink_dat(make_store: MakeStore, tmp_cache_dir: Path) -> None:
     """Plan 15-08 / G-2a / SC-1 / STORE-04 -- the shape the library itself calls first-class.
 
@@ -527,13 +554,15 @@ def test_purge_removes_the_payload_behind_an_adopted_symlink_dat(make_store: Mak
     **adopted entry** that D-17 and STORE-03 exist to protect."* The library then
     writes the key's data through it.
 
-    ``purge`` builds six names and calls ``artefact.unlink(missing_ok=True)``
-    (``disk_backed_store.py:1188``), which removes the **link** and never the resolved
-    target. So it reports a complete removal while the key's exact payload is still
-    sitting in the cache directory -- and SC-1's binding verification clause, *"verified
-    by listing the directory afterwards"*, reads ``['innocuous.bin']``.
+    Until ``15-09``, ``purge`` built six names and called
+    ``artefact.unlink(missing_ok=True)``, which removes the **link** and never the
+    resolved target. So it reported a complete removal while the key's exact payload
+    was still sitting in the cache directory -- and SC-1's binding verification clause,
+    *"verified by listing the directory afterwards"*, read ``['innocuous.bin']``.
 
-    Reconstructs the verifier's ``sc1_reachable.py``.
+    ``15-09`` follows each built path to its resolved target and unlinks that first
+    (D-15-G2a), so the adopted payload goes with its link. Reconstructs the verifier's
+    ``sc1_reachable.py``.
     """
     key = "adopted"
     payload = _plant_adopted_symlink(tmp_cache_dir, key, "innocuous.bin")
@@ -548,7 +577,7 @@ def test_purge_removes_the_payload_behind_an_adopted_symlink_dat(make_store: Mak
         "precondition: the library must have written the key's data through the link into the payload"
     )
 
-    store.purge(key)  # returns cleanly today; that is half the defect, so it is recorded, not routed around
+    store.purge(key)
 
     assert_nothing_derived_from(tmp_cache_dir, key)
     assert not payload.exists(), (
@@ -563,7 +592,6 @@ def test_purge_removes_the_payload_behind_an_adopted_symlink_dat(make_store: Mak
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=_G2B_OPEN)
 def test_purge_does_not_orphan_a_foreign_cache_path_entry(make_store: MakeStore, tmp_cache_dir: Path) -> None:
     """Plan 15-08 / G-2b / SC-1 / STORE-04 -- the leak ``purge`` creates itself.
 
@@ -583,14 +611,16 @@ def test_purge_does_not_orphan_a_foreign_cache_path_entry(make_store: MakeStore,
     test that reached for the setter would fail with the seal's own error and prove
     nothing about ``purge``.
 
-    **Deliberately no assertion on an exception type.** ``15-09`` introduces a
-    dedicated refusal error class for this shape; naming that symbol from a wave-7
-    test would raise ``AttributeError`` at *import* and turn a strict-xfail into a
-    collection error -- reported as an error rather than an ``xfail``, and it would
-    take the whole module down with it. So this test pins the three invariants that
-    need no new type name, and ``15-09`` Task 3 adds the typed companion once the
-    symbol exists. The split is *behaviour pinned first, contract pinned second*, and
-    it is deliberate rather than an oversight.
+    **Deliberately no assertion on an exception type**, and it stays that way now that
+    the type exists. ``15-08`` could not name ``StorePurgeForeignArtefactError``
+    because doing so would have raised ``AttributeError`` at *import* and turned a
+    strict-xfail into a collection error taking the whole module down. The split it
+    chose -- *behaviour pinned here, contract pinned separately* -- is worth keeping on
+    its own merits: this test asserts the three invariants a caller actually depends on
+    (nothing disarmed, nothing dropped, still GC-reclaimable) and would stay honest
+    even if the refusal were spelled differently.
+    ``test_purge_refuses_a_foreign_artefact_with_the_named_error`` is the typed
+    companion ``15-09`` Task 3 adds beside it.
     """
     key = "foreign"
     elsewhere = tmp_cache_dir.parent / "elsewhere"
@@ -640,6 +670,166 @@ def test_purge_does_not_orphan_a_foreign_cache_path_entry(make_store: MakeStore,
         f"G-2b violated (purge raised: {observed}): after dropping the entry and forcing a collection the "
         f"foreign .dat is STILL on disk -- a permanent leak. purge must not disarm the only cleanup that "
         f"exists for a file it declined to remove"
+    )
+
+
+def _foreign_entry_store(
+    make_store: MakeStore, tmp_cache_dir: Path, key: str
+) -> tuple[DiskBackedStore[DiskBackedNDArray], DiskBackedNDArray, Path]:
+    """Build a store holding ``key`` as an entry whose ``.dat`` lives outside the cache dir.
+
+    The path is set at **construction**: the ``cache_path`` setter is sealed (D-01), so
+    a helper that reached for the setter would fail with the seal's own error and prove
+    nothing about ``purge``.
+    """
+    elsewhere = tmp_cache_dir.parent / f"elsewhere_{key}"
+    elsewhere.mkdir()
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    entry = DiskBackedNDArray(
+        _FIRST.copy(),
+        enable_caching=True,
+        cache_path=elsewhere / key,
+        purge_disk_on_gc=True,
+    )
+    store[key] = entry
+    foreign_dat = elsewhere / f"{key}{paths_mod.MEMMAP_SUFFIX}"
+    assert foreign_dat.exists(), "precondition: the entry must have written its .dat outside the cache directory"
+    return store, entry, foreign_dat
+
+
+def test_purge_refuses_a_foreign_artefact_with_the_named_error(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-09 / D-15-G2 + D-15-G2a -- the typed companion 15-08 could not write.
+
+    Three assertions, and the third is the whole basis of the subclassing decision
+    rather than a bonus:
+
+    1. the refusal is ``StorePurgeForeignArtefactError`` **exactly**, so a caller can
+       distinguish this reason from the foreign-*process* one;
+    2. the message quotes the offending path, per Phase 14's D-13 -- a refusal that
+       does not say *which* path is a refusal a caller cannot act on, and an unquoted
+       one is the CWE-117 shape CR-01 fixed on the rescan warning;
+    3. ``except StorePurgeRefusedError`` catches it. D-15-G2a's entire argument is
+       that "refused implies nothing was touched" should be a **type-level** statement
+       one ``except`` can rely on rather than a coincidence two sibling types share.
+       Untested, that is a claim about a class statement; tested, it is a property.
+    """
+    key = "foreign_typed"
+    store, entry, foreign_dat = _foreign_entry_store(make_store, tmp_cache_dir, key)
+
+    with pytest.raises(StorePurgeForeignArtefactError) as excinfo:
+        store.purge(key)
+
+    assert repr(str(foreign_dat)) in str(excinfo.value), (
+        f"D-13 violated: the refusal must name the offending path, quoted. Message was: {excinfo.value}"
+    )
+
+    # The catchability property, asserted through a handler rather than through
+    # `issubclass`: what D-15-G2a promises is that a downstream's EXISTING
+    # `except StorePurgeRefusedError` keeps working on a shape it would otherwise not
+    # catch at all, and only a handler exercises that.
+    caught = False
+    try:
+        store.purge(key)
+    except StorePurgeRefusedError:
+        caught = True
+    assert caught, (
+        "D-15-G2a violated: `except StorePurgeRefusedError` did not catch the foreign-artefact refusal. The "
+        "subclassing exists precisely so a downstream told to catch the parent gets the correct behaviour -- "
+        "nothing was destroyed, do not retry blindly -- on this shape too"
+    )
+
+    # Repeatable, and the same no-op every time: the second call above changed nothing.
+    assert key in store, "the repeated refusal must still leave the key tracked"
+    assert entry._finalizer.alive is True, "the repeated refusal must still leave the finalizer armed"
+    assert foreign_dat.exists(), "the repeated refusal must still leave the foreign artefact on disk"
+
+
+@_POSIX_ONLY
+def test_purge_refuses_an_outward_dat_symlink_and_touches_nothing(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-09 / D-15-G2 / SC-2 -- the tightening the reconciliation rule introduces.
+
+    An **outward** ``<key>.dat`` symlink -- one whose target is outside the cache
+    directory -- reaches ``purge`` at all because ``_assert_contained`` resolves only
+    the parent chain (D-17), admitting a final-component symlink by design. Before
+    ``15-09`` ``purge`` removed the *link* and left the outside file, which satisfies
+    neither removal nor refusal. It now refuses.
+
+    This shape has no prior test, so the no-op is asserted the way ``sc2_repro.py``
+    asserted it: a **per-file sha256** over the whole directory, plus the sentinel's
+    own bytes. An assertion on names alone would not see a rewrite.
+    """
+    key = "outward"
+    outside_dir = tmp_cache_dir.parent / "outside"
+    outside_dir.mkdir()
+    sentinel = outside_dir / "sentinel.bin"
+    sentinel.write_bytes(b"do not touch me" * 4)
+
+    link = paths_mod.get_memmap_path(tmp_cache_dir, key)
+    link.symlink_to(sentinel)
+    assert link.is_symlink() and link.exists(), "precondition: an outward <key>.dat link pointing at a live target"
+
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+    before = _digest_tree(tmp_cache_dir)
+    sentinel_before = sentinel.read_bytes()
+
+    with pytest.raises(StorePurgeForeignArtefactError):
+        store.purge(key)
+
+    assert sentinel.exists(), (
+        "D-15-G2 violated: purge reached OUTSIDE its cache directory and unlinked the symlink's target. A "
+        "removal verb that deletes arbitrary caller-supplied filesystem locations is the shape Phase 14's "
+        "containment layer exists to prevent"
+    )
+    assert sentinel.read_bytes() == sentinel_before, "the refusal rewrote the sentinel outside the cache directory"
+    assert _digest_tree(tmp_cache_dir) == before, (
+        f"SC-2 violated: a refused purge must be a bit-for-bit no-op, but the cache directory changed. "
+        f"Before: {before!r}; after: {_digest_tree(tmp_cache_dir)!r}"
+    )
+
+
+def test_a_refused_purge_leaves_the_key_tracked_and_every_finalizer_armed(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-09 / D-15-G2 / SC-2 -- the no-op, asserted for the NEW refusal specifically.
+
+    SC-2's "a refused purge is a bit-for-bit no-op" is verified for the PID case. It is
+    **not** inherited by the foreign-artefact case just because the two types are
+    related -- the property comes from *where the check sits*, above the first
+    mutation, and nothing about the class hierarchy enforces that. So it is measured
+    here directly, on all three of the things a mutation would disturb: the key is
+    still tracked, the finalizer is still armed, and the artefact is still
+    GC-reclaimable afterwards.
+
+    The third is the one that matters most and is the easiest to lose: detaching a
+    finalizer for a file the method declined to remove destroys the only cleanup that
+    file has, so a "consistent" detach on the refusal path would convert a
+    GC-reclaimable file into a permanent leak created by the removal verb itself.
+
+    Mutation-proven: moving the reconciliation below the detach turns this test red.
+    """
+    key = "refused_noop"
+    store, entry, foreign_dat = _foreign_entry_store(make_store, tmp_cache_dir, key)
+    payload_before = foreign_dat.read_bytes()
+
+    with pytest.raises(StorePurgeForeignArtefactError):
+        store.purge(key)
+
+    assert key in store, "SC-2 violated for the new refusal: the key was dropped by a call that removed nothing"
+    assert store.store[key] is entry, "SC-2 violated: the tracked entry was replaced or cleared by the refusal"
+    assert entry._finalizer.alive is True, (
+        "SC-2 violated for the new refusal: purge disarmed the finalizer for a file it declined to remove. That "
+        "finalizer is the file's ONLY remaining cleanup, so the refusal would have created the very leak it "
+        "exists to avoid"
+    )
+    assert foreign_dat.read_bytes() == payload_before, "SC-2 violated: the refused purge rewrote the artefact"
+
+    # And the file is still reclaimable, which is the point of not detaching.
+    store.pop(key, None)
+    del entry
+    gc.collect()
+    assert not foreign_dat.exists(), (
+        "the refusal left the finalizer armed but the artefact survived a forced collection anyway -- so the "
+        "GC route the refusal message tells the caller to use does not actually work"
     )
 
 
