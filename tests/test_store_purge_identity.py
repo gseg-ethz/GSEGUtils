@@ -29,6 +29,7 @@ are not deleted: they remain valid narrow assertions on the ``tracked`` route.
 
 import gc
 import os
+import weakref
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -53,7 +54,14 @@ _SECOND = np.arange(4, dtype=np.float32) + 100.0
 
 #: Every open marker's reason names ``15-09``, so the plan obliged to remove them can
 #: find all of them with one ``grep -c '15-09'``.
-_G1_OPEN = "G-1 open at 0956838 - closed by 15-09; remove this marker there"
+#:
+#: ``_G1_OPEN`` is **gone**, with its three markers: ``15-09`` Task 1 closed G-1 on all
+#: four routes in one step, because the registry that finds a key's live entries is
+#: populated at *insertion* and cleared by no drop route -- so the route an entry
+#: leaves the mapping by stopped mattering the moment the first registration site
+#: landed. ``strict=True`` made that immediate rather than optional: the ``offload``
+#: and ``pop`` parameters reported ``XPASS(strict)``, i.e. hard failures, until their
+#: markers came out.
 _G2A_OPEN = "G-2a open at 0956838 - closed by 15-09; remove this marker there"
 _G2B_OPEN = "G-2b open at 0956838 - closed by 15-09; remove this marker there"
 
@@ -195,14 +203,15 @@ def _apply_route(store: DiskBackedStore[DiskBackedNDArray], key: str, route: str
     assert key not in store, f"route={route!r} precondition: the key must be untracked after the drop"
 
 
-# 15-09 removes the three `_G1_OPEN` marks below once the detach reaches every route.
+# 15-09 removed the three `_G1_OPEN` marks that stood here: the detach now reaches
+# every route, so all four parameters are unmarked and green.
 @pytest.mark.parametrize(
     "route",
     [
         pytest.param("tracked", id="tracked"),
-        pytest.param("offload", id="offload", marks=pytest.mark.xfail(strict=True, reason=_G1_OPEN)),
-        pytest.param("del", id="del", marks=pytest.mark.xfail(strict=True, reason=_G1_OPEN)),
-        pytest.param("pop", id="pop", marks=pytest.mark.xfail(strict=True, reason=_G1_OPEN)),
+        pytest.param("offload", id="offload"),
+        pytest.param("del", id="del"),
+        pytest.param("pop", id="pop"),
     ],
 )
 def test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping(
@@ -211,17 +220,20 @@ def test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping(
     """Plan 15-08 / G-1 / SC-3 / STORE-04 -- the whole hazard, on every route into ``purge``.
 
     Four routes reach ``purge`` with an entry that still holds a live
-    ``weakref.finalize`` recorded against ``<key>.dat``. ``purge`` detaches it through
-    ``entry = self._store.get(key) if tracked else None``
-    (``disk_backed_store.py:1155``), and that expression is ``None`` on three of them:
-    an **offloaded** entry is stored as ``None`` in a mapping typed
+    ``weakref.finalize`` recorded against ``<key>.dat``. Until ``15-09``, ``purge``
+    detached it by looking the entry up in the mapping and gating that lookup on the
+    key being tracked -- and that lookup answered "nothing" on three of them: an
+    **offloaded** entry is stored as ``None`` in a mapping typed
     ``dict[str, Optional[T]]``, and the **untracked orphan** left by ``del`` / ``pop``
     is exactly the state D-02 widened the *existence* check to reach
-    (``tracked or any(p.exists())``, ``:1140-1142``). The existence check was widened
-    and the detach was not -- that is the gap in one sentence.
+    (``tracked or any(p.exists())``). The existence check was widened and the detach
+    was not -- that was the gap in one sentence.
 
-    ``tracked`` is unmarked and green today: it is the positive control that proves
-    this body is not vacuous, and it is the one route the three shipped tests take.
+    ``15-09`` closed it with a weak per-key registry of live entries that no drop
+    route clears (D-15-G1), so the detach no longer asks the mapping. All four
+    parameters are unmarked and green; ``tracked`` remains the positive control that
+    proves this body is not vacuous, and it is the one route the three shipped tests
+    in ``test_store_purge.py`` take.
     """
     key = "aba_route"
     store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
@@ -248,8 +260,8 @@ def test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping(
     assert original_finalizer.alive is False, (
         f"G-1 / SC-3 violated on route={route!r}: purge left the original entry's weakref.finalize ARMED "
         f"against <key>.dat. It will unlink whatever occupies that path at an arbitrary later collection -- "
-        f"including a later entry created under the same key. purge detaches only when "
-        f"`self._store.get(key)` returns a live object, which on this route it does not"
+        f"including a later entry created under the same key. The detach must reach every live entry the "
+        f"key has had, through the weak registry, and not only the one the mapping still points at"
     )
 
     # Re-add under the same key with a DIFFERENT array. `add_data_to_store`
@@ -274,6 +286,49 @@ def test_the_aba_hazard_cannot_fire_on_any_route_out_of_the_mapping(
     assert np.array_equal(np.asarray(store[key]), _SECOND), (
         f"G-1 / SC-3 violated on route={route!r}: <key>.dat exists but does not hold the replacement array. "
         f"A file that exists holding the wrong bytes is a different defect wearing the same green tick"
+    )
+
+
+def test_the_registry_does_not_keep_an_entry_alive(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-09 / D-15-G1 / STORE-05 axis 3 -- the registry is weak, measured.
+
+    ``15-09`` gives the store a per-key registry of its live entries so ``purge`` can
+    disarm a finalizer the mapping no longer points at. The prohibition attached to
+    that decision is that it must **not** hold a strong reference: an entry the caller
+    has dropped must still be collected, and its finalizer must still fire under the
+    default ``purge_disk_on_gc=True``.
+
+    A grep cannot establish this -- ``weakref.ref(`` appearing in the source says
+    nothing about a strong reference smuggled in elsewhere -- so it is asserted
+    behaviourally, on both halves: the weak reference dies, and the ``<key>.dat`` the
+    finalizer was registered against is gone afterwards.
+    """
+    key = "weakly_held"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _FIRST.copy())
+
+    entry = store.store[key]
+    assert entry is not None, "precondition: add_data_to_store tracks a live entry"
+    observer = weakref.ref(entry)
+    dat = paths_mod.get_memmap_path(tmp_cache_dir, key)
+    assert dat.exists(), "precondition: the entry materialised its <key>.dat"
+
+    # Drop BOTH strong references -- the caller's and the mapping's. `pop` is
+    # in-memory only and unlinks nothing (STORE-05), so whatever removes the file
+    # below is the finalizer and not the drop route.
+    store.pop(key, None)
+    del entry
+    gc.collect()
+
+    assert observer() is None, (
+        "D-15-G1 violated: the entry survived a forced collection after every caller-visible reference was "
+        "dropped, so the store-side registry is holding a STRONG reference. The registry must find entries, "
+        "never keep them"
+    )
+    assert not dat.exists(), (
+        "STORE-05 axis 3 violated: the collected entry's finalizer did not unlink its <key>.dat under the "
+        "default purge_disk_on_gc=True. A registry that merely DEFERRED the collection would show up exactly "
+        "here, so this half is asserted as well as the weakref's death"
     )
 
 

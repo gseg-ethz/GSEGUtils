@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import tempfile
+import weakref
 from pathlib import Path
 from types import MappingProxyType
 from typing import (
@@ -251,6 +252,10 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     #: The pid of the process that ran ``__init__`` (D-05). Read only by
     #: :meth:`purge`; see the assignment for the four-route measurement.
     _owner_pid: int
+    #: Weak references to the live entries each key has had (D-15-G1). Read
+    #: only through :meth:`_registered_entries`; see the assignment in
+    #: :meth:`__init__` for what it is for and what it must never become.
+    _entry_registry: dict[str, list[weakref.ref[T]]]
 
     _factory: Factory[T]
     _value_type: Optional[type[T] | tuple[type[T], ...]]
@@ -300,6 +305,30 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         # hooks that must stay in sync forever" shape Phase 14's D-03 removed by
         # re-deriving rather than storing.
         self._owner_pid = os.getpid()
+        # D-15-G1 — THE WEAK ENTRY REGISTRY, in three sentences.
+        #
+        # WHAT IT IS FOR: it answers the one question `purge` could not
+        # otherwise ask — *which live entries belong to this key when the
+        # mapping no longer holds them?* — because `del`, `pop` and
+        # `offload(pickle_container=True)` all leave `self._store.get(key)`
+        # returning nothing while a live entry, and its armed
+        # `weakref.finalize`, is still in the caller's hands.
+        # WHAT IT MUST NEVER BECOME: a strong reference, a resurrection
+        # mechanism, or state that outlives a pickle — it holds `weakref.ref`
+        # objects only, `__getstate__` drops it (a `weakref.ref` is not
+        # picklable) and `__setstate__` rebuilds it empty and re-registers what
+        # the restored mapping can see.
+        # WHICH ROUTES POPULATE IT: the four that install a LIVE entry into
+        # `_store` — `__setitem__`, `add_data_to_store`, `__getitem__`'s
+        # load-and-install, and `__setstate__`. The reopen rescan below installs
+        # `None`, not an entry, so it registers nothing and that is a fact
+        # rather than an omission.
+        #
+        # No drop route clears it. `__delitem__`, `pop`, `clear` and `offload`
+        # deliberately leave it alone, and THAT IS THE MECHANISM: it is exactly
+        # the entries those routes make unreachable through the mapping that
+        # `purge` still has to disarm.
+        self._entry_registry = {}
         self._automatic_offloading = config.automatic_offloading and config.cache_path is not None
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
@@ -513,6 +542,67 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             raise TypeError(f"value rejected by validator; got {type(value)}")
 
         return cast(T, value)
+
+    def _register_entry(self, key: str, entry: T) -> None:
+        """Record a weak reference to ``entry`` under ``key`` (D-15-G1).
+
+        Called from every route that installs a **live** entry into ``_store``,
+        so that :meth:`purge` can reach the entry's finalizer after ``del``,
+        ``pop`` or ``offload`` have taken it back out again.
+
+        **This helper performs no filesystem syscall, and that is a constraint
+        rather than a coincidence.** :meth:`__setitem__` documents of itself
+        that its check "performs no ``stat``, no ``resolve`` and no other
+        filesystem syscall, so this route stays pure in-memory and is safe to
+        call inside a ``loky`` worker" (STORE-01 / SC-1, D-15-G2) — and it calls
+        this helper. A later edit that added a path computation here would
+        therefore break a documented guarantee of a *different* method, from a
+        function whose own docstring said nothing about it. The reconciliation
+        that genuinely needs to resolve paths lives in :meth:`purge`, where
+        resolving is already permitted and where D-15-G2 puts it.
+
+        **Presence is tested with** ``is``**, never** ``==``. Entries are
+        array-like, and :func:`register_lazy_disk_cache_class` is a published
+        extension point through which a downstream may register a subclass that
+        defines ``__eq__``; an equality test here would then be a broadcast
+        comparison and would raise on the truth value of an array. The same
+        reasoning is why the structure is a list of weak references rather than
+        a :class:`weakref.WeakSet`, which would additionally require its members
+        to be hashable — a subclass defining ``__eq__`` has ``__hash__`` set to
+        ``None``, so the failure would arrive at a consumer's insertion site
+        with a :exc:`TypeError` naming neither this file nor the cause.
+        """
+        live = [ref for ref in self._entry_registry.get(key, ()) if ref() is not None]
+        if not any(ref() is entry for ref in live):
+            live.append(weakref.ref(entry))
+        self._entry_registry[key] = live
+
+    def _registered_entries(self, key: str) -> list[T]:
+        """Return ``key``'s still-live registered entries, pruning dead references.
+
+        The **only** read path into :attr:`_entry_registry`; nothing else may
+        reach into it directly. Dead references are dropped on the way through
+        and a key whose list empties is removed outright, so the mapping does
+        not grow without bound on a long-lived store (STORE-05, axis 3).
+
+        The references stay **weak** throughout: dereferencing one here binds
+        the entry for the duration of the caller's loop and nothing longer, so
+        an entry the caller has dropped is still collected and its finalizer
+        still fires under the default ``purge_disk_on_gc=True``.
+        """
+        entries: list[T] = []
+        live: list[weakref.ref[T]] = []
+        for ref in self._entry_registry.get(key, ()):
+            entry = ref()
+            if entry is None:
+                continue
+            live.append(ref)
+            entries.append(entry)
+        if live:
+            self._entry_registry[key] = live
+        else:
+            self._entry_registry.pop(key, None)
+        return entries
 
     def __getitem__(self, key: str) -> T:
         """Return the entry for ``key``, loading it from disk on a cache miss.
@@ -1152,15 +1242,40 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         #    intent as a side effect of deleting a different key's files. The
         #    entry lock is taken for the detach alone, because `enable_purge` and
         #    `disable_purge` both take it and the detach must not race them.
-        entry = self._store.get(key) if tracked else None
-        if entry is not None and hasattr(entry, "_finalizer"):
-            with entry._lock:
-                entry._finalizer.detach()
+        #
+        #    D-15-G1 — WHY THE ENTRIES COME FROM THE REGISTRY AND NOT FROM THE
+        #    MAPPING, recorded because the line this replaces looked correct.
+        #    The detach used to be gated on `self._store.get(key)` returning a
+        #    live object, and that expression is the wrong question: it is
+        #    `None` for an OFFLOADED entry — the mapping is typed
+        #    `dict[str, Optional[T]]` — and absent for the untracked orphan
+        #    `del` and `pop` leave behind, which is precisely the state D-02
+        #    widened the EXISTENCE check above to reach. The existence check was
+        #    widened and the detach was not, so the two disagreed about what
+        #    "this key" means. Measured at 0956838, before this change: the
+        #    finalizer stayed ARMED on THREE of the four routes out of the
+        #    mapping (`offload`, `del`, `pop`), and a forced collection then ate
+        #    a LATER entry's `<key>.dat` — a deletion attributable to nothing in
+        #    the caller's code, arriving at an arbitrary GC (G-1 / SC-3). The
+        #    weak registry is what makes the two agree: no drop route clears it,
+        #    so this loop reaches every live entry the key has ever had, tracked
+        #    or not.
+        registered = self._registered_entries(key)
+        for entry in registered:
+            if hasattr(entry, "_finalizer"):
+                with entry._lock:
+                    entry._finalizer.detach()
 
         # 6. Drop the key. Before the unlinks, so the tracking state never
         #    describes a half-deleted artefact set.
         if tracked:
             del self._store[key]
+        # The detached finalizers have nothing left to say, so the key's
+        # registry list goes with the key. A later entry inserted under the same
+        # key registers fresh, which is what keeps the detach scoped to the
+        # purged lifetime rather than applied to the key's registration
+        # generally.
+        self._entry_registry.pop(key, None)
 
         # D-03 transparency. The flag is never read as a permission bit; it is
         # read here only to record that the override happened. The key is passed
@@ -1285,6 +1400,10 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         )
 
         self._store[key] = self._check_T(new_container)
+        # D-15-G1 — one of the four registration routes. Immediately after the
+        # install, so a `del` / `pop` / `offload` between here and the next
+        # `purge` cannot make the entry's armed finalizer unreachable.
+        self._register_entry(key, new_container)
 
     @property
     def store(self) -> Mapping[str, Optional[T]]:
@@ -1452,6 +1571,11 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 continue
             if pickle_container:
                 self._store_entry(key, obj)
+                # D-15-G1 — the entry registry is deliberately left alone here.
+                # This line is the one a reader will suspect, because it is what
+                # makes `self._store.get(key)` return `None` for a still-live
+                # entry; leaving the weak reference in place is exactly what
+                # lets `purge` still find and disarm that entry's finalizer.
                 self._store[key] = None
                 logger.debug(
                     "Wrote codec pair for %s under %s and cleared in-memory reference.",
@@ -1607,6 +1731,22 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         # It must stay AFTER the conditional offload above, or the copied values
         # would be the pre-offload ones.
         state["_store"] = dict(self._store)
+        # D-15-G1, in the same register as the D-19 note above: the weak entry
+        # registry does not cross this boundary, and it is REMOVED here rather
+        # than tolerated. A `weakref.ref` is not picklable, so leaving it in the
+        # state makes `pickle.dumps(store)` raise
+        # `TypeError: cannot pickle 'weakref.ReferenceType' object` — and the
+        # joblib path force-offloads and pickles on EVERY dispatch, so that
+        # would not be a rare failure but the common one.
+        #
+        # It rides `self.__dict__.copy()` unless this line exists, which is the
+        # same shallow-copy footgun the line above it corrects, one attribute
+        # over. `__setstate__` rebuilds the registry empty and re-registers
+        # every live entry the restored mapping can see; what it deliberately
+        # does NOT reconstruct is a registration for an entry the caller holds
+        # but the mapping does not, because such an entry is simply not visible
+        # across a pickle and claiming otherwise would be a lie in state.
+        state.pop("_entry_registry", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -1838,6 +1978,12 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         # `dict(self._store)` is not the no-op it looks like: it is the copy that
         # breaks the alias `__dict__.update` just created.
         self._store = dict(self._store)
+        # D-15-G1 — rebuild the weak registry EMPTY. `__getstate__` removed it
+        # (a `weakref.ref` is not picklable), so `__dict__.update` above has not
+        # restored it and the attribute would otherwise be absent on every
+        # unpickled or copied store. Assigned unconditionally rather than
+        # defensively, so a hand-built state carrying one cannot install it.
+        self._entry_registry = {}
         if self._enable_caching:
             for key in list(self.keys()):
                 if self._store[key] is not None:
@@ -1851,3 +1997,20 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                         self._cache_dir,
                     )
                     continue
+
+        # D-15-G1 — RE-REGISTER, and this is load-bearing rather than
+        # housekeeping. `copy.copy(store)` travels
+        # `__reduce_ex__` -> `__getstate__` -> `__setstate__`, and
+        # `__getstate__` hands over the SAME entry objects. A copy that came
+        # back with an empty registry would have a `purge` that no longer
+        # detaches even on the `tracked` route — the one route that worked
+        # before this change — so the omission would be a silent regression of
+        # existing behaviour rather than a missing new feature. Pinned by
+        # `test_a_copied_store_still_detaches_on_purge`.
+        #
+        # One consolidated pass over the restored mapping, after both the state
+        # restore and the reload loop, so there is a single place where the
+        # question "which entries does this store now hold?" is answered.
+        for restored_key, restored_entry in self._store.items():
+            if restored_entry is not None:
+                self._register_entry(restored_key, restored_entry)
