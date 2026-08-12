@@ -842,7 +842,14 @@ def test_the_default_unconfigured_branch_keeps_mkstemps_0600_across_the_atomic_r
     Measured, not read (same script against both trees)::
 
         9c80f64 (phase base)  mkstemp created: 0o600   after convert: 0o600
-        0956838 (phase HEAD)  mkstemp created: 0o600   after convert: 0o644
+        0956838 (phase HEAD)  mkstemp created: 0o600   after convert: umask default
+
+    The HEAD reading is named by its *mechanism* rather than by the octal digits
+    it happened to produce here, because the digits are host state: this host
+    runs ``umask 022`` so ``0o666 & ~umask`` read as world-readable, and a
+    developer on ``umask 077`` would reproduce the same defect with different
+    digits. The literal transcript is in ``15-VERIFICATION.md`` and
+    ``15-REVIEW.md`` § CR-02.
 
     On a shared ``/scratch`` or a multi-user ``/tmp`` that is the whole payload
     of every cache entry built without an explicit ``cache_path``, readable by
@@ -869,11 +876,201 @@ def test_the_default_unconfigured_branch_keeps_mkstemps_0600_across_the_atomic_r
 
     assert after_construction == 0o600, (
         f"STORE-08 / CWE-732: the unconfigured branch's <key>.dat is {oct(after_construction)} after "
-        f"construction, not tempfile.mkstemp's 0o600. Measured 0o600 at phase base 9c80f64 and "
-        f"0o644 at 0956838 — os.replace carried the temporary's umask-default mode onto the final name"
+        f"construction, not tempfile.mkstemp's 0o600. Measured 0o600 at phase base 9c80f64 and the "
+        f"umask default at 0956838 — os.replace carried the temporary's mode onto the final name"
     )
     assert after_second == 0o600, (
         f"STORE-08 / CWE-732: a second conversion widened the unconfigured branch's <key>.dat to "
         f"{oct(after_second)}. The destination's mode must be carried across the rename on every "
-        f"conversion, not merely on the first. Measured 0o600 at 9c80f64, 0o644 at 0956838"
+        f"conversion, not merely on the first. Measured 0o600 at 9c80f64, umask default at 0956838"
+    )
+
+
+@POSIX_ONLY
+def test_a_tightened_configured_dat_keeps_its_mode_across_a_reconversion(tmp_cache_dir: Path) -> None:
+    """Plan 15-07 / G-3 / STORE-08 — the destination-exists side of the boundary.
+
+    The operator's side of the same defect. An administrator who tightens a
+    cache artefact by hand has made a decision the library must not quietly
+    revert; before the fix the next conversion reset it to the umask default,
+    with nothing logged.
+
+    The array is asserted *as well as* the mode, on purpose: a mode assertion
+    that passed because the second write never landed would be worthless, and
+    would go green against an implementation that had stopped writing at all.
+    """
+    first = np.arange(64, dtype=np.float32)
+    second = np.arange(1000, 1064, dtype=np.float32)
+
+    entry = _make_entry(tmp_cache_dir, first.copy())
+    entry._convert_to_memmap()
+    dat = tmp_cache_dir / "k.dat"
+    os.chmod(dat, 0o640)
+    assert _mode_of(dat) == 0o640, "precondition: the tightening chmod did not take"
+
+    entry._source = second
+    entry._convert_to_memmap()
+
+    assert _mode_of(dat) == 0o640, (
+        f"STORE-08 / CWE-732: a reconversion widened an operator-tightened <key>.dat from 0o640 to "
+        f"{oct(_mode_of(dat))}. os.replace carries the temporary's inode and its mode; the "
+        f"destination's mode has to be applied to the temporary before the rename"
+    )
+    assert np.array_equal(np.fromfile(dat, dtype=np.float32), second), (
+        "the reconversion did not write the second array — the mode assertion above would be "
+        "vacuous against a write that silently did nothing"
+    )
+
+
+@POSIX_ONLY
+def test_a_configured_dat_created_fresh_gets_the_umask_default_unchanged(tmp_cache_dir: Path) -> None:
+    """Plan 15-07 / G-3 / T-15-27 — the destination-absent side, asserting *no change*.
+
+    One step over the boundary, and its whole value is that it asserts nothing
+    moved. When no destination exists there is nothing whose mode could be
+    preserved, so the mode-carrying step must stand aside and let the operator's
+    umask decide the first write, exactly as the pre-change code did.
+
+    This is the guard against someone later "finishing" the fix with
+    ``15-REVIEW.md`` § CR-02's ``desired = 0o600`` default. That literal is a
+    *tightening*, not a preservation: it would silently change the observable
+    permissions of every configured-cache-dir first write, which is a policy
+    change requiring its own justification rather than part of closing a
+    regression.
+
+    The expected value is computed from the live umask with the read-then-restore
+    idiom, never hard-coded. The digits are host state — this host runs
+    ``umask 022`` — and a developer running ``umask 077`` must not inherit a red
+    suite from a number baked in on someone else's machine.
+    """
+    old_umask = os.umask(0)
+    os.umask(old_umask)
+    expected = 0o666 & ~old_umask
+
+    dat = tmp_cache_dir / "fresh.dat"
+    assert not dat.exists(), "precondition: this branch requires the destination to be absent"
+
+    entry = _make_entry(tmp_cache_dir, np.arange(64, dtype=np.float32), name="fresh")
+    entry._convert_to_memmap()
+
+    assert _mode_of(dat) == expected, (
+        f"T-15-27: the first write of a configured <key>.dat produced {oct(_mode_of(dat))} where the "
+        f"pre-change code produced {oct(expected)} (0o666 & ~umask, umask={oct(old_umask)}). The "
+        f"absent-destination branch must perform no chmod — imposing a library default here tightens "
+        f"the operator's artefact behind their back"
+    )
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("configured", [False, True], ids=["mkstemp", "configured"])
+def test_converting_twice_leaves_the_mode_unchanged_on_both_branches(tmp_cache_dir: Path, configured: bool) -> None:
+    """Plan 15-07 / G-3 / STORE-08 — idempotency, so the step cannot ratchet.
+
+    A mode-carrying step that read the *temporary's* mode instead of the
+    destination's would still look correct once and then drift on every
+    subsequent conversion, in whichever direction the umask pushed it. Reading
+    the same file after conversion *n* and *n+1* is the instrument that sees
+    that; a single-conversion test cannot.
+
+    The ``mkstemp`` parameter additionally asserts the absolute value ``0o600``
+    so the parameterisation cannot degenerate into two copies of the weaker
+    "unchanged" check — an implementation that had abandoned the fix entirely
+    would satisfy equality on both branches.
+    """
+    entry: DiskBackedNDArray
+    if configured:
+        entry = _make_entry(tmp_cache_dir, np.arange(64, dtype=np.float32), name="idem")
+        entry._convert_to_memmap()
+        dat = tmp_cache_dir / "idem.dat"
+    else:
+        entry = DiskBackedNDArray(
+            np.arange(64, dtype=np.float32),
+            enable_caching=True,
+            purge_disk_on_gc=False,
+            automatic_offloading=False,
+        )
+        dat = Path(entry.cache_path)
+
+    try:
+        mode_n = _mode_of(dat)
+        entry._convert_to_memmap()
+        mode_n1 = _mode_of(dat)
+        entry._convert_to_memmap()
+        mode_n2 = _mode_of(dat)
+    finally:
+        if not configured:
+            dat.unlink(missing_ok=True)
+
+    assert mode_n == mode_n1 == mode_n2, (
+        f"STORE-08: the mode-carrying step is not idempotent on the {'configured' if configured else 'mkstemp'} "
+        f"branch — successive conversions read {oct(mode_n)}, {oct(mode_n1)}, {oct(mode_n2)}. The step must "
+        f"carry the DESTINATION's mode; reading the temporary's would ratchet toward the umask default"
+    )
+    if not configured:
+        assert mode_n == 0o600, (
+            f"STORE-08 / CWE-732: the mkstemp branch settled at {oct(mode_n)} rather than tempfile.mkstemp's "
+            f"0o600. Equality above is satisfied by any stable wrong value, which is why this branch also "
+            f"asserts the absolute one"
+        )
+
+
+@POSIX_ONLY
+def test_a_failed_chmod_leaves_the_previous_dat_and_its_mode_intact(
+    tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 15-07 / G-3 / D-15a — the new step inherits the two-phase-commit property.
+
+    The mode-carrying step is placed inside the commit ``try`` deliberately, and
+    this test is what makes that placement a property rather than a comment. A
+    ``chmod`` that failed outside the handler would leave the temporary on disk
+    and the entry in a half-committed permission state; inside it, the handler
+    drops the local mapping, unlinks the temporary and re-raises with the
+    previously-valid ``<key>.dat`` unchanged in **both** bytes and mode, and the
+    live entry still reading the old array.
+
+    All four are asserted because they are four different claims — Group B
+    established the byte and object halves for a failed *rename*, and a new
+    failure point ahead of the rename must not weaken either.
+    """
+    first = np.arange(64, dtype=np.float32)
+    second = np.arange(1000, 1064, dtype=np.float32)
+
+    entry = _make_entry(tmp_cache_dir, first.copy())
+    entry._convert_to_memmap()
+    dat = tmp_cache_dir / "k.dat"
+    good_bytes = dat.read_bytes()
+    good_mode = _mode_of(dat)
+    assert good_bytes, "precondition: the first conversion must have produced a non-empty <key>.dat"
+
+    real_chmod = os.chmod
+
+    def _boom(path: Any, mode: int, **kwargs: Any) -> None:
+        # Predicate-gated on the temporary suffix, matching
+        # `_fail_replace_on_temporaries`: pytest's own machinery and any
+        # unrelated chmod inside the call stay real.
+        if str(path).endswith(paths.TMP_SUFFIX):
+            raise PermissionError(1, "Operation not permitted")
+        real_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", _boom)
+
+    entry._source = second
+    with pytest.raises(PermissionError):
+        entry._convert_to_memmap()
+    monkeypatch.undo()
+
+    assert dat.read_bytes() == good_bytes, (
+        "D-15a regressed: a failed chmod changed the bytes of a previously-valid <key>.dat. The "
+        "mode-carrying step must sit inside the commit try, ahead of the rename"
+    )
+    assert _mode_of(dat) == good_mode, (
+        f"D-15a regressed: a failed chmod left the previously-valid <key>.dat at {oct(_mode_of(dat))} "
+        f"instead of {oct(good_mode)} — a half-committed permission state"
+    )
+    assert _temporaries_in(tmp_cache_dir) == [], (
+        "the failed chmod left a temporary behind — the existing except-handler must have unlinked it"
+    )
+    assert np.array_equal(np.asarray(entry), first), (
+        "D-15a regressed: after a failed chmod the live entry no longer reads the array it read before "
+        "the call. Nothing observable may be repointed before the commit"
     )

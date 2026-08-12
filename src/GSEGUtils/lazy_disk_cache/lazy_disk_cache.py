@@ -345,6 +345,15 @@ class LazyDiskCache(ABC):
         consumer is Linux, so the shipped surface and the guarantee agree. The
         atomic-path tests in ``tests/test_memmap_atomicity.py`` are
         ``skipif``-marked rather than deleted, so a future port inherits them.
+        On that same POSIX route the destination's permission bits are carried
+        across the rename -- ``os.replace`` moves the temporary's inode and
+        would otherwise impose the umask default on the final name -- and that
+        step **narrows but does not eliminate** the window in which the
+        temporary exists at the umask default: on a directory other local users
+        can read, the payload is exposed momentarily rather than permanently,
+        and closing the residue needs the temporary created through
+        ``tempfile.mkstemp(dir=...)`` with ``O_EXCL`` (deferred; review finding
+        WR-03).
 
         **Nothing observable is repointed before the write commits (D-15a).**
         The temporary mapping lives in a local. ``self._mmap``, the subclass
