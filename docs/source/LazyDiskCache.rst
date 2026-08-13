@@ -571,18 +571,49 @@ derived from the key may therefore be removed by a purge of that key.
 
 The reason is mechanical. ``Path.unlink`` removes the link and never its target,
 so a purge that only unlinked names left the key's exact bytes sitting in the
-directory under another name **and reported a complete removal**. The rule is
-still "everything belonging to this key and nothing else"; what changed is that
-belonging is decided by what a path *resolves to* rather than by what it is
-*named*. A symlink resolving *outside* the cache directory is a different case
-and is refused rather than followed — see the foreign-artefact refusal below.
+directory under another name **and reported a complete removal**.
 
-**One limit, stated rather than guarded.** Two keys whose ``<key>.dat`` links
-point at the *same* payload are handled badly: purging one removes the other's
-data. No store-owned write route can produce that shape — each key builds its own
-``<key>.dat`` name — so it is reachable only by an operator planting two links at
-one target, and guarding it would mean scanning every other key's link target on
-every purge.
+**The removal set in full, and it has no other members.** ``purge`` unlinks the
+six names built from the key and — where one of those names is a symlink — the
+single path that name resolves to. There is no third category: it does not reach
+another key's artefacts, it does not reach a live entry's own ``cache_path``, and
+it does not reach outside the cache directory. **That boundary is held by two
+refusals rather than asserted as a rule**, because as a bare rule it was once
+false on an input a caller can reach — before the second refusal below existed,
+one planted in-cache ``aggressor.dat`` aimed at a genuine, store-written
+``victim.npy`` made ``purge("aggressor")`` unlink it and return cleanly, leaving
+``"victim"`` tracked by the store and unreadable through it. Both refusals are
+raised before the first unlink and leave the directory bit-for-bit unchanged:
+
+* a built name whose resolved target lies **outside** the cache directory raises
+  :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeForeignArtefactError`;
+* a built name whose resolved target lies **inside** it but carries a store
+  artefact name that is not one of this key's own six raises
+  :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeAliasedArtefactError`.
+
+So *belonging* is decided by what a path resolves to rather than by what it is
+named, and the two refusals are what stop that resolution reaching past the key
+it was derived from. Both are described in full under
+:ref:`the refusal family <PurgeRefusalFamily>` below.
+
+**The residual limit, stated rather than guarded.** The cross-key shape above is
+now **refused**, and the earlier statement of this limit was wrong in three ways
+a review measured: it said two planted links were needed when **one** suffices;
+it described the file at risk as a shared adopted payload when the file actually
+destroyed was a **store-owned artefact** of a live key; and it argued that
+guarding the shape would cost a scan of every other key's link target, which the
+shipped refusal disproves — the test is a comparison of the target's *name* and
+scans nothing.
+
+What remains unguarded is narrower. **Two keys whose ``<key>.dat`` links point at
+the same payload, where that payload's own name is not one the store builds** —
+purging either removes the other's data. No store-owned write route can produce
+that shape, since each key builds its own ``<key>.dat`` name. The name test
+cannot see it either, and deliberately so: a payload named ``shared.bin`` is
+exactly the legitimate *adopted entry* shape the refusal has to let through.
+Telling the two apart needs ownership information a file name does not carry, so
+this is published as a limit rather than guarded by a rule that would break the
+adopted entry.
 
 The legacy ``<key>.pkl`` is **not** removed. It is unreadable by design — the
 store refuses it rather than invoking the pickle reader — and it is now also
@@ -600,6 +631,8 @@ because it is exactly the state ``del store[key]`` leaves behind. A stricter
 reading ("tracked only") would make the orphan case unpurgeable through the one
 verb built to purge it.
 
+.. _PurgeRefusalFamily:
+
 When it refuses a foreign artefact
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -609,14 +642,25 @@ When **any** artefact of the key resolves **outside** the store's cache director
 :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeForeignArtefactError` and touches
 nothing at all.
 
-Two consequences follow that the refusal itself does not tell you.
+Three consequences follow that the refusal itself does not tell you.
 
 **The finalizer is deliberately left armed.** The file is still reclaimed when
 the entry is collected, exactly as it would have been had you never called
 ``purge``. Refusing *and* disarming would turn a garbage-collectable file into a
 permanent leak created by the removal verb itself, which is the defect this
-refusal exists to prevent. The verb is simply not the tool for a foreign-path
-entry; dropping the entry is.
+refusal exists to prevent.
+
+**Dropping the entry is not the remedy, and the difference is the whole of it.**
+Letting the entry be collected reclaims **the entry's own backing file and
+nothing else**: the finalizer removes exactly one memmap by explicit design, and
+never the store-owned ``<key>.npy`` and ``<key>.meta.json`` written for that key.
+So while this refusal stands, that codec pair is reclaimed by **no removal verb
+this package exposes**. The remedy that does work is to **repoint or remove the
+offending path and purge again** — for a symlink pointing out of the cache
+directory, remove or repoint the link; for an entry constructed with an explicit
+``cache_path`` outside the cache directory, give it a path inside that directory
+or let the store derive one from the key. The exception message says the same
+thing, so an operator can act on it without reading this page.
 
 **A purge will not delete outside its own cache directory**, and that is a
 boundary rather than a limitation. A removal verb that followed a
