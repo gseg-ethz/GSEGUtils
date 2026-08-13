@@ -44,6 +44,7 @@ The markers, as this round assigns them:
 
 import copy
 import gc
+import hashlib
 import os
 import pickle
 from pathlib import Path
@@ -94,7 +95,6 @@ _POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="planting a <key>.da
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-01) - closed by 15-12; remove this marker there")
 def test_purge_does_not_disarm_the_finalizer_for_an_in_cache_file_it_does_not_remove(
     make_store: MakeStore, tmp_cache_dir: Path
 ) -> None:
@@ -217,12 +217,76 @@ def test_the_ordinary_tracked_key_purge_still_detaches_and_removes_everything(
     assert_nothing_derived_from(tmp_cache_dir, key)
 
 
+def test_purge_removes_exactly_the_keys_built_names_and_leaves_every_other_file_byte_identical(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-12 / D-15-G6 / T-15-52 / SC-1 -- the removal set, stated POSITIVELY.
+
+    The two CR2 cases above say what ``purge`` must not **disarm**. This one says what
+    it must not **remove**, which is the failure mode the same edit could produce in the
+    opposite direction: D-15-G6's *Where* clause reads "contained entry paths now reach
+    the removal set", and a reader who takes that as *unlink them* converts CR2-02 from
+    a disarm bug into cross-key data destruction. The removal set is
+    ``{resolved built artefacts} ∪ {link targets}`` and nothing else.
+
+    Asserted as a **difference between two directory listings**, plus a per-file digest
+    over the survivors: a names-only assertion would not see a rewrite, and an assertion
+    that only checked the subject key's files would not see a bystander's disappear.
+    A future widening of the removal set is therefore caught here by an assertion rather
+    than by a review.
+    """
+    subject, bystander = "subject", "bystander"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    for key, payload in ((subject, _FIRST), (bystander, _SECOND)):
+        store.add_data_to_store(key, payload.copy())
+        store.offload(key, pickle_container=True)
+
+    # A file the store did not write and no key derives, so "only the six built names"
+    # is measured against something that would notice a glob-shaped removal.
+    stray = tmp_cache_dir / "not_a_store_artefact.bin"
+    stray.write_bytes(b"a file no key owns" * 8)
+
+    def digests() -> dict[str, bytes]:
+        return {p.name: hashlib.sha256(p.read_bytes()).digest() for p in tmp_cache_dir.iterdir() if p.is_file()}
+
+    before = digests()
+    # The six, enumerated through the published builders rather than by string
+    # assembly, so this set cannot drift from the one `purge` builds (D-14).
+    six_built_names = {
+        paths_mod.get_meta_path(tmp_cache_dir, subject).name,
+        paths_mod.get_meta_tmp_path(tmp_cache_dir, subject).name,
+        paths_mod.get_npy_tmp_path(tmp_cache_dir, subject).name,
+        paths_mod.get_memmap_tmp_path(tmp_cache_dir, subject).name,
+        paths_mod.get_npy_path(tmp_cache_dir, subject).name,
+        paths_mod.get_memmap_path(tmp_cache_dir, subject).name,
+    }
+    assert six_built_names & before.keys(), "precondition: at least one of the subject's built names is on disk"
+
+    store.purge(subject)
+
+    after = digests()
+    disappeared = before.keys() - after.keys()
+
+    assert disappeared == (six_built_names & before.keys()), (
+        f"D-15-G6 / T-15-52 violated: purge removed {sorted(disappeared)!r}, but the only paths it may ever "
+        f"remove are the six names built from the key (plus a built name's resolved link target). Anything "
+        f"else in this difference is a widened removal set -- and an entry's own cache_path reaching it is "
+        f"exactly how purge('beta') would come to destroy alpha.dat"
+    )
+    assert {name: after[name] for name in after} == {name: before[name] for name in after}, (
+        "SC-1 violated: purge rewrote a file it did not remove. The survivors must be byte-identical -- a "
+        "names-only assertion would not see this"
+    )
+    assert stray.exists() and bystander in store, (
+        "purge touched a file no key owns, or dropped a key the caller never named"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CR2-02 — one entry, two keys, and the damage lands on the key nobody named.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-02) - closed by 15-12; remove this marker there")
 def test_purging_one_key_leaves_a_shared_entrys_finalizer_armed_for_the_other_key(
     make_store: MakeStore, tmp_cache_dir: Path
 ) -> None:

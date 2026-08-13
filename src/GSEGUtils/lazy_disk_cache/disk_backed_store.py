@@ -1383,7 +1383,7 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         exercises the override logs an INFO record naming the key, so the
         override is transparent rather than merely permitted.
 
-        **What a future reader must not "fix".** Four things:
+        **What a future reader must not "fix".** Five things:
 
         1. The step below detaches the live entry's finalizer **directly**, and
            must not be routed through :meth:`LazyDiskCache.disable_purge`, which
@@ -1408,6 +1408,19 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
            consistency", would destroy the only cleanup that file has and
            convert a GC-reclaimable file into a permanent leak created by the
            removal verb itself. Do not add either.
+        5. The detach is **gated on membership of the set this call removed**,
+           never on whether the file sits inside the cache directory (D-15-G6).
+           Read together with item 4 these are one policy and not two
+           coincidences: *a refusal detaches nothing, and a completion detaches
+           exactly what it removed.* Territory answers "may I delete it?" and
+           deletion answers "did I delete it?"; the two converge for the
+           single-key case, which is why the territory version looks like it
+           works. It fails on ``store["alpha"] = e; store["beta"] = e;
+           store.purge("beta")``, where ``alpha.dat`` is inside the cache
+           directory but belongs to a key still live and tracked. **The
+           comparison never becomes a removal**: an entry's own ``cache_path``
+           is compared against the set and is never added to it, because adding
+           it would make that same call destroy ``alpha.dat``.
 
         Parameters
         ----------
@@ -1623,7 +1636,61 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 "directory or let the store derive one from the key."
             )
 
+        # 5b. THE DISARM SET IS THE REMOVAL SET (D-15-G6, DESIGN-DECISIONS entry
+        #     83). Recorded at length because the line this replaces looked
+        #     correct, and because the plausible alternative is wrong in a way
+        #     that only shows on a shape no single-key test produces.
+        #
+        #     TERRITORY IS THE WRONG PREDICATE. "Disarm where purge has rights,
+        #     i.e. inside its own cache directory" answers *may I delete it?*.
+        #     The bookkeeping question is *did I delete it?*, and only the second
+        #     one licenses a detach. The two CONVERGE for the single-key case,
+        #     which is precisely why the territory version would look like it
+        #     worked. The counterexample that separates them:
+        #
+        #         store.add_data_to_store("alpha", arr)
+        #         store["beta"] = store["alpha"]     # one entry, two keys
+        #         store.purge("beta")
+        #
+        #     `alpha.dat` is INSIDE the cache directory, so territory says
+        #     disarm; it was never in `beta`'s artefact set, so deletion says
+        #     don't; and deletion is correct — `alpha` is still a live tracked
+        #     key whose entry would lose its only cleanup (CR2-02). The same
+        #     predicate closes CR2-01, where a contained entry path that is not
+        #     one of the six built names was disarmed by a call that removed it
+        #     from nowhere.
+        #
+        #     WHAT THE SET IS, NAMED PRECISELY. It is the RESOLVED REMOVAL SET
+        #     USED FOR THE FINALIZER COMPARISON — the resolved form of the six
+        #     built names, unioned with the link targets the reconcile already
+        #     resolved (not re-resolved here, so the no-TOCTOU property holds
+        #     verbatim). It is deliberately NOT "every path this call unlinks":
+        #     where a built name is a symlink, `_unlink_artefacts` deletes the
+        #     LINK PATH ITSELF as well as its resolved target, and the link path
+        #     is not a member of this set. That is harmless for the comparison —
+        #     an entry pointed at the link resolves to the same target and
+        #     matches anyway — but the two sets are not equal and no comment here
+        #     may claim they are.
+        #
+        #     ENTRY PATHS ARE COMPARED AGAINST THIS SET AND NEVER ADDED TO IT.
+        #     D-15-G6's *Where* clause says contained entry paths "reach the
+        #     removal set"; that means they reach the COMPARISON, where before
+        #     they reached only the containment refusal. Adding them to what gets
+        #     unlinked would make `purge("beta")` destroy `alpha.dat` above —
+        #     re-creating CR2-02 as data destruction rather than closing it.
+        #     `purge` unlinks nothing beyond the six built names and those
+        #     resolved targets.
+        #
+        #     The entry lock stays scoped to the detach alone (entry 80): the
+        #     membership test is a pure read and is done before it is taken.
+        removed = {p.resolve() for p in artefacts} | set(link_targets.values())
         for entry in registered:
+            entry_cache_path = getattr(entry, "_cache_path", None)
+            if entry_cache_path is None or Path(entry_cache_path).resolve() not in removed:
+                # This call is not removing this file. Disarming its finalizer
+                # would destroy the only cleanup it has and manufacture the leak
+                # D-15-G2 refuses to create.
+                continue
             if hasattr(entry, "_finalizer"):
                 with entry._lock:
                     entry._finalizer.detach()
