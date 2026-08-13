@@ -663,6 +663,95 @@ TMP_SUFFIX: Final[str] = ".tmp"
 
 
 # ---------------------------------------------------------------------------
+# Phase-15 artefact-name recognition (D-15-G7)
+# ---------------------------------------------------------------------------
+
+#: The store artefact NAME vocabulary, and the reason it is a DERIVATION rather
+#: than a list. Every element is built from the five suffix constants directly
+#: above, so a sixth suffix cannot be added there and forgotten here — the block
+#: that owns the vocabulary owns all of it, which is the single-seam rule D-14
+#: established and the reason `_store_artefact_suffix` lives in this module
+#: rather than in the store that consumes it.
+#:
+#: The seven elements are the four base suffixes plus the three `.tmp` forms the
+#: builders actually produce. There is deliberately no `.tmp` form of the legacy
+#: pickle: no builder writes one, and inventing a name the package cannot create
+#: would be restating the vocabulary rather than deriving it.
+#:
+#: ORDERED LONGEST FIRST, by construction rather than by hand. See
+#: `_store_artefact_suffix` for why that ordering is a correctness requirement.
+_ARTEFACT_SUFFIXES: Final[tuple[str, ...]] = tuple(
+    sorted(
+        (
+            NPY_SUFFIX,
+            META_SUFFIX,
+            LEGACY_PICKLE_SUFFIX,
+            MEMMAP_SUFFIX,
+            f"{NPY_SUFFIX}{TMP_SUFFIX}",
+            f"{META_SUFFIX}{TMP_SUFFIX}",
+            f"{MEMMAP_SUFFIX}{TMP_SUFFIX}",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _store_artefact_suffix(name: str) -> Optional[str]:
+    """Report which store artefact suffix ``name`` carries, or ``None``.
+
+    A module-private predicate in the shape of :func:`_assert_contained` and
+    :func:`_assert_write_contained`: deliberately absent from ``__all__``, and
+    called by :class:`DiskBackedStore` the same way those two already are. It
+    exists so the store can ask *"is this name one the store builds?"* without
+    growing a second artefact vocabulary of its own.
+
+    **The question it answers, and the question it does not.** It decides
+    whether a **name** is *shaped like* a store artefact. It does **not** decide
+    whether a file **is** one: it opens nothing, stats nothing, consults no
+    cache directory, no store and no tracking state. That is the entire point
+    at the one call site that matters (D-15-G7). The alternative predicate —
+    *"is this the built artefact path of some other tracked key?"* — would make
+    a destructive verb's refusal depend on whether a garbage collection had run,
+    which is the shape round-2 finding CR2-04 condemned, and would miss the
+    untracked orphan that is the likeliest victim of all.
+
+    **Longest-first ordering is a correctness requirement, not a style
+    choice.** ``<key>`` + ``.npy`` + ``.tmp`` ends with both the temporary
+    suffix and the plain one. Iterating shortest-first would report the plain
+    ``.npy`` form for a temporary name, so a caller that compares the reported
+    suffix against what it built would compare the wrong pair. The ordering is
+    produced by sorting :data:`_ARTEFACT_SUFFIXES` on length at construction, so
+    a suffix added later is placed correctly without anyone remembering to.
+
+    **Why the legacy pickle suffix is in the vocabulary.** D-09 forbids
+    :meth:`DiskBackedStore.purge` from removing a legacy ``<key>.pkl`` *by
+    name*. A rule that then let the same method follow a symlink to one would
+    delete through a link exactly what the rule forbids deleting directly,
+    which is not a narrower policy but the same policy with a hole in it.
+
+    Parameters
+    ----------
+    name : str
+        A bare file name — ``Path.name``, not a full path. Passing a path-like
+        string still works, because the test is a suffix test, but the caller is
+        expected to have taken the final component already.
+
+    Returns
+    -------
+    str or None
+        The longest store artefact suffix ``name`` ends with, or ``None`` when
+        it ends with none of them. The returned value is one of the elements of
+        :data:`_ARTEFACT_SUFFIXES`, so a caller may compare it by identity of
+        content against the constants rather than re-deriving it.
+    """
+    for suffix in _ARTEFACT_SUFFIXES:
+        if name.endswith(suffix):
+            return suffix
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Phase-14 resolved containment (D-03 / D-17 / STORE-02)
 # ---------------------------------------------------------------------------
 

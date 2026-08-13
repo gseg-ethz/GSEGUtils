@@ -8,10 +8,18 @@ halves are load-bearing in opposite directions: disarming a finalizer for a file
 method declined to remove destroys that file's only cleanup, and following a link to a
 file the key does not own destroys somebody else's data.
 
-``15-11`` opens the cases; ``15-12`` is obliged to close four of them and ``15-13`` the
-fifth. Every open case carries ``pytest.mark.xfail(strict=True)`` with a reason naming
-the plan that must remove it, so a marker cannot rot into a permanent excuse: the moment
-the defect closes, the unexpected pass turns this suite red until the marker comes out.
+``15-11`` opens the cases; ``15-12`` was obliged to close four of them and ``15-13`` the
+fifth. Every open case carries ``pytest.mark.xfail(strict=True)``, so a marker cannot rot
+into a permanent excuse: the moment the defect closes, the unexpected pass turns this
+suite red until the marker comes out.
+
+**Where that landed, recorded because the counts differ from the plan's projection.**
+``15-12`` closed three of its four and ``15-13`` closed the fifth, so four markers are
+gone. **One remains, and its reason deliberately names no closing plan**: ``15-12``
+implemented D-15-G6's ``.dat`` rescan, measured that it reverses a Phase 14 invariant,
+and the deferral was taken as a decision rather than as a failure. A reason naming a plan
+would be a promise nobody has made. See the twenty-line note above that marker for both
+mechanisms.
 
 **Two facts make this module necessary rather than tidy.**
 
@@ -63,7 +71,11 @@ import pytest
 # classify as first-party belongs; the placement is the formatter's, not a choice.
 from test_store_purge_identity import assert_nothing_derived_from
 
-from GSEGUtils.lazy_disk_cache import StorePurgeForeignArtefactError
+from GSEGUtils.lazy_disk_cache import (
+    StorePurgeAliasedArtefactError,
+    StorePurgeForeignArtefactError,
+    StorePurgeRefusedError,
+)
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
@@ -840,7 +852,6 @@ def _plant_dat_symlink(cache_dir: Path, key: str, target: Path) -> Path:
 
 
 @_POSIX_ONLY
-@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-03) - closed by 15-13; remove this marker there")
 def test_purge_refuses_to_follow_a_link_aimed_at_another_keys_artefact(
     make_store: MakeStore, tmp_cache_dir: Path
 ) -> None:
@@ -871,15 +882,26 @@ def test_purge_refuses_to_follow_a_link_aimed_at_another_keys_artefact(
     to make in-cache links a supported shape, so this is reachable by a legitimate
     operator action and not only by an attacker.
 
-    **No exception type is asserted, and the omission is deliberate.** ``15-13``
-    chooses how the refusal is spelled; naming a symbol it has not written yet would
-    raise at *import* and take the whole module down with a collection error, which is
-    the trap ``15-08`` recorded and avoided. The typed companion belongs to ``15-13``.
+    **No exception type is asserted here, and the omission is deliberate.** ``15-13``
+    chooses how the refusal is spelled; naming a symbol it had not written yet would
+    have raised at *import* and taken the whole module down with a collection error,
+    which is the trap ``15-08`` recorded and avoided. ``15-13`` has since answered:
+    :exc:`StorePurgeAliasedArtefactError`, pinned by the typed companion immediately
+    below. **This case keeps its type-blind shape on purpose** -- it says what must be
+    TRUE of the data whatever the refusal is called, so a later round free to rename or
+    re-parent the exception still cannot make ``victim.npy`` disappear.
+
+    **It asserts READABILITY, not tracking, and that is the stronger assertion.**
+    ``15-11``'s finding F-1 measured the reproduction one notch past what the review
+    transcript records: ``'victim' in store`` is still ``True`` after the destruction,
+    so the store keeps advertising a key every read of which raises. Asserting "the key
+    is gone" would have missed that; asserting "the key reads back the array that was
+    written" covers both outcomes.
 
     **Whether the aggressor link itself survives is likewise not asserted.** The case is
     about ownership -- who may destroy ``victim.npy`` -- and unlinking an in-cache link
     is an in-cache operation whatever it points at, so both answers are defensible and
-    the choice is ``15-13``'s.
+    the choice was ``15-13``'s.
     """
     store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
     store.add_data_to_store("victim", _FIRST.copy())
@@ -911,6 +933,116 @@ def test_purge_refuses_to_follow_a_link_aimed_at_another_keys_artefact(
         f"CR2-03 violated (purge raised: {observed}): 'victim' is no longer readable as the array that was "
         f"written to it. A file that survives holding the wrong bytes, or a key that survives tracking but "
         f"raises on read, is the same silent orphaning wearing a different green tick"
+    )
+
+
+@_POSIX_ONLY
+def test_the_aliased_refusal_is_its_own_type_and_its_message_carries_the_remedy(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-13 / CR2-03 / D-15-G7 / R3-02 -- the typed companion 15-11 could not write.
+
+    Four assertions, and none of them is a duplicate of the case above, which is
+    deliberately type-blind:
+
+    1. the refusal is :exc:`StorePurgeAliasedArtefactError` **exactly**, so a caller can
+       tell "you aimed a link at somebody else's artefact" from "your artefact is
+       outside my directory" -- two different remedies;
+    2. the message quotes the **offending link path**, per Phase 14's D-13. A refusal
+       that does not say *which* link is one an operator cannot act on, and an unquoted
+       one is the CWE-117 shape CR-01 fixed on the rescan warning;
+    3. the message carries an **actionable remedy** and not merely a diagnosis (R3-02).
+       This rule deliberately over-refuses a legitimate adopted entry, so an operator
+       who meets it by accident must be able to fix it from the message alone: a
+       concrete non-store extension to rename the payload to, and the retry. A
+       fail-closed rule whose message only reports the collision reads as a bug;
+    4. ``except StorePurgeRefusedError`` catches it -- the family property D-15-G2a
+       made type-level, asserted through a handler rather than through ``issubclass``,
+       because what is promised is that a downstream's EXISTING handler keeps working.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("victim_typed", _FIRST.copy())
+    store.offload("victim_typed", pickle_container=True)
+    victim_npy = paths_mod.get_npy_path(tmp_cache_dir, "victim_typed")
+    link = _plant_dat_symlink(tmp_cache_dir, "aggressor_typed", victim_npy)
+
+    with pytest.raises(StorePurgeAliasedArtefactError) as excinfo:
+        store.purge("aggressor_typed")
+
+    assert type(excinfo.value) is StorePurgeAliasedArtefactError, (
+        f"the aliased refusal must be its own type exactly, not a parent or a sibling; got "
+        f"{type(excinfo.value).__name__}"
+    )
+
+    message = str(excinfo.value)
+    assert repr(str(link)) in message, (
+        f"D-13 violated: the refusal must name the offending link, quoted. Message was: {message}"
+    )
+
+    lowered = message.lower()
+    assert "rename the payload" in lowered and ".bin" in message, (
+        f"R3-02 violated: the message must give a CONCRETE non-store extension to rename the payload to, not "
+        f"a directional 'rename the payload'. Message was: {message}"
+    )
+    assert "purge again" in lowered, (
+        f"R3-02 violated: the remedy must end in the retry, or an operator does not know the rename is "
+        f"sufficient. Message was: {message}"
+    )
+
+    caught = False
+    try:
+        store.purge("aggressor_typed")
+    except StorePurgeRefusedError:
+        caught = True
+    assert caught, (
+        "D-15-G2a violated: `except StorePurgeRefusedError` did not catch the aliased-artefact refusal. The "
+        "subclassing exists precisely so a downstream told to catch the parent gets the correct behaviour -- "
+        "nothing was destroyed, do not retry blindly -- on this shape too"
+    )
+    assert victim_npy.exists(), "the repeated refusal must still leave the victim's artefact on disk"
+
+
+def test_the_artefact_suffix_predicate_reports_the_longest_match_and_nothing_else() -> None:
+    """Plan 15-13 / D-15-G7 / D-14 -- longest-first ordering, pinned rather than inspected.
+
+    ``paths._store_artefact_suffix`` is what makes the aliased refusal lexical, and its
+    ordering is a **correctness** requirement rather than a style choice: a name ending
+    ``<key>`` + array suffix + temporary suffix ends with *both* the temporary form and
+    the plain one, so a shortest-first iteration would report the plain form for a
+    temporary name and a caller comparing the reported suffix against what it built
+    would compare the wrong pair.
+
+    Ordering cannot be asserted by reading the tuple -- that would restate the
+    construction rather than test it -- so it is asserted through the predicate's
+    answers. The negative row is the one that keeps the adopted-entry feature alive:
+    a payload named with an extension the store does not build must report ``None``,
+    which is exactly why the shipped adopted-entry tests name theirs that way.
+    """
+    tmp = paths_mod.TMP_SUFFIX
+    for base in (paths_mod.NPY_SUFFIX, paths_mod.META_SUFFIX, paths_mod.MEMMAP_SUFFIX):
+        temporary = f"{base}{tmp}"
+        assert paths_mod._store_artefact_suffix(f"somekey{temporary}") == temporary, (
+            f"longest-first ordering violated: {temporary!r} was not reported for a name that carries it, so "
+            f"a temporary artefact would be mistaken for the plain one it wraps"
+        )
+        assert paths_mod._store_artefact_suffix(f"somekey{base}") == base
+
+    assert paths_mod._store_artefact_suffix(f"somekey{paths_mod.LEGACY_PICKLE_SUFFIX}") == (
+        paths_mod.LEGACY_PICKLE_SUFFIX
+    ), (
+        "the legacy pickle suffix must be in the vocabulary: D-09 forbids purge from removing a <key>.pkl BY "
+        "NAME, so following a link to one would delete through an alias exactly what that rule forbids "
+        "deleting directly"
+    )
+
+    assert paths_mod._store_artefact_suffix("innocuous.bin") is None, (
+        "a payload named with an extension the store does not build must NOT be reported as a store "
+        "artefact, or the aliased refusal swallows the legitimate adopted entry D-17 and STORE-03 protect"
+    )
+    assert paths_mod._store_artefact_suffix("innocuous") is None, "a name with no suffix at all carries none"
+
+    assert paths_mod._store_artefact_suffix("victim.npy") is not None, (
+        "sanity: the predicate must recognise the very name the CR2-03 reproduction destroys"
     )
 
 

@@ -27,19 +27,22 @@ resolved path that would land outside the cache directory) — together with the
 three artefact path builders :func:`get_npy_path`, :func:`get_meta_path` and
 :func:`get_legacy_pickle_path`, each of which validates the key lexically and
 then verifies that the path it returns lands inside the cache directory.
-Phase 15 adds the three refusals raised by :meth:`DiskBackedStore.purge`:
+Phase 15 adds the four refusals raised by :meth:`DiskBackedStore.purge`:
 :exc:`StorePurgeRefusedError` (a purge issued from a process that did not
 construct the store, and the root of the refusal family),
 :exc:`StorePurgeForeignArtefactError` (an artefact of the key resolves outside
-the store's cache directory, so the purge refused rather than reaching — a
-**subclass** of :exc:`StorePurgeRefusedError`, so one ``except`` on the parent
-catches both) and :exc:`StorePurgeIncompleteError` (one or more artefacts
-survived the unlink), all published because the migration note tells downstream
-callers to catch them by name.
+the store's cache directory, so the purge refused rather than reaching),
+:exc:`StorePurgeAliasedArtefactError` (a built path of the key is a symlink
+whose resolved target is inside the cache directory but carries another key's
+store artefact name, so following it would destroy data the key does not own) —
+both of those a **subclass** of :exc:`StorePurgeRefusedError`, so one ``except``
+on the parent catches all three — and :exc:`StorePurgeIncompleteError` (one or
+more artefacts survived the unlink), all published because the migration note
+tells downstream callers to catch them by name.
 
-Those nine names — the six key-contract names above plus the three purge refusal
+Those ten names — the six key-contract names above plus the four purge refusal
 types — are the **published key-and-purge contract surface**. That figure counts
-the contract, not the module: ``__all__`` itself carries fifteen names, the
+the contract, not the module: ``__all__`` itself carries sixteen names, the
 remaining six being the four classes, the ``LazyDiskCacheKw`` typed dict and the
 ``register_lazy_disk_cache_class`` registration helper, which are not part of
 the contract this paragraph is about. The raising validator behind
@@ -60,6 +63,7 @@ __all__ = [
     "StoreContainmentError",
     "StorePurgeRefusedError",
     "StorePurgeForeignArtefactError",
+    "StorePurgeAliasedArtefactError",
     "StorePurgeIncompleteError",
     "is_valid_store_key",
     "get_npy_path",
@@ -70,6 +74,7 @@ __all__ = [
 from .disk_backed_ndarray import DiskBackedNDArray
 from .disk_backed_store import (
     DiskBackedStore,
+    StorePurgeAliasedArtefactError,
     StorePurgeForeignArtefactError,
     StorePurgeIncompleteError,
     StorePurgeRefusedError,

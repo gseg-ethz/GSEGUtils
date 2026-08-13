@@ -82,14 +82,23 @@ class StorePurgeRefusedError(RuntimeError):
     on with one ``except``: *do not retry blindly, and do not go looking for
     damage, because there is none.*
 
-    Two members today:
+    Three members today:
 
     * this class, raised directly for the **foreign-process** case (D-05/D-08) —
       a purge issued from a forked or unpickled copy would be deleting the
       constructing process's data;
     * :exc:`StorePurgeForeignArtefactError`, for the **foreign-artefact** case
       (D-15-G2) — an artefact of the key resolves outside the store's own cache
-      directory, so removing it would make ``purge`` an arbitrary-delete verb.
+      directory, so removing it would make ``purge`` an arbitrary-delete verb;
+    * :exc:`StorePurgeAliasedArtefactError`, for the **aliased-artefact** case
+      (D-15-G7) — a built path of the key is a symlink whose resolved target is
+      *inside* the cache directory but carries a store artefact name that is not
+      one of this key's own, so following it would make ``purge`` a cross-key
+      data-destruction primitive.
+
+    The family grows by adding **reasons**, never by adding **contracts**: each
+    new member is a different answer to *why*, and the same answer to *what
+    happened*, which is nothing.
 
     The hierarchy choice is unchanged and still correct. It deliberately does
     **not** join ``StoreKeyError``'s :class:`ValueError` hierarchy, and the
@@ -163,6 +172,70 @@ class StorePurgeForeignArtefactError(StorePurgeRefusedError):
     treat identically; and parenting under ``StoreContainmentError``, whose
     family is :class:`ValueError`-rooted and is about a path built **from the
     key**, which this one by definition is not.
+    """
+
+
+class StorePurgeAliasedArtefactError(StorePurgeRefusedError):
+    """Raised when a built path of the key is a symlink aimed at another store artefact name.
+
+    **What the reconcile found.** One of the six paths
+    :meth:`DiskBackedStore.purge` builds from the key is a symlink; its resolved
+    target is *inside* the cache directory, so containment is satisfied; and the
+    target's **name** carries a suffix the store itself builds — an array, a
+    sidecar, a memmap, a legacy pickle or one of their temporary forms — while
+    not being one of *this* key's six names. In short: the link is aimed at
+    somebody else's artefact.
+
+    **Why it refuses rather than reaches** (D-15-G7). Following that target is a
+    **cross-key data-destruction primitive**, and one planted link is enough to
+    fire it. Reproduced in the round-2 review: an in-cache ``aggressor.dat``
+    symlink pointing at a genuine, store-written ``victim.npy`` made
+    ``purge("aggressor")`` unlink ``victim.npy``, return **cleanly**, and leave
+    ``"victim"`` still tracked by the store and unreadable through it — a key the
+    store advertises and can never load, with no warning emitted. Containment
+    answers *"may I delete inside my own directory?"*, which is not the same
+    question as *"is this file mine to delete?"*, and only the second one
+    licenses an unlink.
+
+    **The test is on the name, and it consults nothing.** No registry, no
+    tracking state, no other key's files. That is deliberate: a rule phrased as
+    *"refuse if the target belongs to another **tracked** key"* would make a
+    destructive verb's refusal flip on a garbage collection — the shape round-2
+    finding CR2-04 condemned — and would leave the untracked orphan, the victim
+    most likely to exist, unprotected.
+
+    **The cost, published rather than left to be discovered.** Deciding from the
+    name means this refusal **over-refuses**: it declines a legitimate *adopted
+    entry* (D-17, STORE-03) whose payload happens to be named with a suffix the
+    store builds, even when that payload belongs to nobody. The worked pair,
+    which is the contract rather than an illustration:
+
+    * a planted in-cache ``<key>.dat`` aimed at a payload named ``payload.npy``
+      **refuses** — and it refuses **even when no key owns that payload**: no
+      key named ``payload`` is tracked, the file belongs to nobody, and the
+      refusal fires anyway, because the test reads the name and never the
+      registry;
+    * the same link aimed at a payload named ``payload.bin`` **still purges** —
+      it is followed and its payload is removed with it, exactly as before.
+
+    **The remedy for the refusing row is one rename**: give the payload an
+    extension the store does not build — ``.bin`` is the one this package's own
+    adopted-entry tests use — and purge again. The exception message says the
+    same thing, so an operator can act on it without reading this page.
+
+    **Why it errs this way.** A destructive verb fails **closed**. Declining a
+    purge costs a rename; following the wrong link costs another key's data, and
+    costs it silently. The refused shape is one no store-owned write route can
+    produce — each key builds its own ``<key>.dat`` name — so only an operator
+    can plant it, and an operator can un-plant it.
+
+    **Why it subclasses** :exc:`StorePurgeRefusedError` (D-15-G2a, applied a
+    second time rather than re-argued). Its defining property is the family's,
+    not its own: **nothing was touched.** It is raised before the first mutation,
+    so the key is still tracked, every artefact is byte-identical, and no
+    finalizer was disarmed. It is a *sibling reason*, not a *different
+    contract* — one ``except StorePurgeRefusedError`` still catches all three
+    refusals and still gets the same guarantee from each.
     """
 
 
@@ -701,8 +774,8 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
     def _reconcile_artefact_targets(
         self, artefacts: tuple[Path, ...], registered: list[T]
-    ) -> tuple[dict[Path, Path], Optional[tuple[str, Path, Path]]]:
-        """Resolve ``key``'s effective artefact set and report the first foreign member.
+    ) -> tuple[dict[Path, Path], Optional[tuple[str, str, Path, Path, Optional[str]]]]:
+        """Resolve ``key``'s effective artefact set and report the first member it may not touch.
 
         The reconcile step D-15-G2 puts in :meth:`purge`, factored out so the
         method's body reads as *reconcile, refuse, detach, drop, unlink*. It
@@ -732,10 +805,28 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
           candidate, so a ``store[key] = DiskBackedNDArray(arr)`` entry does not
           veto removal of the store's own artefacts.
 
-        A member outside the cache directory is reported rather than raised on,
-        so the ``raise`` itself stays visible in :meth:`purge`'s own body above
-        the detach — the ordering SC-2 rests on should be readable in the method
-        that owns it, not delegated out of sight.
+        **The second refusal ground: an aliased target** (D-15-G7). A built path
+        that is a symlink is followed to its resolved target, and that target is
+        refused — not followed — when its **name** carries a suffix the store
+        itself builds while not being one of this key's own six names. Deciding
+        it from the name is what keeps this method a pure read: the question goes
+        to ``paths._store_artefact_suffix``, which consults no registry, no
+        tracking state and no other key's files, so the answer cannot flip on a
+        garbage collection. Without it, one planted in-cache ``<key>.dat`` aimed
+        at another key's genuine payload made ``purge`` unlink that payload and
+        return cleanly (round-2 finding CR2-03). The refusal **over-refuses** a
+        legitimate adopted payload that happens to carry such a name, which is
+        the deliberate fail-closed side for a destructive verb and is published
+        as a worked pair on :exc:`StorePurgeAliasedArtefactError`.
+
+        A member this method may not touch is reported rather than raised on, so
+        the ``raise`` itself stays visible in :meth:`purge`'s own body above the
+        detach — the ordering SC-2 rests on should be readable in the method that
+        owns it, not delegated out of sight. Both grounds travel back through
+        **one** output carrying a discriminator, rather than through a second
+        return value: two outputs would let a future edit report one and forget
+        the other, and the single-refusal shape is what keeps this method
+        read-only on every path out of it.
 
         Containment goes through :func:`paths._assert_write_contained`, which is
         the existing expression of *"the resolved path is inside this base"*: it
@@ -756,12 +847,23 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
         Returns
         -------
-        tuple[dict[pathlib.Path, pathlib.Path], tuple[str, pathlib.Path, pathlib.Path] or None]
+        tuple[dict[pathlib.Path, pathlib.Path], tuple or None]
             The link-target map — populated **only** for artefacts that are
             symlinks, so the ordinary shape adds no unlink call at all — and
-            either ``None`` or ``(origin, offending_path, resolved_target)`` for
-            the first member found outside the cache directory.
+            either ``None`` or a five-field refusal report for the first member
+            this method may not touch. The fields, in order: the **discriminator**
+            (``"outside"`` for a member that resolves out of the cache directory,
+            ``"aliased"`` for a target carrying another key's artefact name), the
+            human-readable origin clause, the offending path, its resolved
+            target, and the colliding store artefact suffix — the last being
+            ``None`` for every ground but ``"aliased"``.
         """
+        # The key's own six names, compared by NAME rather than by resolved path
+        # and that is the load-bearing detail. Resolving the built paths here
+        # would resolve `<key>.dat` THROUGH the planted link, putting the
+        # victim's own name into the set and making the refusal below
+        # unreachable in exactly the case it exists for.
+        built_names = {artefact.name for artefact in artefacts}
         link_targets: dict[Path, Path] = {}
         for artefact in artefacts:
             if not artefact.exists():
@@ -774,9 +876,27 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             try:
                 paths._assert_write_contained(self._cache_dir, artefact)
             except paths.StoreContainmentError:
-                return link_targets, ("a built artefact path", artefact, artefact.resolve())
+                return link_targets, ("outside", "a built artefact path", artefact, artefact.resolve(), None)
             if artefact.is_symlink():
-                link_targets[artefact] = artefact.resolve()
+                target = artefact.resolve()
+                # D-15-G7 — THE ALIASED TARGET, REFUSED BEFORE IT IS EVER RECORDED.
+                # This is the one site the refusal must precede: `link_targets` is
+                # what `_unlink_artefacts` deletes, so a target that reaches the
+                # map is already condemned. Containment has passed by now, which
+                # is precisely why it is not enough — the target is inside the
+                # cache directory and still is not this key's to delete (CR2-03).
+                #
+                # LEXICAL, AND IT CONSULTS NOTHING. The vocabulary question goes to
+                # `paths`, which owns every name this package builds (D-14), so the
+                # store never grows a second copy of it. The rejected alternative —
+                # "is this the built path of some other TRACKED key?" — would make
+                # this refusal depend on whether a garbage collection had run
+                # (CR2-04's condemned shape) and would leave the untracked orphan,
+                # the likeliest victim, unprotected.
+                aliased_suffix = paths._store_artefact_suffix(target.name)
+                if aliased_suffix is not None and target.name not in built_names:
+                    return link_targets, ("aliased", "a built artefact path", artefact, target, aliased_suffix)
+                link_targets[artefact] = target
 
         for entry in registered:
             # D-15-G5 (entry 82) — AN EPHEMERAL ENTRY IS SKIPPED ENTIRELY, BEFORE THE
@@ -804,7 +924,13 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             try:
                 paths._assert_write_contained(self._cache_dir, entry_path)
             except paths.StoreContainmentError:
-                return link_targets, ("a live entry's own cache_path", entry_path, entry_path.resolve())
+                return link_targets, (
+                    "outside",
+                    "a live entry's own cache_path",
+                    entry_path,
+                    entry_path.resolve(),
+                    None,
+                )
 
         return link_targets, None
 
@@ -1367,13 +1493,29 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         to this key and nothing else"; what changed is that belonging is decided
         by what a path *resolves to* rather than by what it is *named*.
 
+        **And one target it refuses to follow** (D-15-G7). A built path that is
+        a symlink whose resolved target is inside the cache directory but whose
+        **name** carries a suffix this store builds — and is not one of this
+        key's own six names — raises :exc:`StorePurgeAliasedArtefactError`
+        instead. Containment answers *"may I delete inside my own directory?"*;
+        it does not answer *"is this file mine to delete?"*, and one planted
+        in-cache ``<key>.dat`` aimed at another key's genuine payload used to
+        make this method destroy it and return cleanly. The rule costs a
+        deliberate **over-refusal** — an adopted payload merely *named* like a
+        store artefact is declined too — which is the fail-closed side for a
+        removal verb and is published as a worked pair on that exception.
+
         **A known limit, stated rather than guarded.** Two keys whose
         ``<key>.dat`` links point at the *same* payload are handled badly:
         purging one removes the other's data. It is not reachable through any
         store-owned write route — each key builds its own ``<key>.dat`` name —
         only by an operator planting two links at one target. Guarding it would
         mean scanning every other key's link target on every purge, which is a
-        cost paid by every caller for a shape none of them can produce.
+        cost paid by every caller for a shape none of them can produce. D-15-G7
+        narrows this limit without closing it: where the shared payload is
+        *named* like a store artefact the aliased refusal now fires for both
+        keys, and where it is not — the ordinary adopted-payload naming — the
+        limit stands exactly as described.
 
         **The consequence, stated rather than left to be discovered.** An
         explicit purge wins over ``purge_disk_on_gc=False`` (D-03). That flag
@@ -1399,15 +1541,23 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
            behind, and exactly the state a caller most needs to clean up, so the
            tighter reading would make the orphan case unpurgeable through the
            one verb built to purge it (D-02).
-        4. A **foreign artefact is refused, never reached** (D-15-G2), and the
-           refusal deliberately does **not** detach that entry's finalizer. Both
-           halves are load-bearing and both look like omissions. Unlinking the
-           path wherever it points would make this a verb that deletes arbitrary
-           caller-supplied filesystem locations — the shape Phase 14's
+        4. A **member this method may not touch is refused, never reached**, and
+           the refusal deliberately does **not** detach that entry's finalizer.
+           Both halves are load-bearing and both look like omissions. Unlinking
+           the path wherever it points would make this a verb that deletes
+           arbitrary caller-supplied filesystem locations — the shape Phase 14's
            containment layer exists to prevent. Detaching anyway, "for
            consistency", would destroy the only cleanup that file has and
            convert a GC-reclaimable file into a permanent leak created by the
-           removal verb itself. Do not add either.
+           removal verb itself. Do not add either. There are two such members,
+           and they are two *reasons* rather than two contracts: a **foreign
+           artefact**, outside the cache directory (D-15-G2), and an **aliased
+           target**, inside it but carrying another key's artefact name
+           (D-15-G7). Do not collapse the second into the first — containment
+           has already passed by the time it fires, which is exactly why it is
+           needed — and do not replace its name test with a scan of the other
+           tracked keys, which would make a destructive verb's refusal flip on a
+           garbage collection.
         5. The detach is **gated on membership of the set this call removed**,
            never on whether the file sits inside the cache directory (D-15-G6).
            Read together with item 4 these are one policy and not two
@@ -1447,6 +1597,14 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             catches both refusals and gets the same guarantee from each: raised
             before the first mutation, so nothing was touched and no finalizer
             was disarmed.
+        StorePurgeAliasedArtefactError
+            If a built path of ``key`` is a symlink whose resolved target is
+            inside the cache directory but carries a store artefact name that is
+            not one of ``key``'s own six (D-15-G7). Also a **subclass** of
+            :exc:`StorePurgeRefusedError`, with the same guarantee, and it
+            deliberately over-refuses an adopted payload merely named like a
+            store artefact — the remedy, given in the message, is to rename that
+            payload to an extension this store does not build.
         KeyError
             If ``key`` is present neither in tracking nor on disk (D-02).
         StorePurgeIncompleteError
@@ -1616,9 +1774,30 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         #     GC-reclaimable file into a permanent leak created by the removal
         #     verb itself (G-2b, measured: purge returned CLEANLY and the file
         #     was still on disk after a forced collection).
-        link_targets, foreign = self._reconcile_artefact_targets(artefacts, registered)
-        if foreign is not None:
-            origin, offending, resolved_target = foreign
+        link_targets, refusal = self._reconcile_artefact_targets(artefacts, registered)
+        if refusal is not None:
+            ground, origin, offending, resolved_target, aliased_suffix = refusal
+            if ground == "aliased":
+                # D-15-G7 — THE ALIASED TARGET (round-2 finding CR2-03). Raised
+                # here, in `purge`'s own body and above the detach, for the same
+                # reason its sibling is: the SC-2 no-op is a property of WHERE the
+                # raise sits, and moving it out of sight is how it gets lost.
+                raise StorePurgeAliasedArtefactError(
+                    f"Refusing to purge {key!r}: {origin}, {str(offending)!r}, is a symlink resolving to "
+                    f"{str(resolved_target)!r}, which is inside this store's cache directory but carries the "
+                    f"store artefact suffix {aliased_suffix!r} and is not one of the names built for "
+                    f"{key!r}. That target is another key's store artefact, not this key's payload, so "
+                    "following it would make purge destroy data belonging to a key the caller never named "
+                    "— and it would do so silently, leaving that key tracked and unreadable. Nothing has "
+                    "been touched: the key is still tracked, every artefact is byte-identical and every "
+                    "finalizer is still armed. Two actions work. Either remove or repoint the offending "
+                    "link, if it was planted by mistake. Or, if this really is a legitimate adopted entry "
+                    "whose payload merely happens to be named like a store artefact, RENAME THE PAYLOAD TO "
+                    "AN EXTENSION THIS STORE DOES NOT BUILD — .bin is a safe choice, and is the one this "
+                    "package's own adopted-entry tests use — repoint the link at the renamed file, and "
+                    "purge again. The test is on the target's NAME and never on the store's registry, so "
+                    "the rename is sufficient however the payload is or is not tracked."
+                )
             raise StorePurgeForeignArtefactError(
                 f"Refusing to purge {key!r}: {origin}, {str(offending)!r}, resolves to "
                 f"{str(resolved_target)!r}, which is outside this store's cache directory "
