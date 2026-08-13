@@ -822,6 +822,78 @@ def test_write_order_is_flush_then_fsync_then_replace_then_dir_fsync(
     )
 
 
+@POSIX_ONLY
+def test_the_final_dat_name_is_never_opened_for_writing(tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan 15-05 / STORE-08 / SC-6 / D-15 — content arrives only by rename.
+
+    SC-6's headline clause is *"the final name is never opened for writing on the
+    POSIX route — content arrives only by rename"*, and until now it was measured
+    only by the verifier's throwaway ``sc6_repro.py``. Nothing in the suite
+    asserted it, so the claim rested on a script that no longer exists.
+
+    **This is not the write-order test wearing a second name.**
+    ``test_write_order_is_flush_then_fsync_then_replace_then_dir_fsync`` pins the
+    *sequence* of syscalls; it says nothing about the **target** of the write. An
+    implementation that populated ``<key>.dat`` directly and then performed a
+    perfectly ordered flush/fsync/replace/fsync dance over a decoy temporary
+    would satisfy every assertion in that test while having already torn the file
+    the whole route exists to protect. The two tests fail on disjoint mutations,
+    which is the reason both are kept.
+
+    The instrument records the **filename and mode of every** ``np.memmap``
+    **construction**, then asserts a negative over the final name. Recording and
+    delegating rather than raising: a spy that intercepted the call would change
+    the behaviour it is measuring, and the conversion must actually succeed for
+    the absence of a write-open to mean anything — hence the round-trip assertion
+    at the end, which stops this from going green against a route that wrote
+    nothing at all.
+
+    ``mode`` is read from ``kwargs`` first and then positionally, because
+    ``numpy.memmap(filename, dtype, mode, ...)`` accepts it either way and a
+    kwargs-only reading would silently record ``None`` for a positional caller
+    and pass vacuously.
+    """
+    opens: list[tuple[Path, str]] = []
+    real_memmap = np.memmap
+
+    def _spy(filename: Any, *args: Any, **kwargs: Any) -> Any:
+        mode = kwargs.get("mode")
+        if mode is None and len(args) >= 2:
+            mode = args[1]
+        opens.append((Path(str(filename)), str(mode)))
+        return real_memmap(filename, *args, **kwargs)
+
+    monkeypatch.setattr(ldc_module.np, "memmap", _spy)
+
+    payload = np.arange(64, dtype=np.float32)
+    entry = _make_entry(tmp_cache_dir, payload.copy())
+    entry._convert_to_memmap()
+    monkeypatch.undo()
+
+    final = (tmp_cache_dir / "k.dat").resolve()
+    writing = [(p, m) for p, m in opens if m.startswith(("w", "r+", "a"))]
+
+    assert writing, (
+        f"the instrument recorded no writing open at all, so the negative below would pass "
+        f"vacuously against a route that had stopped writing. Recorded: {opens}"
+    )
+    assert all(p.name.endswith(paths.TMP_SUFFIX) for p, _ in writing), (
+        f"STORE-08 / SC-6 regressed: a writing open landed on something other than a "
+        f"{paths.TMP_SUFFIX} temporary. Recorded writing opens: {writing}"
+    )
+
+    to_final = [(p, m) for p, m in writing if p.resolve() == final]
+    assert to_final == [], (
+        f"STORE-08 / SC-6 regressed: the FINAL <key>.dat name was opened for writing "
+        f"({to_final}). Content must arrive at the final name only by os.replace — a route "
+        f"that writes it directly can tear a previously-valid file no matter how well the "
+        f"surrounding flush/fsync/rename sequence is ordered"
+    )
+    assert np.array_equal(np.fromfile(tmp_cache_dir / "k.dat", dtype=np.float32), payload), (
+        "the conversion did not actually write the array, which would make every assertion above vacuous"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Group G — the destination's permissions survive the atomic rename
 # (POSIX-marked: both `os.replace`'s inode semantics and the mode bits

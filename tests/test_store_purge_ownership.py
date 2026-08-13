@@ -1334,3 +1334,85 @@ def test_purge_still_follows_an_adopted_link_to_a_payload_that_is_not_a_store_ar
     assert not list(tmp_cache_dir.iterdir()), (
         f"the purge left {sorted(p.name for p in tmp_cache_dir.iterdir())!r} in the cache directory"
     )
+
+
+# ---------------------------------------------------------------------------
+# The published contract page, guarded (WINDOWS 11 / WR2-05 / WR2-06 / R3-02).
+#
+# `15-14` corrected two claims this page made that the code does not, and both
+# corrections were docs-only: nothing in the suite would notice if either came
+# back. That matters more here than the usual doc-drift argument, because this
+# page is where the false claim SHIPPED FROM -- the sentence below was published,
+# survived two review rounds, needed a WINDOWS entry to get fixed, and the suite
+# was green through all of it.
+#
+# The assertions are deliberately narrow. They pin the two sentences a reviewer
+# measured false and the three names a caller catches, and nothing about prose,
+# so ordinary editing of the page is unconstrained.
+# ---------------------------------------------------------------------------
+
+#: The published contract page. Resolved from this file rather than from the CWD,
+#: so the test is runnable from any directory (`test_store_containment.py` and
+#: `test_store_key_rules.py` both resolve it the same way).
+CONTRACT_PAGE: Path = Path(__file__).resolve().parents[1] / "docs" / "source" / "LazyDiskCache.rst"
+
+#: The literal sentence `15-14` removed. It is false on CR2-03's input -- one
+#: planted in-cache link makes `purge` decline a file that IS the key's, and
+#: follow one that is not -- and `15-14` deleted it outright rather than keeping
+#: it with a qualifier, precisely so it could not be re-quoted out of a
+#: surrounding paragraph. Kept here as a literal because the defect was the
+#: literal wording.
+_RETIRED_FALSE_RULE = "everything belonging to this key and nothing else"
+
+
+def test_the_contract_page_does_not_carry_the_retired_false_rule() -> None:
+    """Plan 15-14 / WINDOWS 11 / STORE-04 — the page may not re-acquire a rule that is false.
+
+    The boundary is held on the page by the two NAMED refusals
+    (:exc:`StorePurgeForeignArtefactError`, :exc:`StorePurgeAliasedArtefactError`)
+    rather than by a sentence asserting it, which is the correction `15-14` made.
+    A future edit that reinstates the sentence -- as a summary line, a section
+    heading, or an "in short" -- reintroduces a published guarantee the shipped
+    code does not provide, and would do it silently.
+    """
+    assert CONTRACT_PAGE.is_file(), f"the published contract page is missing at {CONTRACT_PAGE}"
+    text = CONTRACT_PAGE.read_text(encoding="utf-8")
+
+    assert _RETIRED_FALSE_RULE not in text, (
+        f"WINDOWS 11 reopened: the contract page carries {_RETIRED_FALSE_RULE!r} again. That rule is FALSE "
+        f"on CR2-03's input and was deleted rather than qualified by 15-14. State the removal set and let "
+        f"the two named refusals hold the boundary; do not restate the guarantee as prose"
+    )
+
+
+def test_the_contract_page_publishes_the_whole_refusal_family() -> None:
+    """Plan 15-13 / 15-14 / R3-02 — a caller cannot catch what the page does not name.
+
+    All three share one guarantee -- raised before the first mutation, so a
+    refusal is a no-op -- and that shared guarantee is the reason they are a
+    family rather than three unrelated errors. A page that published only the
+    parent would leave a caller unable to discover which refusals exist.
+    """
+    text = CONTRACT_PAGE.read_text(encoding="utf-8")
+    for name in ("StorePurgeRefusedError", "StorePurgeForeignArtefactError", "StorePurgeAliasedArtefactError"):
+        assert name in text, (
+            f"the contract page does not publish {name}. Every member of the refusal family is part of the "
+            f"published surface: a caller writing an `except` clause reads this page"
+        )
+
+
+def test_the_page_scopes_the_permission_claim_to_the_mode_bits() -> None:
+    """Plan 15-14 / WR2-06 / STORE-08 — only ``stat.S_IMODE`` crosses the rename.
+
+    The page claimed the destination's *permissions* generally; the shipped code
+    restores the permission BITS and nothing else -- owner, group, ACLs and the
+    setuid/setgid/sticky bits outside ``S_IMODE`` do not survive ``os.replace``.
+    `15-14` fixed this although its own plan did not name it, so nothing scheduled
+    guards it. Same defect class as WINDOWS 11 and the same file.
+    """
+    text = CONTRACT_PAGE.read_text(encoding="utf-8")
+    assert "S_IMODE" in text, (
+        "WR2-06 reopened: the contract page's permission claim no longer names stat.S_IMODE. Only the "
+        "permission bits are carried across os.replace -- a claim about 'the destination's permissions' "
+        "overstates what the code restores and is the defect 15-14 corrected"
+    )
