@@ -288,6 +288,20 @@ class LazyDiskCache(ABC):
         # defaults = get_defaults()
         # automatic_offloading = overrides.get("preset_automatic_offloading", defaults["preset_automatic_offloading"])
         self._enable_caching = config.enable_caching
+        # D-15-G5 (DESIGN-DECISIONS entry 82) — PROVENANCE IS RECORDED HERE BECAUSE
+        # ONLY HERE KNOWS IT. Whether the backing file was ALLOCATED by this
+        # constructor or SUPPLIED by the caller is not recoverable from the path
+        # afterwards, and three cases need three behaviours: a path we allocated
+        # (`purge` ignores it), an explicit path OUTSIDE the cache directory (`purge`
+        # refuses to touch it — STORE-02/D-17's genuine foreign artefact), and an
+        # explicit path INSIDE it (`purge` deletes it). A containment test collapses
+        # the first two into "outside, therefore refuse", which is review finding
+        # CR2-04 verbatim.
+        #
+        # The expression is evaluated ONCE, ABOVE the branch that consumes the same
+        # condition, so the two branches cannot be edited into disagreeing about which
+        # of them allocated the file.
+        self._ephemeral_cache_path = config.cache_path is None
         if config.cache_path is None:
             fd, cache_path = tempfile.mkstemp(
                 suffix=paths.MEMMAP_SUFFIX
@@ -846,6 +860,59 @@ class LazyDiskCache(ABC):
             "DiskBackedStore (which derives the path from the validated store key), or pass "
             "cache_path= to the constructor."
         )
+
+    @property
+    def ephemeral(self) -> bool:
+        """Return ``True`` when this entry ALLOCATED its own backing file (D-15-G5).
+
+        The policy, in one paragraph. When no ``cache_path`` is supplied,
+        :meth:`_init_from_config` allocates one with :func:`tempfile.mkstemp` and
+        that file is **fire-and-forget**: it has an OS-managed lifetime, it carries
+        **no recoverability guarantee**, and it is **not the store's to manage**.
+        :meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` therefore does not
+        touch it — it neither unlinks it nor refuses on account of it nor detaches
+        the finalizer that reclaims it. An explicitly supplied path is the opposite
+        case in both directions: inside the cache directory ``purge`` removes it,
+        outside it ``purge`` refuses, and neither decision is this flag's.
+
+        Recorded in ``DESIGN-DECISIONS.md`` entry **82** (``D-15-G5``); the detach
+        rule it depends on is entry **83** (``D-15-G6``).
+
+        Derived at construction, and deliberately **not** a
+        :class:`LazyDiskCacheConfig` field
+        --------------------------------------------------------------------------
+        Provenance is a fact about how this entry was built, not a preference a
+        caller states. Were it configurable, a caller could supply an explicit path
+        and *declare* it ephemeral, and ``purge`` would act on the lie — declining
+        to remove a file it is in fact responsible for, or declining to refuse on a
+        genuinely foreign one.
+
+        Two measured properties are what make this cheap rather than a new
+        invariant to maintain, recorded here so a later reader does not re-derive
+        them:
+
+        * the :attr:`cache_path` setter **already raises**
+          :exc:`AttributeError` ("an entry's cache path is fixed at construction",
+          D-01), so there is no reassignment route this flag would have to be kept
+          in sync with; and
+        * ``__getstate__`` returns ``self.__dict__.copy()`` popping only
+          ``_lock`` and ``_finalizer``, so a plain instance attribute **survives
+          pickle for free** — no pickle-protocol code exists for this flag and none
+          is needed.
+
+        Read-only
+        ---------
+        There is no setter, so assignment raises :exc:`AttributeError` — the same
+        answer the sealed :attr:`cache_path` gives, reached through Python's own
+        property machinery rather than through a second hand-written refusal.
+
+        Returns
+        -------
+        bool
+            ``True`` when the backing file was allocated by this constructor,
+            ``False`` when it was supplied by the caller.
+        """
+        return self._ephemeral_cache_path
 
     def offload(self) -> None:
         """Flush the current buffer to disk, drop the in-RAM array, and mark offloaded."""

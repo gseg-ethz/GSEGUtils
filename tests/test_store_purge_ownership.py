@@ -42,8 +42,10 @@ The markers, as this round assigns them:
 ``pytest-randomly`` shuffles test order, so nothing here carries cross-test state.
 """
 
+import copy
 import gc
 import os
+import pickle
 from pathlib import Path
 from typing import Callable
 
@@ -60,9 +62,11 @@ import pytest
 # classify as first-party belongs; the placement is the formatter's, not a choice.
 from test_store_purge_identity import assert_nothing_derived_from
 
+from GSEGUtils.lazy_disk_cache import StorePurgeForeignArtefactError
 from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import DiskBackedStore
+from GSEGUtils.lazy_disk_cache.lazy_disk_cache import LazyDiskCacheConfig
 
 #: A store factory as injected by ``conftest.make_store``. Annotated structurally rather
 #: than by importing the conftest ``MakeStore`` protocol -- the sibling purge modules
@@ -362,7 +366,6 @@ def _purge_an_ordinarily_constructed_key(
     return outcome, sorted(p.name for p in (npy, meta) if p.exists())
 
 
-@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-04) - closed by 15-12; remove this marker there")
 def test_an_ordinarily_constructed_entry_does_not_make_its_key_unpurgeable(
     make_store: MakeStore, tmp_cache_dir: Path
 ) -> None:
@@ -435,6 +438,205 @@ def test_an_ordinarily_constructed_entry_does_not_make_its_key_unpurgeable(
     assert not dropped_survivors, (
         f"CR2-04 violated: the store-owned artefacts {dropped_survivors} survive the purge on the "
         f"reference-dropped path too, so the outcome agrees for the wrong reason"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D-15-G5 — the provenance flag itself, and the half of CR2-04 that stays open.
+# ---------------------------------------------------------------------------
+
+
+def test_the_ephemeral_flag_is_derived_at_construction_and_is_not_configurable(tmp_cache_dir: Path) -> None:
+    """Plan 15-12 / D-15-G5 / entry 82 / T-15-51 -- provenance is recorded, never stated.
+
+    Three properties, and the third is the security-relevant one:
+
+    1. an entry that ALLOCATED its backing file reports ``ephemeral is True``; one
+       given an explicit path reports ``False``. Provenance is not recoverable from
+       the path afterwards, which is why the constructor records it.
+    2. the flag is **read-only**. There is no setter, so assignment raises
+       :exc:`AttributeError` -- the same answer the sealed ``cache_path`` gives.
+    3. the flag is **not a configuration field** (T-15-51). Were it configurable a
+       caller could supply an explicit path and *declare* it ephemeral, and ``purge``
+       would act on the lie -- declining to remove a file it is responsible for.
+
+    **Measured, not assumed, for property 3:** ``LazyDiskCacheConfig`` and the
+    constructor both **silently ignore** an unknown ``ephemeral=`` keyword rather than
+    rejecting it, so the field is absent by way of an ignored extra rather than a
+    raised error. That is the weaker of the two outcomes, which is exactly why the
+    assertion below is on the DERIVED VALUE and not on an exception: an ignored extra
+    that nonetheless flipped the flag would be the vulnerability, and a raise would
+    merely be a nicer way of not having one.
+    """
+    allocated = DiskBackedNDArray(_FIRST.copy(), enable_caching=False)
+    explicit = DiskBackedNDArray(_FIRST.copy(), enable_caching=False, cache_path=tmp_cache_dir / "explicit")
+
+    assert allocated.ephemeral is True, (
+        "D-15-G5 violated: an entry constructed with no cache_path allocated its own backing file with "
+        "tempfile.mkstemp and must report itself ephemeral -- that file is fire-and-forget under an "
+        "OS-managed lifetime and is not the store's to manage"
+    )
+    assert explicit.ephemeral is False, (
+        "D-15-G5 violated: an entry given an explicit cache_path did NOT allocate its own backing file, so it "
+        "is not ephemeral. Collapsing the two would make purge ignore a file it is responsible for"
+    )
+
+    with pytest.raises(AttributeError):
+        explicit.ephemeral = True  # type: ignore[misc]
+    assert explicit.ephemeral is False, "the refused assignment must not have landed"
+
+    # Property 3, behaviourally: the extra keyword is accepted and ignored on both
+    # routes, and neither route changes the derived value.
+    lied_config = LazyDiskCacheConfig(cache_path=tmp_cache_dir / "lied", ephemeral=True)  # type: ignore[call-arg]
+    assert not hasattr(lied_config, "ephemeral"), (
+        "T-15-51: LazyDiskCacheConfig grew an `ephemeral` field. Provenance must be derived in "
+        "_init_from_config from `config.cache_path is None` and never stated by a caller"
+    )
+    lied_entry = DiskBackedNDArray(
+        _FIRST.copy(),
+        enable_caching=False,
+        cache_path=tmp_cache_dir / "lied_entry",
+        ephemeral=True,  # type: ignore[call-arg]
+    )
+    assert lied_entry.ephemeral is False, (
+        "T-15-51 violated: a caller supplied an explicit cache_path AND declared the entry ephemeral, and the "
+        "declaration won. purge would then skip an entry whose in-cache file it is responsible for deleting -- "
+        "the lie the derived-not-configured rule exists to make unrepresentable"
+    )
+
+
+def test_the_ephemeral_flag_survives_a_pickle_round_trip(tmp_cache_dir: Path) -> None:
+    """Plan 15-12 / D-15-G5 / entry 82 -- the pickle property is measured, not argued.
+
+    Entry 82 rests on ``__getstate__`` returning ``self.__dict__.copy()`` popping only
+    ``_lock`` and ``_finalizer``, so a plain instance attribute survives pickle with no
+    pickle-protocol code at all. That is a claim about the current implementation, so it
+    is asserted rather than left in a docstring: if ``__getstate__`` is ever narrowed to
+    an explicit allow-list of keys, this case is what says so.
+
+    Both entries are built ``enable_caching=False`` and are read by nothing afterwards.
+    ``__getstate__`` calls ``disable_purge()`` **unconditionally** and offloads when
+    caching is enabled, so a shared entry would be mutated by the round-trip -- the same
+    isolation ``15-09`` established for the copy mechanism (its Deviation 3).
+    """
+    allocated = DiskBackedNDArray(_FIRST.copy(), enable_caching=False)
+    explicit = DiskBackedNDArray(_FIRST.copy(), enable_caching=False, cache_path=tmp_cache_dir / "pickled")
+
+    assert pickle.loads(pickle.dumps(allocated)).ephemeral is True, (
+        "D-15-G5 violated: the ephemeral flag did not survive a pickle round-trip for an allocated backing "
+        "file. An unpickled entry that forgot its provenance would be treated as store-managed by purge, "
+        "which is the joblib worker path this package is built around"
+    )
+    assert pickle.loads(pickle.dumps(explicit)).ephemeral is False, (
+        "D-15-G5 violated: an explicit-path entry came back from a pickle round-trip reporting itself "
+        "ephemeral, so purge would skip a file it is responsible for"
+    )
+
+
+def test_copying_an_entry_preserves_ephemeral_and_the_sources_measured_side_effects(tmp_cache_dir: Path) -> None:
+    """Plan 15-12 / D-15-G5 / R3-04 -- the copy conclusion is read off the COPY.
+
+    This entry is built for this assertion alone and is read by nothing afterwards,
+    because ``copy.copy`` routes through ``__getstate__``/``__setstate__`` and
+    ``__getstate__`` calls :meth:`~LazyDiskCache.disable_purge` **unconditionally** --
+    which detaches the SOURCE's finalizer and flips its ``purge_disk_on_gc`` to
+    ``False`` before the state the copy is rebuilt from is even returned. A case that
+    shared its entry with another assertion would be reading a provenance flag off an
+    object the check itself mutated. ``enable_caching=False`` is the isolation ``15-09``
+    already established for exactly this mechanism (its Deviation 3 records a copy test
+    written the naive way failing its own precondition on the force-offload); it is
+    reused rather than replaced with a second one.
+
+    The source's side effects are **measured and pinned, not presumed absent**. The
+    observed transition on this code is ``_finalizer.alive: True -> False`` and
+    ``purge_disk_on_gc: True -> False``, and the copy comes back with a freshly
+    registered finalizer because ``__setstate__`` routes through ``enable_purge`` (D-19).
+    An "assert no side effects" written blind would be false against the code.
+    """
+    entry = DiskBackedNDArray(_FIRST.copy(), enable_caching=False, purge_disk_on_gc=True)
+    assert entry.ephemeral is True, "precondition: this entry must have allocated its own backing file"
+
+    alive_before = entry._finalizer.alive
+    purge_intent_before = entry.purge_disk_on_gc
+    assert alive_before is True and purge_intent_before is True, (
+        "precondition: a purge_disk_on_gc=True entry starts with an armed finalizer and the intent recorded"
+    )
+
+    duplicate = copy.copy(entry)
+
+    assert duplicate.ephemeral is True, (
+        "D-15-G5 violated: the copy of an entry that allocated its own backing file reports itself "
+        "non-ephemeral. The conclusion is read off the COPY deliberately -- the source has been mutated by "
+        "this very call, so reading it would measure disable_purge() rather than the flag"
+    )
+
+    assert entry._finalizer.alive is False, (
+        f"the SOURCE's finalizer was expected to be detached by copy.copy: __getstate__ calls disable_purge() "
+        f"unconditionally before returning the state. Observed alive {alive_before} -> "
+        f"{entry._finalizer.alive}. A run showing the source untouched means __getstate__ stopped calling "
+        f"disable_purge(), which is a change to the pickle contract D-18/D-19 own and not a result to absorb"
+    )
+    assert entry.purge_disk_on_gc is False, (
+        f"the SOURCE's purge_disk_on_gc was expected to be flipped by copy.copy, by the same unconditional "
+        f"disable_purge(). Observed {purge_intent_before} -> {entry.purge_disk_on_gc}"
+    )
+    assert duplicate.purge_disk_on_gc is True, (
+        "the COPY must carry the user's original purge intent: __getstate__ overrides the dumped flag with "
+        "the snapshot taken before disable_purge(), and __setstate__ re-registers through enable_purge (D-19)"
+    )
+
+
+def test_an_explicit_cache_path_outside_the_cache_directory_still_refuses(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-12 / D-15-G5 / D-15-19 / STORE-02 / D-17 -- the ephemeral skip is NARROW.
+
+    The measurable statement that ``15-12`` stopped refusing on *allocated* paths and not
+    on *explicit* ones. An entry given an explicit ``cache_path`` outside the cache
+    directory is STORE-02 / D-17's genuine foreign artefact and must keep raising
+    :exc:`StorePurgeForeignArtefactError` **exactly**.
+
+    This case is also the standing evidence for the half of ``CR2-04`` this round
+    deliberately leaves open. While the refusal stands, the store-owned ``<key>.npy`` +
+    ``<key>.meta.json`` for this key are reachable by no removal verb the package
+    exposes -- asserted below, so ``15-15`` files ``D-15-19`` against a measurement
+    rather than against a plan. Splitting the refusal to remove them would change what a
+    refusal MEANS, from *nothing was touched* to *some things were*, one round after
+    D-15-G2a locked that semantics; the residual is preferred to reopening it.
+    """
+    key = "explicit_outside"
+    elsewhere = tmp_cache_dir.parent / "elsewhere_explicit"
+    elsewhere.mkdir()
+
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    entry = DiskBackedNDArray(_FIRST.copy(), enable_caching=True, cache_path=elsewhere / key, purge_disk_on_gc=True)
+    assert entry.ephemeral is False, (
+        "precondition: an explicitly supplied path is NOT ephemeral, or this case would be testing the skip "
+        "instead of the refusal it exists to preserve"
+    )
+    store[key] = entry
+    store.offload(key, pickle_container=True)
+
+    foreign_dat = elsewhere / f"{key}{paths_mod.MEMMAP_SUFFIX}"
+    npy = paths_mod.get_npy_path(tmp_cache_dir, key)
+    meta = paths_mod.get_meta_path(tmp_cache_dir, key)
+    assert foreign_dat.exists(), "precondition: the entry must have written its .dat outside the cache directory"
+    assert npy.exists() and meta.exists(), "precondition: the store-owned codec pair must be on disk"
+
+    with pytest.raises(StorePurgeForeignArtefactError):
+        store.purge(key)
+
+    assert key in store, "SC-2: the refusal must leave the key tracked"
+    assert entry._finalizer.alive is True, "SC-2: the refusal must leave the entry's finalizer armed"
+    assert foreign_dat.exists(), "the refusal must not reach outside the cache directory"
+
+    # D-15-19, stated as a measurement: the store-owned pair survives the refusal and is
+    # reachable by no removal verb while the refusal stands. Recorded here so the
+    # residual is evidenced rather than asserted.
+    assert npy.exists() and meta.exists(), (
+        "the refusal is a no-op by contract (D-15-G2a), so the store-owned codec pair necessarily survives "
+        "it. That is the open half of CR2-04, filed as D-15-19 -- this assertion is its evidence, and it must "
+        "be UPDATED rather than deleted if a later round makes the pair reachable"
     )
 
 

@@ -110,8 +110,16 @@ class StorePurgeForeignArtefactError(StorePurgeRefusedError):
     **What it means.** :meth:`DiskBackedStore.purge` reconciled the key's
     effective artefact set — the resolved target of each of the six built paths
     that exists, plus the resolved ``_cache_path`` of each live registered entry
-    — and found a member outside ``cache_dir``. Rather than reach out there and
-    unlink it, the method refused and touched nothing.
+    that supplied its own — and found a member outside ``cache_dir``. Rather
+    than reach out there and unlink it, the method refused and touched nothing.
+
+    **What it is NOT raised for** (D-15-G5, entry 82). An entry constructed
+    without a ``cache_path`` allocates one with :func:`tempfile.mkstemp`, which
+    is outside the cache directory by construction. That path is **ephemeral**:
+    fire-and-forget under an OS-managed lifetime, and not the store's to manage.
+    ``purge`` skips such entries entirely, so an ordinary
+    ``store[key] = DiskBackedNDArray(arr)`` does **not** raise this. Only an
+    **explicitly supplied** path outside the cache directory does.
 
     **Why it refuses rather than reaches** (D-15-G2). A removal verb that
     deletes arbitrary caller-supplied filesystem locations is precisely the
@@ -121,13 +129,28 @@ class StorePurgeForeignArtefactError(StorePurgeRefusedError):
     in the cache directory — so unlinking it would let a caller aim ``purge`` at
     any file the process can write.
 
-    **What a caller can do about it.** ``purge`` is not the tool for this file.
-    Drop the entry and let garbage collection reclaim it — which still works,
-    and works *because* this method did **not** detach the entry's finalizer.
+    **What a caller can do about it — and what dropping the entry does not
+    buy.** ``purge`` is not the tool for this file. Dropping the entry lets
+    garbage collection reclaim **the entry's own backing file, and nothing
+    else**: the finalizer runs ``_purge_memmap_file``, which by explicit design
+    removes exactly one file and never the store-owned ``<key>.npy`` +
+    ``<key>.meta.json`` codec pair. So while this refusal stands, that pair is
+    reclaimed by **no removal verb this package exposes** — an earlier version
+    of this paragraph and of the exception message prescribed the drop-and-GC
+    route as though it recovered them, and it never could (round-2 review
+    finding CR2-04, part 1).
+
+    The actionable fix is therefore to **repoint or remove the offending path
+    and purge again**: for an outward symlink, remove or repoint the link; for
+    an entry constructed with an explicit ``cache_path`` outside the cache
+    directory, give it a path inside that directory or let the store derive one
+    from the key.
+
+    That the entry's own file *does* stay reclaimable is a real property and it
+    is deliberate: this method did **not** detach the entry's finalizer.
     Disarming the only cleanup a file has while declining to remove it is how a
     removal verb manufactures a permanent leak; see the *What a future reader
-    must not "fix"* list on :meth:`DiskBackedStore.purge`. For an outward
-    symlink, remove or repoint the link and purge again.
+    must not "fix"* list on :meth:`DiskBackedStore.purge`.
 
     **Why it subclasses** :exc:`StorePurgeRefusedError` **rather than standing
     alone** (D-15-G2a). Its defining property is not "bad key" and not "wrong
@@ -687,11 +710,27 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         :meth:`purge` call it above its first mutation and keep SC-2's
         bit-for-bit no-op true for the refusal it may raise as a result.
 
-        The effective artefact set, in full and as one rule rather than two
-        special cases:
+        What this method consults, in full, and **what each half is consulted
+        for** — the two are not the same, and describing them as one set is what
+        let review finding CR2-01 pass a review:
 
-        * for each of the six built paths **that exists**, its resolved target;
-        * for each **live registered entry**, its resolved ``_cache_path``.
+        * for each of the six built paths **that exists**, its resolved target.
+          This half decides both **refusal** and **removal**: the link-target map
+          returned here is what :meth:`_unlink_artefacts` deletes alongside the
+          built paths themselves.
+        * for each **live, non-ephemeral registered entry**, its resolved
+          ``_cache_path``. This half decides **refusal only** — and, in
+          :meth:`purge`, the finalizer detach, by comparison against the set of
+          files that call actually removed (D-15-G6). It is **never** added to
+          anything that gets unlinked: an entry's own backing file is not an
+          artefact of the key being purged, and unlinking it would make
+          ``purge("beta")`` destroy the file of an entry still live under
+          ``"alpha"``.
+        * an **ephemeral** entry — one that allocated its own backing file
+          because no ``cache_path`` was supplied — is **not consulted at all**
+          (D-15-G5, entry 82). Its path is neither a refusal ground nor a removal
+          candidate, so a ``store[key] = DiskBackedNDArray(arr)`` entry does not
+          veto removal of the store's own artefacts.
 
         A member outside the cache directory is reported rather than raised on,
         so the ``raise`` itself stays visible in :meth:`purge`'s own body above
@@ -740,6 +779,24 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 link_targets[artefact] = artefact.resolve()
 
         for entry in registered:
+            # D-15-G5 (entry 82) — AN EPHEMERAL ENTRY IS SKIPPED ENTIRELY, BEFORE THE
+            # CONTAINMENT TEST. Its backing file was allocated by `mkstemp`, lives
+            # under an OS-managed lifetime, and is not the store's to manage: there is
+            # nothing here to refuse on. The skip also costs no detach, because an
+            # allocated path can never be one of the six built names and so can never
+            # be in `purge`'s removal set. Without it, an ordinarily-constructed
+            # `store[key] = DiskBackedNDArray(arr)` made its key PERMANENTLY
+            # unpurgeable — the entry's `/tmp` path fails containment, `purge` refuses
+            # forever, and the store-owned `<key>.npy` + `<key>.meta.json` become
+            # reachable by no removal verb the package exposes (CR2-04).
+            #
+            # Read through the PUBLISHED property, and tolerate its absence the way
+            # the `_cache_path` read below already does: a downstream subclass
+            # registered through `register_lazy_disk_cache_class` may predate this
+            # attribute, and a removal verb must not crash on one. Absent means
+            # `False`, which is the pre-D-15-G5 behaviour for that entry.
+            if getattr(entry, "ephemeral", False):
+                continue
             cache_path = getattr(entry, "_cache_path", None)
             if cache_path is None:
                 continue
@@ -1556,9 +1613,14 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 "artefact is byte-identical and every finalizer is still armed — because unlinking a path "
                 "outside its own root would make purge a verb that deletes arbitrary filesystem locations, "
                 "which is the shape the containment layer exists to prevent. purge is not the tool for this "
-                "file: drop the entry and let garbage collection reclaim it, which still works precisely "
-                "because this call did not detach its finalizer. For a symlink pointing out of the cache "
-                "directory, remove or repoint the link and purge again."
+                "file, and what dropping the entry does buy is narrower than it sounds: garbage collection "
+                "reclaims the ENTRY'S OWN backing file and nothing else — the finalizer removes exactly that "
+                "one file by explicit design — so while this refusal stands the store-owned <key>.npy and "
+                f"<key>.meta.json written for {key!r} are reclaimed by no removal verb this package exposes. "
+                "The actionable fix is to repoint or remove the offending path and purge again: for a symlink "
+                "pointing out of the cache directory, remove or repoint the link; for an entry constructed "
+                "with an explicit cache_path outside the cache directory, give it a path inside this "
+                "directory or let the store derive one from the key."
             )
 
         for entry in registered:
