@@ -436,3 +436,241 @@ def test_an_ordinarily_constructed_entry_does_not_make_its_key_unpurgeable(
         f"CR2-04 violated: the store-owned artefacts {dropped_survivors} survive the purge on the "
         f"reference-dropped path too, so the outcome agrees for the wrong reason"
     )
+
+
+# ---------------------------------------------------------------------------
+# D-15-G6's rescan half — a `.dat` with no key that owns it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (rescan half) - closed by 15-12; remove this marker there")
+def test_a_dat_only_orphan_is_enumerable_by_a_fresh_store(make_store: MakeStore, tmp_cache_dir: Path) -> None:
+    """Plan 15-11 / D-15-G6 rescan half / D-15-02 / STORE-04.
+
+    The orphan is produced through **the library's own opt-out sequence**, never by
+    writing a file by hand, because entry 83 records that sequence as *correct
+    behaviour*: ``disable_purge()`` then ``del store[key]`` instructs "do not delete" at
+    every step, and ``__delitem__`` is documented as dropping tracking and unlinking
+    nothing. What is left behind is not a bug and is not undeletable -- ``purge``
+    derives its paths from the key, so a fresh store in a fresh process removes it with
+    no entry object in existence.
+
+    The genuine residual is **enumerability**. The reopen rescan globs the ``.npy``
+    suffix only, so a ``.dat``-only leftover is invisible: a fresh store tracks ``[]``
+    while an offloaded codec pair tracks correctly. An orphan nobody can list is an
+    orphan nobody can purge, because purging it requires already knowing the key --
+    and a cache-directory orphan, unlike the ephemeral scratch file, has no janitor.
+    Extending the glob closes D-15-02's cheap half with no new API.
+
+    The third assertion below was **measured before it was written**, not predicted. A
+    ``.dat``-only key is *tracked but not loadable*, which is a state this round
+    introduces and which the plan deliberately did not presume the error type of. The
+    tracked-with-no-codec-pair read was simulated against ``0a2dab2`` by installing the
+    key the extended glob will install, and the observed outcome was ``KeyError``:
+    ``_load_entry`` requires **both** halves of the codec pair and reports their absence
+    as a cache miss, which the subscript surfaces as a missing key. That is the right
+    answer and it is pinned rather than left to the fix to choose.
+    """
+    key = "orphan"
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _FIRST.copy())
+
+    entry = store.store[key]
+    assert entry is not None, "precondition: add_data_to_store tracks a live entry"
+    entry.disable_purge()
+    del store[key]
+    del entry
+    gc.collect()
+
+    # Defensive and explicit: the sequence above writes no codec pair, but the shape
+    # this case is about is `<key>.dat` ALONE, so anything else is removed rather than
+    # assumed absent.
+    paths_mod.get_npy_path(tmp_cache_dir, key).unlink(missing_ok=True)
+    paths_mod.get_meta_path(tmp_cache_dir, key).unlink(missing_ok=True)
+    dat = paths_mod.get_memmap_path(tmp_cache_dir, key)
+    assert sorted(p.name for p in tmp_cache_dir.iterdir()) == [dat.name], (
+        f"precondition: the opt-out sequence must leave EXACTLY {dat.name!r} behind -- the case is about a "
+        f"cache directory holding nothing but a .dat, and any other file would give the rescan a second "
+        f"route to the key"
+    )
+    del store
+    gc.collect()
+
+    fresh = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=False)
+
+    assert key in fresh.keys(), (
+        f"D-15-G6 / D-15-02 violated: a fresh store over a cache directory holding {dat.name!r} tracks "
+        f"{fresh.keys()!r} -- the key is invisible to enumeration, so nobody who did not already know it can "
+        f"discover the orphan. The rescan must glob the memmap suffix as well as the codec one"
+    )
+
+    try:
+        fresh[key]
+    except KeyError:
+        pass
+    except Exception as exc:  # noqa: BLE001 - a measured pin, so the observed type is reported
+        raise AssertionError(
+            f"reading a tracked key with no codec pair raised {type(exc).__name__}, not KeyError. Measured "
+            f"at 0a2dab2 the answer is KeyError: _load_entry requires BOTH halves of the codec pair and "
+            f"reports their absence as a cache miss. A different type here means the tracked-but-not-loadable "
+            f"state acquired a new contract that nothing published"
+        ) from exc
+    else:
+        raise AssertionError(
+            "reading a tracked key with no codec pair returned a value. The rescan installs a tracking "
+            "entry, not data -- a `.dat` is an opaque memmap with no shape or dtype sidecar, so there is "
+            "nothing to reconstruct an array from and the read must fail with KeyError"
+        )
+
+    fresh.purge(key)
+
+    assert_nothing_derived_from(tmp_cache_dir, key)
+    assert not list(tmp_cache_dir.iterdir()), (
+        f"the consequence enumerability buys did not follow: purging the now-listable orphan left "
+        f"{sorted(p.name for p in tmp_cache_dir.iterdir())!r} in the cache directory"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CR2-03 — a link aimed at another key's artefact, and the adopted link that
+# must keep working beside it.
+# ---------------------------------------------------------------------------
+
+
+def _plant_dat_symlink(cache_dir: Path, key: str, target: Path) -> Path:
+    """Point ``<key>.dat`` at ``target`` and return the link path.
+
+    Planted **before the store exists** wherever the shape needs to be admitted at
+    construction, which is what makes Phase 14's D-31 resolved-containment check accept
+    it, as it is meant to: the target is inside the cache directory, so the resolved
+    final component is contained.
+    """
+    link = paths_mod.get_memmap_path(cache_dir, key)
+    link.symlink_to(target)
+    return link
+
+
+@_POSIX_ONLY
+@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-03) - closed by 15-13; remove this marker there")
+def test_purge_refuses_to_follow_a_link_aimed_at_another_keys_artefact(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-11 / CR2-03 / D-15-G7 / STORE-04 -- the cross-key destruction primitive.
+
+    ``15-09`` made ``purge`` follow each built path to its resolved target and unlink
+    that target first, and the containment gate requires only that the target be
+    *inside the cache directory* -- it does not require the target to have anything to
+    do with the key. So an in-cache ``<keyA>.dat`` symlink aimed at another key's real,
+    store-written artefacts makes ``purge(keyA)`` destroy them. Measured at
+    ``0a2dab2``::
+
+        before: ['aggressor.dat', 'victim.meta.json', 'victim.npy']
+        # store.purge("aggressor")
+        after : ['victim.meta.json']
+        victim.npy survived: False
+        store['victim'] ->  KeyError 'victim'
+
+    ``purge("aggressor")`` returned **cleanly** and silently orphaned a live key. The
+    published limit covers only *"two keys whose ``<key>.dat`` links point at the same
+    payload"* and argues the shape needs an operator planting two links at one target.
+    **One** planted link is enough, and the destroyed file is a store-owned artefact
+    rather than a shared adopted payload -- so the rule immediately above that limit,
+    *"everything belonging to this key and nothing else"*, is false for this input.
+
+    The precondition -- write access to the cache directory -- is the module's own
+    accepted residual D-17 / T-14-18, and the *adopted entry* feature exists precisely
+    to make in-cache links a supported shape, so this is reachable by a legitimate
+    operator action and not only by an attacker.
+
+    **No exception type is asserted, and the omission is deliberate.** ``15-13``
+    chooses how the refusal is spelled; naming a symbol it has not written yet would
+    raise at *import* and take the whole module down with a collection error, which is
+    the trap ``15-08`` recorded and avoided. The typed companion belongs to ``15-13``.
+
+    **Whether the aggressor link itself survives is likewise not asserted.** The case is
+    about ownership -- who may destroy ``victim.npy`` -- and unlinking an in-cache link
+    is an in-cache operation whatever it points at, so both answers are defensible and
+    the choice is ``15-13``'s.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("victim", _FIRST.copy())
+    store.offload("victim", pickle_container=True)
+
+    victim_npy = paths_mod.get_npy_path(tmp_cache_dir, "victim")
+    assert victim_npy.exists(), (
+        "precondition: 'victim' must have a genuine store-written .npy -- the finding is about destroying a "
+        "store-owned artefact, not a planted decoy"
+    )
+    link = _plant_dat_symlink(tmp_cache_dir, "aggressor", victim_npy)
+    assert link.is_symlink() and link.resolve() == victim_npy.resolve(), (
+        "precondition: <aggressor>.dat must resolve to victim's .npy, or the case exercises the ordinary path"
+    )
+
+    observed: str = "no exception"
+    try:
+        store.purge("aggressor")
+    except Exception as exc:  # noqa: BLE001 - the type is recorded, never asserted on
+        observed = type(exc).__name__
+
+    assert victim_npy.exists(), (
+        f"CR2-03 / D-15-G7 violated (purge raised: {observed}): purging 'aggressor' destroyed 'victim's "
+        f"store-written .npy through a planted link. purge must refuse to follow a resolved target that is "
+        f"another key's built artefact -- containment answers 'may I delete inside my own directory', which "
+        f"is not the same question as 'is this file mine to delete'"
+    )
+    assert np.array_equal(np.asarray(store["victim"]), _FIRST), (
+        f"CR2-03 violated (purge raised: {observed}): 'victim' is no longer readable as the array that was "
+        f"written to it. A file that survives holding the wrong bytes, or a key that survives tracking but "
+        f"raises on read, is the same silent orphaning wearing a different green tick"
+    )
+
+
+@_POSIX_ONLY
+def test_purge_still_follows_an_adopted_link_to_a_payload_that_is_not_a_store_artefact(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-11 / D-17 / STORE-03 / D-15-G7 -- the boundary the refusal must NOT cross.
+
+    Green at this plan's HEAD, and it must stay green. The legitimate adopted entry that
+    D-17 and STORE-03 exist to protect is identified by **what the target is NAMED**,
+    not by the fact that a link was followed: the library writes the key's data through
+    an adopted ``<key>.dat``, and ``15-09`` made ``purge`` remove the payload behind it
+    precisely so a "complete" removal does not leave the key's exact bytes sitting in
+    the cache directory under another name.
+
+    **This is the case that goes red if ``15-13``'s refusal is written too wide.** A
+    blanket "never follow a link" -- or a check on the fact of the link rather than on
+    the artefact-shaped name of its target -- satisfies the CR2-03 case above by
+    refusing everything, and would reopen G-2a as a residual payload the moment it
+    landed. The payload here is deliberately named with an extension that belongs to no
+    store artefact vocabulary, so a refusal that keys on the target's NAME passes both
+    cases and a refusal that keys on the link does not.
+    """
+    key = "adopted_round3"
+    payload = tmp_cache_dir / "innocuous_round3.bin"
+    payload.write_bytes(b"")
+    link = _plant_dat_symlink(tmp_cache_dir, key, payload)
+
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _SECOND.copy())
+
+    assert link.is_symlink(), (
+        "precondition: <key>.dat must still be a symlink after the library's own write, or adoption is "
+        "already broken and this case is measuring something else"
+    )
+    assert np.array_equal(np.fromfile(payload, dtype=np.float32), _SECOND), (
+        "precondition: the library must have written the key's data THROUGH the link into the payload"
+    )
+
+    store.purge(key)
+
+    assert not payload.exists(), (
+        f"the adopted payload {payload.name!r} survived the purge, so the key's exact bytes are still in the "
+        f"cache directory under a name that does not derive from the key. That is G-2a reopened -- a refusal "
+        f"aimed at CR2-03 must key on the TARGET'S NAME being another key's artefact, never on the fact that "
+        f"a link was followed"
+    )
+    assert_nothing_derived_from(tmp_cache_dir, key)
+    assert not list(tmp_cache_dir.iterdir()), (
+        f"the purge left {sorted(p.name for p in tmp_cache_dir.iterdir())!r} in the cache directory"
+    )
