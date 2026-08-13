@@ -211,3 +211,228 @@ def test_the_ordinary_tracked_key_purge_still_detaches_and_removes_everything(
         "the detach on the removal set must NARROW it, never disable it"
     )
     assert_nothing_derived_from(tmp_cache_dir, key)
+
+
+# ---------------------------------------------------------------------------
+# CR2-02 — one entry, two keys, and the damage lands on the key nobody named.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-02) - closed by 15-12; remove this marker there")
+def test_purging_one_key_leaves_a_shared_entrys_finalizer_armed_for_the_other_key(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-11 / CR2-02 / D-15-G6 / STORE-04 -- the cross-key detach.
+
+    Nothing prevents one entry object from being registered under two keys:
+    ``store["alpha"] = e; store["beta"] = e`` is **two ordinary validated writes**,
+    both of which ``__setitem__``'s own docstring blesses as a write route. No private
+    seam is touched anywhere in this case, and that is the point -- the shape is
+    reachable by an ordinary consumer.
+
+    ``purge("beta")`` then walks the entries registered under ``beta`` and detaches the
+    shared entry's finalizer, while that entry is still the live, tracked entry of
+    ``alpha`` and ``alpha.dat`` was never in ``beta``'s artefact set. Measured at
+    ``0a2dab2``::
+
+        alpha.dat before      : True   finalizer: True
+        purge('beta') ->  finalizer alive: False   alpha still tracked: True   alpha.dat: True
+        after gc alpha.dat    : True   <-- alpha's live entry lost its only cleanup
+
+    This is the counterexample entry 83 uses to settle *territory* against *deletion*:
+    ``alpha.dat`` is inside the cache directory, so territory says **disarm**; it was
+    never in ``beta``'s artefact set, so deletion says **don't**; and deletion is
+    correct. The two rules converge for the single-key case, which is exactly why the
+    territory version would look like it worked.
+
+    It is **distinct from deferred item D-15-07**, which is about a caller left holding
+    a half-live entry over an inode ``purge`` *did* unlink. Here the file was never
+    unlinked, the entry is still a first-class tracked member of the store, and the
+    damage lands on a key the caller never named.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("alpha", _FIRST.copy())
+
+    entry = store.store["alpha"]
+    assert entry is not None, "precondition: add_data_to_store tracks a live entry"
+    store["beta"] = entry
+
+    alpha_dat = paths_mod.get_memmap_path(tmp_cache_dir, "alpha")
+    assert alpha_dat.exists(), "precondition: alpha's <key>.dat must be materialised to be losable at all"
+    assert entry._finalizer.alive, "precondition: a purge_disk_on_gc=True entry registers a finalizer"
+    assert "alpha" in store and "beta" in store, (
+        "precondition: both ordinary __setitem__ writes must leave their key tracked -- the shape is one "
+        "entry object registered under two keys, and it is unreachable if either write did not land"
+    )
+
+    observed: str = "no exception"
+    try:
+        store.purge("beta")
+    except Exception as exc:  # noqa: BLE001 - the type is recorded, never asserted on
+        observed = type(exc).__name__
+
+    assert entry._finalizer.alive is True, (
+        f"CR2-02 / D-15-G6 violated (purge raised: {observed}): purging 'beta' disarmed the cleanup of an "
+        f"entry that is still the live, tracked entry of 'alpha'. purge('beta') removed no file belonging "
+        f"to 'alpha' and had no business touching its finalizer -- the damage lands on a key the caller "
+        f"never named, which is what makes this a data-loss shape rather than a curiosity"
+    )
+    assert "alpha" in store, (
+        f"CR2-02 violated (purge raised: {observed}): purging 'beta' dropped 'alpha' from tracking. Only the "
+        f"named key may be dropped"
+    )
+    assert alpha_dat.exists(), (
+        f"CR2-02 violated (purge raised: {observed}): purging 'beta' unlinked alpha's <key>.dat. The six "
+        f"names purge builds come from the EXACT key (D-14), so no other key's artefact can ever be in the "
+        f"removal set"
+    )
+
+    # The half that makes it a leak rather than a curiosity: drop every reference and
+    # force a collection. `pop` is in-memory only and unlinks nothing (STORE-05), so
+    # whatever removes the file below is the surviving finalizer.
+    store.pop("alpha", None)
+    store.pop("beta", None)
+    del entry
+    gc.collect()
+
+    assert not alpha_dat.exists(), (
+        f"CR2-02 violated (purge raised: {observed}): after dropping every reference and forcing a "
+        f"collection alpha's <key>.dat is STILL on disk. purge('beta') destroyed the only cleanup a file "
+        f"belonging to a DIFFERENT key had, so a key the caller never named now leaks permanently"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CR2-04 — an ordinarily-constructed entry, and a refusal decided by the GC.
+# ---------------------------------------------------------------------------
+
+
+def _purge_an_ordinarily_constructed_key(
+    store: DiskBackedStore[DiskBackedNDArray], cache_dir: Path, key: str, *, hold_reference: bool
+) -> tuple[str, list[str]]:
+    """Run the CR2-04 sequence for ``key``; return the outcome name and the survivors.
+
+    The sequence is identical on both calls and **only the caller's liveness varies**,
+    which is what makes the two results comparable at all: if the two disagree, the
+    difference is the garbage collector and nothing else.
+
+    ``enable_caching=True`` is **required and measured**, not decoration: the store's
+    ``offload`` skips an entry whose ``cache_enabled`` is ``False`` (the constructor
+    default), so without it no store-owned codec pair is ever written and the case would
+    assert the removal of files that never existed. ``pickle_container=True`` is
+    likewise required twice over -- it is what writes the ``.npy`` + ``.meta.json``
+    pair through the store's own codec, and what clears the in-memory reference so that
+    dropping the caller's is enough to collect the entry.
+
+    Returns
+    -------
+    tuple[str, list[str]]
+        The exception type name raised by ``purge`` (or ``"completed"``), and the sorted
+        names of the store-owned artefacts still on disk afterwards.
+    """
+    entry = DiskBackedNDArray(_FIRST.copy(), enable_caching=True)
+    store[key] = entry
+
+    backing = entry.cache_path
+    assert backing is not None, "precondition: an entry constructed without a cache_path is still allocated one"
+    assert not Path(backing).is_relative_to(cache_dir), (
+        "precondition: an entry constructed with no cache_path must be backed OUTSIDE the store's cache "
+        "directory -- containment is asserted negatively rather than by matching a temp-directory literal, "
+        "because TMPDIR is a supported knob (entry 82) and a site pointing it at node-local scratch is the "
+        "configuration this policy was designed to compose with"
+    )
+
+    store.offload(key, pickle_container=True)
+    npy = paths_mod.get_npy_path(cache_dir, key)
+    meta = paths_mod.get_meta_path(cache_dir, key)
+    assert npy.exists() and meta.exists(), (
+        f"precondition: the store-owned codec pair for {key!r} must be on disk before the purge, or the case "
+        f"would assert the removal of files that were never written"
+    )
+
+    if not hold_reference:
+        del entry
+        gc.collect()
+
+    outcome = "completed"
+    try:
+        store.purge(key)
+    except Exception as exc:  # noqa: BLE001 - the type is recorded, never asserted on
+        outcome = type(exc).__name__
+    return outcome, sorted(p.name for p in (npy, meta) if p.exists())
+
+
+@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (CR2-04) - closed by 15-12; remove this marker there")
+def test_an_ordinarily_constructed_entry_does_not_make_its_key_unpurgeable(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-11 / CR2-04 / D-15-G5 / STORE-04 -- parts 1 and 3 of a three-part finding.
+
+    ``store[key] = DiskBackedNDArray(arr)`` supplies no ``cache_path``, so
+    ``_init_from_config`` allocates one with ``tempfile.mkstemp`` in the system temp
+    directory. The reconcile finds that path outside the cache directory and refuses --
+    **forever**, while the entry lives. Measured at ``0a2dab2``::
+
+        entry cache_path : <system temp>/tmpXXXXXXXX.dat
+        cache listing    : ['feat.meta.json', 'feat.npy']
+        purge -> raised StorePurgeForeignArtefactError
+        after drop+gc    : ['feat.meta.json', 'feat.npy']   <-- store-owned pair still there
+
+    **Part 1, asserted here.** The refusal's prescribed remedy does not work. Both the
+    exception message and the contract page say *"drop the entry and let garbage
+    collection reclaim it"*, and GC runs ``_purge_memmap_file``, which by explicit
+    design removes **only** the entry's memmap and never the store-owned ``<key>.npy``
+    + ``<key>.meta.json``. Those two are therefore unreachable by any removal verb the
+    package exposes -- a leak created by the refusal itself.
+
+    **Part 3, asserted here as its own message.** The refusal is not a property of the
+    key or of the disk state; it is a property of **object liveness**. Same store, same
+    on-disk artefacts, same call -- and if the caller has dropped its reference and GC
+    has run, the weak registry is empty and the identical call succeeds. *A destructive
+    verb whose refusal flips on a garbage collection is not a contract a caller can
+    program against.* That assertion is also what stops a fix passing this case by
+    accident on the GC-empty path.
+
+    **Part 2, the explicit-outside half, is deliberately NOT asserted here** -- it is
+    filed as ``D-15-19`` and stays open past this round. An entry given an explicit
+    path outside the cache directory is STORE-02/D-17's genuine foreign-artefact case
+    and must keep being refused; only the *allocated* path is ephemeral by policy.
+
+    **The policy is asserted, never the mechanism.** Entry 82 records that provenance is
+    not recoverable from the path and that only the constructor can know it, but the
+    attribute that records it belongs to ``15-12``. A red test that imported the fix's
+    vocabulary could not be red before the fix.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+
+    held_outcome, held_survivors = _purge_an_ordinarily_constructed_key(
+        store, tmp_cache_dir, "held", hold_reference=True
+    )
+    dropped_outcome, dropped_survivors = _purge_an_ordinarily_constructed_key(
+        store, tmp_cache_dir, "dropped", hold_reference=False
+    )
+
+    assert held_outcome == "completed", (
+        f"CR2-04 / D-15-G5 violated: purging an ordinarily-constructed key raised {held_outcome} while the "
+        f"caller held the entry. The entry's own allocated backing file is not the store's to manage, but "
+        f"the <key>.npy + <key>.meta.json pair is unambiguously the store's to delete -- vetoing their "
+        f"removal makes the key permanently unpurgeable and is a behaviour regression: this call succeeded "
+        f"before the refusal landed"
+    )
+    assert not held_survivors, (
+        f"CR2-04 violated: the store-owned artefacts {held_survivors} survive the purge. GC cannot reclaim "
+        f"them -- the finalizer removes only the entry's memmap -- so the refusal's prescribed remedy "
+        f"('drop the entry and let garbage collection reclaim it') leaves them unreachable by every removal "
+        f"verb this package exposes"
+    )
+    assert held_outcome == dropped_outcome, (
+        f"CR2-04 violated: the same call on the same key shape produced {held_outcome!r} with the entry "
+        f"held and {dropped_outcome!r} with the reference dropped and a collection forced. Nothing about "
+        f"the key or the disk state differs -- only whether the garbage collector had run. A destructive "
+        f"verb whose refusal flips on a garbage collection is not a contract a caller can program against, "
+        f"and nothing in the docstring, the exception text or the contract page mentions it"
+    )
+    assert not dropped_survivors, (
+        f"CR2-04 violated: the store-owned artefacts {dropped_survivors} survive the purge on the "
+        f"reference-dropped path too, so the outcome agrees for the wrong reason"
+    )
