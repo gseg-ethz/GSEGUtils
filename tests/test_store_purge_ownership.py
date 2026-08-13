@@ -69,7 +69,7 @@ import pytest
 # is the exact drift D-14 removed from the implementation side. Ruff's isort rules sort
 # it into the third-party block, above `GSEGUtils`, which is where a name it cannot
 # classify as first-party belongs; the placement is the formatter's, not a choice.
-from test_store_purge_identity import assert_nothing_derived_from
+from test_store_purge_identity import _digest_tree, assert_nothing_derived_from
 
 from GSEGUtils.lazy_disk_cache import (
     StorePurgeAliasedArtefactError,
@@ -1000,6 +1000,245 @@ def test_the_aliased_refusal_is_its_own_type_and_its_message_carries_the_remedy(
         "nothing was destroyed, do not retry blindly -- on this shape too"
     )
     assert victim_npy.exists(), "the repeated refusal must still leave the victim's artefact on disk"
+
+
+@_POSIX_ONLY
+def test_the_refused_aggressor_leaves_the_victim_whole_and_still_readable(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-13 / CR2-03 / D-15-G7 / 15-11 finding F-1 -- the destroyed state, negated by name.
+
+    The reproduction's transcript ends in ``store['victim'] -> KeyError 'victim'``, and
+    ``15-11``'s finding F-1 measured it one notch worse: ``'victim' in store`` is still
+    ``True`` afterwards, so the store keeps advertising a key it can never load, with no
+    warning. That is the state Phase 14's D-27 called *"non-empty store, no warning,
+    every advertised key unreadable -- the worse of the two by this module's own
+    standard"*.
+
+    So the four assertions are the four things that reproduction destroyed, each with
+    its own message rather than folded into one compound: the payload is on disk, its
+    **bytes** are the ones that were written, the key **reads back** as the array it was
+    given, and the key is **still tracked**. The bytes and the read-back are not the
+    same assertion -- a file that survives holding the wrong bytes passes the first and
+    fails the second -- and tracking and readability are not the same assertion either,
+    which is exactly what F-1 measured.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("victim", _FIRST.copy())
+    store.offload("victim", pickle_container=True)
+
+    victim_npy = paths_mod.get_npy_path(tmp_cache_dir, "victim")
+    victim_meta = paths_mod.get_meta_path(tmp_cache_dir, "victim")
+    assert victim_npy.exists() and victim_meta.exists(), (
+        "precondition: 'victim' must have a genuine store-written codec PAIR -- the finding is about "
+        "destroying store-owned artefacts, not planted decoys"
+    )
+    npy_before = victim_npy.read_bytes()
+
+    link = _plant_dat_symlink(tmp_cache_dir, "aggressor_survival", victim_npy)
+    assert link.resolve() == victim_npy.resolve(), "precondition: the link must resolve to victim's payload"
+
+    with pytest.raises(StorePurgeAliasedArtefactError):
+        store.purge("aggressor_survival")
+
+    assert victim_npy.exists(), (
+        "CR2-03: the victim's store-written payload was unlinked through a planted link belonging to a key "
+        "the caller never named"
+    )
+    assert victim_npy.read_bytes() == npy_before, (
+        "the victim's payload survived the refusal but its BYTES changed -- a file that survives holding the "
+        "wrong bytes is the same destruction wearing a green tick"
+    )
+    assert victim_meta.exists(), (
+        "the victim's sidecar was removed. Without it _load_entry treats the key as a cache MISS, so losing "
+        "the sidecar orphans the key just as thoroughly as losing the payload"
+    )
+    assert np.array_equal(np.asarray(store["victim"]), _FIRST), (
+        "the victim is tracked but no longer READABLE as the array written to it. This is the specific "
+        "outcome the reproduction ended in (KeyError 'victim') and the one 15-11 F-1 measured as worse than "
+        "the review recorded: Phase 14 D-27's 'non-empty store, no warning, every advertised key unreadable'"
+    )
+    assert "victim" in store, (
+        "the victim key was dropped from tracking by a purge of a DIFFERENT key. Asserted separately from "
+        "readability on purpose: F-1 measured that these two can disagree, and each disagreement is its own "
+        "failure"
+    )
+
+
+@_POSIX_ONLY
+def test_the_aliased_refusal_is_a_bit_for_bit_no_op_like_its_two_siblings(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-13 / D-15-G7 / SC-2 -- the family property, measured for the new member.
+
+    *"Refused implies nothing was touched"* is the guarantee every
+    :exc:`StorePurgeRefusedError` carries, and it is **not** inherited from the class
+    statement: it comes from *where the check sits*, above the first mutation, and
+    nothing about the hierarchy enforces that. A refusal moved into the unlink loop
+    would still raise and would still look like a guard, having already detached a
+    finalizer and dropped a key. So it is measured here for the new member directly,
+    the way ``15-09`` measured it for the foreign-artefact one: a per-file digest map
+    over the whole cache directory, not a listing of names, because a listing cannot
+    see a file rewritten in place. The instrument is imported from the module that owns
+    it rather than copied -- one vocabulary, no drift.
+    """
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("victim_noop", _FIRST.copy())
+    store.offload("victim_noop", pickle_container=True)
+    store.add_data_to_store("bystander_noop", _SECOND.copy())
+    store.offload("bystander_noop", pickle_container=True)
+    _plant_dat_symlink(tmp_cache_dir, "aggressor_noop", paths_mod.get_npy_path(tmp_cache_dir, "victim_noop"))
+
+    before = _digest_tree(tmp_cache_dir)
+    assert len(before) >= 5, f"precondition: the directory must hold something worth digesting; got {before!r}"
+
+    with pytest.raises(StorePurgeAliasedArtefactError):
+        store.purge("aggressor_noop")
+
+    assert _digest_tree(tmp_cache_dir) == before, (
+        f"SC-2 violated: a refused purge must be a bit-for-bit no-op, but the cache directory changed. "
+        f"Before: {before!r}; after: {_digest_tree(tmp_cache_dir)!r}"
+    )
+    assert "victim_noop" in store and "bystander_noop" in store, (
+        "the refusal dropped a key from tracking; a refusal mutates no state at all, tracking included"
+    )
+
+
+@_POSIX_ONLY
+def test_the_lexical_rule_also_declines_an_adopted_payload_that_no_key_owns(
+    make_store: MakeStore, tmp_cache_dir: Path
+) -> None:
+    """Plan 15-13 / D-15-G7 / R3-02 / STORE-03 -- the decision's COST, measured not argued.
+
+    **This case asserts a refusal that is, on the merits, unnecessary.** It is here on
+    purpose. ``D-15-G7`` (``DESIGN-DECISIONS.md`` entry 84) decides the aliased-target
+    rule **lexically**: the refusal reads the resolved target's NAME and consults no
+    registry. The payload here is a perfectly legitimate *adopted entry* -- the shape
+    D-17 and STORE-03 exist to protect -- whose only sin is being named
+    ``payload.npy``. No key named ``payload`` is tracked; the file belongs to nobody.
+    The rule declines it anyway, and that is the half of the published claim a reader
+    is most likely to doubt, so it is the half pinned here.
+
+    **The cost.** This narrows the adopted-entry feature ``STORE-03`` exists to
+    protect: an operator who adopts a payload named with any suffix the store builds
+    now meets a refusal where the previous release purged.
+
+    **Why that is the right side to err on.** The rule fails **closed**, with a named
+    error and an actionable message, on a shape no store-owned write route can produce
+    -- each key builds its own ``<key>.dat`` name -- and only an operator can plant.
+    The alternative failure is silent destruction of another key's data.
+
+    **The remedy is one rename**, and the message must carry it, which is what the last
+    two assertions are for (R3-02): a concrete non-store extension, and the retry.
+
+    **The rejected alternative**, recorded so the trade is not re-litigated: *"refuse
+    if the target is the built artefact path of some other TRACKED key"* would accept
+    this payload -- and would make a destructive verb's refusal flip on a garbage
+    collection, which is round-2 finding ``CR2-04``'s condemned shape, and would leave
+    the untracked orphan unprotected. This case is exactly that untracked orphan, seen
+    from the other side.
+
+    **The setup is not the obvious one, and the reason is a measurement.** The sibling
+    adopted-entry cases plant their payload on disk *before* the store exists. That
+    cannot work here: the reopen rescan globs every ``*.npy`` in the cache directory
+    and installs it as a tracked key (D-15-G6's shipped half), so a pre-planted
+    ``payload.npy`` is adopted as the key ``payload`` and the untracked half of the
+    claim becomes unreachable -- measured, not assumed, when this case's precondition
+    caught it. So the link is planted **dangling**, the store is opened over a
+    directory with no ``.npy`` in it, and the library then creates the payload by
+    writing the key's memmap through the link. The file is therefore genuinely owned by
+    no key, and stays that way for the life of this store.
+    """
+    key = "adopted_costly"
+    payload = tmp_cache_dir / "payload.npy"
+    link = _plant_dat_symlink(tmp_cache_dir, key, payload)
+    assert link.is_symlink() and not payload.exists(), (
+        "precondition: the link must be planted DANGLING, or the reopen rescan adopts the payload as a key "
+        "and this case stops measuring the untracked half it exists for"
+    )
+
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store(key, _SECOND.copy())
+
+    assert link.is_symlink() and payload.exists(), (
+        "precondition: the library must have written the key's data THROUGH the adopted link, creating the "
+        "payload, or this measures nothing"
+    )
+    assert "payload" not in store, (
+        "precondition: the payload must belong to NO tracked key -- that is the whole claim this case pins, "
+        "and a tracked one would let a registry-reading rule pass it too"
+    )
+
+    with pytest.raises(StorePurgeAliasedArtefactError) as excinfo:
+        store.purge(key)
+
+    message = str(excinfo.value)
+    assert repr(str(link)) in message, (
+        f"the refusal must name the offending link, quoted, or an operator cannot find what to rename. "
+        f"Message was: {message}"
+    )
+    assert "rename the payload" in message.lower() and ".bin" in message, (
+        f"R3-02 violated: the message must name a CONCRETE non-store extension to rename the payload to. An "
+        f"operator meeting a deliberate over-refusal has to be able to act on the message alone. Message "
+        f"was: {message}"
+    )
+    assert "purge again" in message.lower(), f"R3-02 violated: the remedy must end in the retry. Message was: {message}"
+    assert payload.exists(), "the declined purge must leave the payload alone; a refusal touches nothing"
+
+
+@_POSIX_ONLY
+@pytest.mark.parametrize(
+    "victim_artefact",
+    ["get_meta_path", "get_npy_tmp_path"],
+    ids=["sidecar", "tmp_form"],
+)
+def test_the_aliased_refusal_covers_the_sidecar_and_the_tmp_names_too(
+    make_store: MakeStore, tmp_cache_dir: Path, victim_artefact: str
+) -> None:
+    """Plan 15-13 / D-15-G7 / T-15-57 -- the rule is the vocabulary, not the reproduction.
+
+    The CR2-03 reproduction happened to aim its link at a ``.npy``. A rule pinned only
+    by that reproduction would pass while covering one seventh of what it claims, so
+    the aliasing is driven at a **sidecar** and at a **temporary** name as well.
+
+    The temporary row is the one that also exercises longest-first ordering end to end:
+    a name ending in the array suffix followed by the temporary suffix must be
+    recognised by its temporary form, and a shortest-first vocabulary would report the
+    plain one. The unit case above pins the predicate; this pins the behaviour that
+    depends on it.
+
+    Losing either artefact orphans the victim as thoroughly as losing the payload does:
+    ``_load_entry`` requires **both** halves of the codec pair, and a surviving
+    ``.tmp`` name is a file with a real lifetime that a later rename completes.
+    """
+    builder = paths_mod.STORE_PATH_BUILDERS[victim_artefact]
+    store = make_store(tmp_cache_dir, enable_caching=True, purge_disk_on_gc=True)
+    store.add_data_to_store("victim_vocab", _FIRST.copy())
+    store.offload("victim_vocab", pickle_container=True)
+
+    target = builder(tmp_cache_dir, "victim_vocab")
+    if not target.exists():
+        # A `.tmp` name left by an interrupted write -- a real artefact with a real
+        # lifetime (D-14), which is why purge builds the name at all.
+        target.write_bytes(b"an interrupted write's leftover")
+    target_before = target.read_bytes()
+
+    _plant_dat_symlink(tmp_cache_dir, "aggressor_vocab", target)
+
+    with pytest.raises(StorePurgeAliasedArtefactError) as excinfo:
+        store.purge("aggressor_vocab")
+
+    assert target.exists() and target.read_bytes() == target_before, (
+        f"the aliased refusal did not cover {target.name!r}. The rule is 'the target carries a name this "
+        f"store builds', not 'the target is a .npy' -- a vocabulary with a hole in it is a rule that "
+        f"protects whichever artefact the reproduction happened to use"
+    )
+    assert np.array_equal(np.asarray(store["victim_vocab"]), _FIRST), (
+        f"'victim_vocab' is no longer readable after an aliased purge aimed at its {target.name!r}"
+    )
+    assert repr(str(target)) in str(excinfo.value), (
+        f"the refusal must quote the resolved target it declined to follow. Message was: {excinfo.value}"
+    )
 
 
 def test_the_artefact_suffix_predicate_reports_the_longest_match_and_nothing_else() -> None:
