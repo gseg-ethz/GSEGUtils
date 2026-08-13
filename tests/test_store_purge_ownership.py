@@ -709,7 +709,30 @@ def test_an_explicit_cache_path_outside_the_cache_directory_still_refuses(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=f"{_OPEN} (rescan half) - closed by 15-12; remove this marker there")
+# DEFERRED BY DECISION, and the marker's reason names NO closing plan because no plan
+# owns it yet. `15-12` implemented D-15-G6's `.dat` rescan and MEASURED that it reverses
+# a Phase 14 invariant: a regular `<key>.dat` becomes tracked-but-unloadable, which D-27
+# named "non-empty store, no warning, every advertised key unreadable ... the worse of
+# the two by this module's own standard", and which
+# `test_store_containment.py::test_route_rescan_has_one_codec_artefact_vocabulary_and_every_adopted_key_loads`
+# encodes as a live control. A second, independent mechanism breaks three more cases: a
+# `<key>.dat` planted BEFORE the store exists is adopted by the rescan, so
+# `add_data_to_store` then refuses the key as already tracked -- which takes down this
+# module's own adopted-link control and two byte-frozen cases in
+# `test_store_purge_identity.py`.
+#
+# Reversing a Phase 14 invariant needs its own decision entry, and this is D-15-02's
+# CHEAP HALF -- an enumerability nicety, not one of the round's four criticals. So the
+# defect stays PINNED here rather than closed, and the implementation is preserved
+# verbatim as a patch referenced from `15-12-SUMMARY.md` (see its "Task 3 deferred"
+# section) so the round that takes the decision reapplies it rather than re-deriving it.
+#
+# `strict=True` is deliberately kept: if a later change makes this pass, the suite goes
+# red until someone removes the marker on purpose.
+@pytest.mark.xfail(
+    strict=True,
+    reason=f"{_OPEN} (rescan half) - DEFERRED: .dat rescan reverses Phase 14 D-27; no plan owns it yet",
+)
 def test_a_dat_only_orphan_is_enumerable_by_a_fresh_store(make_store: MakeStore, tmp_cache_dir: Path) -> None:
     """Plan 15-11 / D-15-G6 rescan half / D-15-02 / STORE-04.
 
