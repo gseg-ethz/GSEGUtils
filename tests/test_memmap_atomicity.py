@@ -717,34 +717,53 @@ def test_float64_round_trips_byte_identically_through_the_atomic_route(tmp_cache
     )
 
 
-def test_zero_length_array_resolves_exactly_as_it_did_before_the_change(tmp_cache_dir: Path) -> None:
-    """Plan 15-05 / STORE-08 — the empty case, measured rather than assumed.
+def test_zero_length_array_converts_and_leaves_only_numpys_one_byte_pad(tmp_cache_dir: Path) -> None:
+    """Plan 15-05 / STORE-08 / D-16-G1 — the empty case, measured rather than assumed.
 
-    The pre-change behaviour was **measured** on the baseline blob at
-    ``$BASE = 0c26dd6`` (this plan's pre-execution branch tip) before Task 1
-    edited anything, not guessed from reading::
+    What is pinned here is the **numpy >= 2.2** resolution: ``np.memmap`` on an
+    empty file *succeeds* and pads the file to one byte, so the conversion
+    returns normally and ``empty.dat`` is exactly one byte long. That single
+    byte is numpy's pad, not payload — a zero-length array has no bytes.
 
-        OUTCOME: raised ValueError
-          message: cannot mmap an empty file
-          files: ['empty.dat']
-          any .tmp survivor: []
+    The assertion this replaced expected ``ValueError: cannot mmap an empty
+    file``. That message comes from numpy **< 2.2**, and the old assertion was
+    *correct* under the numpy this package then permitted. It **expired** when
+    the floor rose; it was never mistaken, and a future reader who reads it as a
+    bug will re-litigate a settled decision (``D-16-G1``).
 
-    So the assertion is that it *still* raises ``ValueError`` with that message,
-    and that no temporary survives either way. One thing did change and is
-    recorded rather than asserted away: pre-change the failed ``w+`` open left a
-    zero-byte ``<key>.dat`` behind, and post-change the failure happens on the
-    temporary, which the cleanup handler unlinks — so nothing survives at all.
-    The *resolution* is identical; the residue is strictly cleaner, and no route
-    now creates a final file it cannot fill.
+    There is deliberately **no version branch**, because there is no supported
+    numpy that takes the old path — ``pyproject.toml`` declares
+    ``numpy >= 2.2, < 2.4``, and the floor is the reason this assertion may be
+    unconditional.
+
+    Blast radius, so this test does not overstate itself: the resolution that
+    changed is on a **private** path. The public route
+    (``add_data_to_store`` -> ``offload`` -> reopen) is byte-identical on every
+    supported numpy, because a zero-length array never reaches the memmap
+    conversion at all. Nothing user-visible turned on either resolution.
+
+    Still true and still asserted, unchanged by any of the above: the failure
+    path no longer leaves a zero-byte ``<key>.dat`` behind, because the write
+    happens on the temporary and the cleanup handler unlinks it.
     """
     entry = _make_entry(tmp_cache_dir, np.zeros((0,), dtype=np.float32), name="empty")
 
-    with pytest.raises(ValueError, match="cannot mmap an empty file"):
-        entry._convert_to_memmap()
+    entry._convert_to_memmap()
+
+    artefact = tmp_cache_dir / f"empty{paths.MEMMAP_SUFFIX}"
+    assert artefact.exists(), "the zero-length conversion produced no artefact — numpy >= 2.2 must create the file"
+    assert artefact.stat().st_size == 1, (
+        f"expected numpy's one-byte pad of an empty file, got {artefact.stat().st_size} bytes — "
+        "a zero-length array contributes no payload bytes"
+    )
 
     assert _temporaries_in(tmp_cache_dir) == [], (
         "the zero-length conversion left a temporary behind — the empty case must clean up like every other failure"
     )
+
+    read_back = np.asarray(entry)
+    assert read_back.shape == (0,), f"the empty array did not read back empty: shape {read_back.shape} != (0,)"
+    assert read_back.dtype == np.dtype(np.float32), f"float32 was changed to {read_back.dtype} across the route"
 
 
 # ---------------------------------------------------------------------------
