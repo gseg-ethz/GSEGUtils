@@ -736,15 +736,19 @@ def test_zero_length_array_converts_and_leaves_only_numpys_one_byte_pad(tmp_cach
     ``numpy >= 2.2, < 2.4``, and the floor is the reason this assertion may be
     unconditional.
 
-    Blast radius, so this test does not overstate itself: the resolution that
-    changed is on a **private** path. The public route
-    (``add_data_to_store`` -> ``offload`` -> reopen) is byte-identical on every
-    supported numpy, because a zero-length array never reaches the memmap
-    conversion at all. Nothing user-visible turned on either resolution.
-
-    Still true and still asserted, unchanged by any of the above: the failure
-    path no longer leaves a zero-byte ``<key>.dat`` behind, because the write
-    happens on the temporary and the cleanup handler unlinks it.
+    Blast radius, stated accurately because an earlier draft of this docstring
+    got it wrong and the error is worth not repeating. The conversion is a
+    private method, but it is **not** unreachable from the public API: with
+    ``enable_caching=True`` both ``_init_from_config``
+    (``lazy_disk_cache.py`` ~323) and ``offload`` (~928) call it, so
+    ``add_data_to_store`` on a zero-length array reaches this exact resolution.
+    Measured on both sides: under numpy < 2.2 that public call **raises**
+    ``ValueError: cannot mmap an empty file``; under >= 2.2 it succeeds and
+    leaves a one-byte ``<key>.dat`` that reads back ``(0,) float32``. So the
+    floor raise removes a real user-visible failure mode, not merely a stale
+    assertion. It is only under the **default** ``enable_caching=False`` that
+    ``offload`` early-returns and no route reaches the conversion — do not
+    restate that narrow case as if it covered the whole public surface.
     """
     entry = _make_entry(tmp_cache_dir, np.zeros((0,), dtype=np.float32), name="empty")
 
@@ -758,7 +762,8 @@ def test_zero_length_array_converts_and_leaves_only_numpys_one_byte_pad(tmp_cach
     )
 
     assert _temporaries_in(tmp_cache_dir) == [], (
-        "the zero-length conversion left a temporary behind — the empty case must clean up like every other failure"
+        "the zero-length conversion left a temporary behind — the empty case must clean up like every other "
+        "conversion; the write happens on a temporary and only the rename publishes it"
     )
 
     read_back = np.asarray(entry)
