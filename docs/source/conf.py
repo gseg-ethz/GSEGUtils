@@ -103,8 +103,80 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     # ── Private helpers (not in __all__, not in inventory) ──────────────────────
     (r"py:func", r"_normalize_base"),
     (r"py:meth", r"_coerce_array"),
+    # Phase 14 (STORE-07): the store key contract publishes six names —
+    # is_valid_store_key, StoreKeyError, StoreContainmentError and the three
+    # get_*_path builders — all of which DO resolve and are deliberately NOT
+    # ignored here. The entries below cover references that are unresolvable by
+    # construction; none of them hides a broken published name.
+    #
+    # Every one of them is written to its OWN target rather than to a module
+    # prefix, and that is deliberate (WR-08). A `nitpick_ignore_regex` entry
+    # cannot fail: an over-broad pattern silences real breakage forever and
+    # nothing reports it, so the only check is the pattern against its comment.
+    # A submodule-wide pattern here would disable the strict build for a module
+    # whose surface is still growing.
+    #
+    # `validate_store_key` is the raising validator behind the published
+    # predicate. D-07 publishes "a predicate ... alongside the INTERNAL raising
+    # validator", so it is absent from the package __all__ and from the docs
+    # member allowlist by decision; its docstring in paths.py cross-references
+    # it and cannot resolve it. Same class as _normalize_base above.
+    (r"py:func", r"validate_store_key$"),
+    # The three deprecating builder wrappers on DiskBackedStore (D-15) point
+    # their explicit link target at the defining module rather than at the
+    # published re-export, e.g.
+    # :func:`GSEGUtils.lazy_disk_cache.get_npy_path <...paths.get_npy_path>`.
+    # The displayed name is the published one and resolves; the submodule-
+    # qualified target does not, because `paths` is documented through the
+    # package, not on a page of its own. Repointing those targets at the
+    # published names belongs to whoever next edits disk_backed_store.py — and
+    # this entry then expires with them, which a module-wide pattern would not.
+    # Anchored to exactly the three targets named above: get_npy_path,
+    # get_meta_path and get_legacy_pickle_path, and nothing else in `paths`.
+    (r"py:func", r"GSEGUtils\.lazy_disk_cache\.paths\.get_(npy|meta|legacy_pickle)_path"),
+    # `_assert_contained` is the private containment check. It is referenced by
+    # name from `_store_entry`'s docstring and is not a documented member — the
+    # same class as `_normalize_base` and `validate_store_key` above, and it
+    # needs its own entry now that the pattern above no longer blankets the
+    # module. It was previously swallowed by that blanket, which is the finding.
+    (r"py:func", r"GSEGUtils\.lazy_disk_cache\.paths\._assert_contained"),
+    # ── Stdlib short forms and deprecated typing aliases ───────────────────────
+    # `pathlib.Path` is in the python inventory; the bare short form autodoc
+    # renders under autodoc_typehints_format="short" is not. Surfaced by the
+    # Phase 14 path builders and the three deprecating wrappers, all of which
+    # take and return a Path.
+    (r"py:class", r"Path$"),
+    # `typing.Mapping` is the deprecated alias of collections.abc.Mapping and
+    # carries no method entries in the python inventory.
+    (r"py:meth", r"typing\.Mapping\.get$"),
+    # `typing.MutableMapping` is the same case one interface down. Surfaced by
+    # Plan 14-14's `pop` docstring, which contrasts the overridden `pop` with the
+    # inherited `setdefault` (D-25) and links the latter to the ABC that defines
+    # it. Anchored to that one method, not to the class, so a future reference to
+    # a *different* MutableMapping method still has to resolve or be justified.
+    (r"py:meth", r"typing\.MutableMapping\.setdefault$"),
+    # The justification the entry above asks for, one method along. Plan 14-17's
+    # `clear` docstring (D-29) records why `popitem` is deliberately left
+    # inherited, and links it to the ABC that supplies it for exactly the reason
+    # the `setdefault` reference exists: a reader must be able to see that the
+    # neighbour is a decision rather than an oversight. Same deprecated-alias
+    # cause, same per-method anchoring — not widened to the class.
+    (r"py:meth", r"typing\.MutableMapping\.popitem$"),
     # dunder methods — Sphinx can't resolve short-form bare `__array__` etc.
-    (r"py:meth", r"(__array__|__getitem__|__array_interface__)"),
+    # `__setstate__` and `__delitem__` joined the list in Phase 14: the pickle
+    # protocol hook is referenced from `cache_dir`'s docstring (Plan 14-14,
+    # § WR-03) and `__delitem__` from `pop`'s (D-25). Both are real methods on
+    # `DiskBackedStore`; neither is in the docs member allowlist, so neither has
+    # a target to resolve to — the same class as the entries above, and each is
+    # named exactly rather than covered by a `__.*__` pattern.
+    (r"py:meth", r"(__array__|__getitem__|__array_interface__|__setstate__|__delitem__)"),
+    # `_POP_DEFAULT_MISSING` is the module-level sentinel distinguishing "no
+    # default supplied" from `default=None` in `pop` (D-25). It is private by
+    # construction — the whole point of a sentinel is that no caller can name it
+    # — so it is absent from `__all__` and from the member allowlist, exactly
+    # like `validate_store_key` and `_normalize_base` above. `pop`'s docstring
+    # names it because a reader needs to know a sentinel exists.
+    (r"py:data", r"_POP_DEFAULT_MISSING$"),
     (r"py:attr", r"(__array_interface__|H)"),
     # ── autodoc_preserve_defaults false positives ───────────────────────────────
     # autodoc_preserve_defaults=True exposes keyword-only, default=..., optional

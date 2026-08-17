@@ -27,6 +27,7 @@ from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import (
+    Final,
     Literal,
     Optional,
     Self,
@@ -39,6 +40,8 @@ from numpy.typing import DTypeLike, NDArray
 from pydantic import ConfigDict, validate_call
 from pydantic.dataclasses import dataclass
 
+from . import paths
+
 logger = logging.getLogger(__name__)
 
 # Phase 4 PERF-04 D-04: optional psutil for RAM-aware chunk sizing; ImportError fallback.
@@ -48,6 +51,18 @@ except ImportError:  # pragma: no cover
     psutil = None  # type: ignore[assignment]
 
 _MEMMAP_FALLBACK_CHUNK_BYTES = 64 * 1024**2  # 64 MB (D-04 default)
+
+#: The :meth:`LazyDiskCache.load` modes that open the ``.dat`` for writing, and
+#: therefore the modes Plan 14-20 verifies containment on (D-31, STORE-02).
+#:
+#: Named as a set rather than spelled inline at the call site so the mode scope
+#: is one editable fact rather than a condition a reader has to reverse-engineer.
+#: Membership was decided by measurement, not by reading ``numpy``'s docs -- the
+#: four-row table is recorded at the ``load()`` call site and in
+#: :func:`GSEGUtils.lazy_disk_cache.paths._assert_write_contained`. ``"r"`` and
+#: ``"c"`` are absent because neither reaches the file: ``"r"`` opens read-only
+#: and ``"c"`` is copy-on-write, whose writes never leave RAM.
+_MUTATING_MEMMAP_MODES: Final[frozenset[str]] = frozenset({"r+", "w+"})
 
 
 def _purge_cache_pair(cache_path: Path) -> None:
@@ -149,10 +164,67 @@ class LazyDiskCacheConfig:
             A new configuration. If ``self.cache_path`` is ``None`` the new
             configuration also carries ``cache_path=None`` (and an informational
             log entry is emitted).
+
+        Raises
+        ------
+        GSEGUtils.lazy_disk_cache.StoreKeyError
+            If ``new_folder`` is not a single path segment, under the same
+            lexical rule that guards store keys (D-02). This route looks like it
+            sits outside the containment story — it is a configuration helper,
+            and no store exists yet when it runs — but it joins a
+            caller-supplied string straight into the cache root, and the callers
+            are real: pc2img calls it **directly**, passing a per-tile id and a
+            computed settings hash, and iof3D calls it **directly** with a path
+            extension derived from a filename stem and also reaches it
+            **indirectly** through pc2img's plural ``extend_cache_paths``
+            wrapper. STORE-02's guarantee that no path the store builds lands
+            outside the cache directory is hollow if the root those paths hang
+            off can itself be walked upward, so the rule applies here too.
+
+            The individual call sites are enumerated in ``MIGRATION-v1.0.md``
+            under BC-GSEG-006 delta (4), and **deliberately not repeated here**:
+            they are line numbers in another repository, they drift, and a
+            second copy of them is precisely how the previous version of this
+            sentence came to name a count that neither repository matched
+            (§ WR-06). One place, not two.
+
+            The check runs **before** the join and **regardless** of whether
+            ``self.cache_path`` is ``None``: a bad folder name is a caller
+            mistake either way, and gating the guard on configuration state is
+            the same shape as the dead ``if self._cache_dir`` conditional this
+            phase removes from the store.
+
+        Notes
+        -----
+        The ``@validate_call()`` decorator above is a **type** check and never
+        was a value check — a hostile folder name is a perfectly well-typed
+        :class:`str`, so the decorator would accept ``'../..'`` without
+        complaint. It is left exactly as it was; the value rule is the separate
+        shared validator called below.
         """
+        paths.validate_store_key(new_folder, self.cache_path)
         new_path = self.cache_path / new_folder if self.cache_path else None
         if new_path is None:
             logger.info("Cache path is None; cannot extend.")
+        else:
+            # STORE-02 / EB-02. The lexical rule above refuses a traversing *name*
+            # ('../x'), but it cannot see the filesystem, so it cannot refuse a
+            # perfectly legal name that is already a symlink pointing out of the
+            # cache directory. That case is not an ordinary containment miss: this
+            # component BECOMES the cache root of the store built on the returned
+            # config, so every later `_assert_contained` measures against the
+            # relocated base and stays self-consistent and silent while artefacts
+            # land outside the configured root.
+            #
+            # The *write*-flavoured guard is the correct one here even though no
+            # write happens on this line, and that is the whole point: it is the
+            # only one that resolves the FINAL component. `_assert_contained`
+            # deliberately leaves it unresolved (D-17) so a symlinked adopted entry
+            # still loads — correct for reading an entry, and unable to fire for a
+            # directory that is about to become a containment base. Verified: this
+            # refuses a planted directory symlink while still accepting a cache root
+            # that is itself a symlink (STORE-03) and a plain subfolder.
+            paths._assert_write_contained(self.cache_path, new_path)
         return replace(self, cache_path=new_path)
 
 
@@ -222,6 +294,56 @@ class LazyDiskCache(ABC):
         copy of the source array on the streaming path.
         """
         with self._lock:
+            # D-31 / STORE-02: verify containment before ANY write on this path.
+            #
+            # WHAT THIS GUARANTEES, stated as what it is rather than as a
+            # universal. The memmap path is derived from the path the store
+            # built, by re-suffixing it, so the honest property is that **the
+            # memmap artefact lands beside the artefact its path was derived
+            # from** -- not "inside the cache directory", which is true when a
+            # store constructed the entry and false when a caller constructed
+            # one directly with an arbitrary `cache_path=`.
+            #
+            # SCOPE, and the limit of it. This call and the one in `load()`
+            # cover the three mutable opens the Plan 14-20 enumeration found:
+            # the allocate-or-reopen `np.memmap` under `if self._mmap is None`,
+            # the reopen `np.memmap` under the `elif`, and `load()`'s open on
+            # its mutating modes. Completeness rests on **re-running that
+            # enumeration whenever this module changes** -- no test would notice
+            # a fourth mutable open added later; it would simply be unguarded
+            # and the suite would stay green. A structural pin (a test asserting
+            # the line-set of `np.memmap(` opens here) was considered and
+            # rejected by the maintainer as a brittle line-number pin over a
+            # module this phase is not otherwise restructuring.
+            #
+            # PLACEMENT, twice over. Ahead of the parent `mkdir` below, because
+            # creating a directory is itself a write. And ahead of the mode
+            # selection, so ONE call covers both `np.memmap` opens rather than
+            # being duplicated into two branches a later edit could fix one of
+            # and miss the other -- which is the shape of the defect being
+            # closed here.
+            #
+            # THE UNCONFIGURED BRANCH, named rather than skipped. When no cache
+            # path is configured, `_init_from_config` creates this `.dat` with
+            # `tempfile.mkstemp` and `self._cache_path.parent` is the **system
+            # temp directory**. The check still runs and still has a well-defined
+            # base there, but that base is not a cache directory: **that branch
+            # has no cache-directory root at all**, so the check catches a
+            # symlink swapped in after `mkstemp` created the file and nothing
+            # else. That is the limit of what it is worth there -- not a
+            # statement that the case is safe. The file that branch leaks is
+            # deferred item D-14-01.
+            #
+            # BOUNDARY -- STORE-08 owns the other half. This adds containment and
+            # **not** torn-write safety: the temp-file / fsync / atomic-replace
+            # machinery `DiskBackedStore._store_entry` already applies to the
+            # `.npy` + `.meta.json` codec pair does not apply to this artefact,
+            # so an interrupted write can still leave a partial `.dat`. That
+            # half, and the purge-family interaction, is STORE-08 (Phase 15),
+            # paired with D-14-01. A reader who finds a containment check beside
+            # an unguarded truncating write needs to know the gap is filed.
+            paths._assert_write_contained(self._cache_path.parent, self._cache_path)
+
             shape, dtype, array = self._describe_buffer()
 
             # D-04 chunk budget: RAM-fraction if psutil is available, else fixed-bytes.
@@ -379,11 +501,62 @@ class LazyDiskCache(ABC):
         return self._cache_path
 
     @cache_path.setter
-    def cache_path(self, value: Path):
-        """Set the memmap file path and ensure the parent directory exists."""
-        assert isinstance(value, Path)
-        self._cache_path = value
-        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+    def cache_path(self, value: Path) -> None:
+        """Refuse reassignment: an entry's cache path is fixed at construction (D-01).
+
+        Reading :attr:`cache_path` is unchanged; only assignment is sealed.
+
+        What this closes
+        ----------------
+        The setter used to be public *and* it ``mkdir``-ed the new parent, so it
+        could repoint a live entry anywhere on the filesystem — including outside
+        the cache directory — **after** that entry's store key had already been
+        validated, creating the destination directory on the way. That is the
+        reproduced escape (R6): STORE-02's guarantee that no path the store
+        builds lands outside the cache directory would otherwise read "contained,
+        provided nobody assigns ``entry.cache_path``", which is a filter rather
+        than an invariant.
+
+        Note that the previous ``assert isinstance(value, Path)`` was never a
+        real check — ``python -O`` strips assertions — so this raise is not
+        replacing an enforcement, it is the first one on this route.
+
+        Why there is no deprecation cycle here
+        --------------------------------------
+        Deliberately asymmetric with the ``DiskBackedStore._get_*_path`` builder
+        methods (D-15), which do get a full ``DeprecationWarning`` cycle. Same
+        principle, opposite outcome, and the principle is **evidence of use**:
+        this setter has *zero* measured assigners across GSEGUtils, pchandler,
+        pc2img and iof3D — every reference in all four repos is a read, and this
+        package's own tests only assert equality — while the builder methods have
+        measured live callers in pc2img. A deprecation cycle here would buy no
+        migration room from anyone and would leave the reproduced escape live for
+        another release while a downstream consumer is blocked on it. Recorded
+        because the pair reads as arbitrary otherwise.
+
+        Parameters
+        ----------
+        value : pathlib.Path
+            The attempted path. Used only to make the refusal message
+            actionable; it is never assigned.
+
+        Raises
+        ------
+        AttributeError
+            Always. ``AttributeError`` rather than
+            :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError` because this is not a
+            bad *key*, it is a forbidden *operation* — ``AttributeError`` is what
+            Python raises for an unsettable attribute and what a caller's
+            ``hasattr`` / ``setattr`` reasoning already expects.
+        """
+        current = getattr(self, "_cache_path", None)
+        entry = f"{type(self).__name__} entry at {str(current)!r}" if current is not None else type(self).__name__
+        raise AttributeError(
+            f"Cannot reassign cache_path on the {entry}: the attempted path was {value!r}; "
+            "an entry's cache path is fixed at construction — create the entry through "
+            "DiskBackedStore (which derives the path from the validated store key), or pass "
+            "cache_path= to the constructor."
+        )
 
     def offload(self) -> None:
         """Flush the current buffer to disk, drop the in-RAM array, and mark offloaded."""
@@ -429,6 +602,38 @@ class LazyDiskCache(ABC):
         with self._lock:
             if not self.offloaded or self._cache_path is None:
                 return
+
+            # D-31 / STORE-02 / RV-01: this is a SECOND mutable open of the same
+            # path, and it was unguarded until Plan 14-20. `mode` defaults to
+            # the mutable "r+" and the truncating "w+" is accepted from the
+            # caller, so a reload of an already-offloaded entry reached
+            # `np.memmap(self._cache_path, ..., mode=mode)` below with no
+            # containment check at all.
+            #
+            # The condition names the modes rather than testing something
+            # incidental, and the set it names was decided by MEASUREMENT --
+            # a 256-byte sentinel outside the cache directory, a `.dat` symlink
+            # planted at it, one fresh entry and one fresh sentinel per mode:
+            #
+            #   'r'   no exception, sentinel untouched, handle NOT writable
+            #   'r+'  no exception, sentinel untouched BY the call -- but the
+            #         handle it installs is mutable, so the write arrives one
+            #         statement later, through the buffer the caller is handed
+            #   'w+'  no exception, sentinel TRUNCATED 256 -> 64 bytes
+            #   'c'   no exception, sentinel untouched (copy-on-write never
+            #         reaches disk)
+            #
+            # So the two mutating modes are guarded and "r"/"c" are not. Leaving
+            # them out is a decision with a reason, not an omission: forcing the
+            # write-flavoured final-component resolution onto a read is exactly
+            # what D-17 and STORE-03 refuse, because a final-component symlink
+            # is the legitimate adopted entry. The accepted residual is that
+            # `load(mode="r")` can still READ through a planted symlink -- that
+            # is disclosure, not corruption, and out of scope for a
+            # containment-on-write decision. See `paths._assert_write_contained`
+            # for the table and for the STORE-08 boundary.
+            if mode in _MUTATING_MEMMAP_MODES:
+                paths._assert_write_contained(self._cache_path.parent, self._cache_path)
 
             # (re)open the mmap if needed
             shape, dtype = self._describe_shape_dtype()
