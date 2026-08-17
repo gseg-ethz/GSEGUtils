@@ -8,14 +8,18 @@ Plan 02-05 extends with atomicity regression tests.
 
 import gc
 import json
+import logging
 import os
 import pickle
+import re
+import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from GSEGUtils.lazy_disk_cache import lazy_disk_cache as ldc_mod
+from GSEGUtils.lazy_disk_cache import paths as paths_mod
 from GSEGUtils.lazy_disk_cache.disk_backed_ndarray import DiskBackedNDArray
 from GSEGUtils.lazy_disk_cache.disk_backed_store import (
     _LAZY_DISK_CACHE_CLASS_REGISTRY,
@@ -956,3 +960,567 @@ def test_convert_to_memmap_import_error_fallback(tmp_path, monkeypatch):
     assert bd._mmap is not None
     np.testing.assert_array_equal(np.asarray(bd._mmap), arr)
     # No finally block needed — monkeypatch.setattr auto-restores on teardown.
+
+
+def test_store_key_parent_directory_escape_regression(tmp_cache_dir: Path) -> None:
+    """Plan 14-01 / STORE-01 / SC-4: a parent-directory key is refused and writes nothing.
+
+    Reproduces the escape that blocked pc2img: ``add_data_to_store('../victim', arr)``
+    used to build ``<cache>/../victim.npy`` and overwrite a file *above* the cache
+    directory. All three assertions matter — the raise alone does not prove that
+    nothing was written.
+    """
+    from GSEGUtils.lazy_disk_cache import StoreKeyError
+
+    victim = tmp_cache_dir.parent / "victim.npy"
+    sentinel = b"do-not-overwrite-me"
+    victim.write_bytes(sentinel)
+
+    store = _make_store(tmp_cache_dir)
+    arr = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+
+    with pytest.raises(StoreKeyError, match="contains a path separator"):
+        store.add_data_to_store("../victim", arr)
+
+    assert victim.read_bytes() == sentinel, "the sentinel above the cache directory was overwritten"
+    assert sorted(p.name for p in tmp_cache_dir.parent.glob("victim.*")) == ["victim.npy"], (
+        "a new victim.* artefact was created above the cache directory"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 Plan 04 — the two LazyDiskCache anchors the store's waist cannot reach
+# ---------------------------------------------------------------------------
+
+
+def test_cache_path_sealed_refuses_reassignment_but_still_reads(tmp_cache_dir: Path) -> None:
+    """Plan 14-04 / STORE-02 / D-01: assignment raises ``AttributeError``; reads are unchanged.
+
+    The seal and the surviving getter are **one** contract, so both are asserted
+    in a single test function. Split across two, the getter could regress
+    without the seal test noticing, and vice versa — and the getter is what the
+    three pre-existing read assertions in this file (``:371``, ``:395``,
+    ``:852``) depend on.
+
+    The message is asserted to carry all three D-01 elements: which entry, the
+    attempted path rendered by ``repr``, and the sanctioned alternative.
+    """
+    store = _make_store_with_one_entry(tmp_cache_dir, key="k0")
+    store.offload()
+    entry = store["k0"]
+    expected = tmp_cache_dir / "k0.dat"
+    attempted = Path("/tmp/anywhere/evil.dat")
+
+    with pytest.raises(
+        AttributeError,
+        match=re.escape("an entry's cache path is fixed at construction"),
+    ) as excinfo:
+        entry.cache_path = attempted
+
+    message = str(excinfo.value)
+    assert repr(attempted) in message, f"the refusal does not name the attempted path by repr: {message}"
+    assert "k0.dat" in message, f"the refusal does not identify which entry was targeted: {message}"
+    assert "DiskBackedStore" in message, f"the refusal does not name the sanctioned alternative: {message}"
+
+    # The getter is untouched, and the seal actually held: the path never moved.
+    assert entry.cache_path == expected
+    assert not attempted.exists(), "the sealed setter still created the destination directory"
+
+
+@pytest.mark.parametrize(
+    ("bad_folder", "clause"),
+    [
+        ("..", paths_mod.CLAUSE_RESERVED),
+        ("a/b", paths_mod.CLAUSE_SEPARATOR),
+        ("/abs", paths_mod.CLAUSE_ABSOLUTE),
+    ],
+)
+def test_extend_cache_path_refuses_a_non_single_segment_folder(
+    tmp_cache_dir: Path, bad_folder: str, clause: str
+) -> None:
+    """Plan 14-04 / STORE-02 / D-02: a folder name that is not one path segment is refused.
+
+    Three cases, three different clauses of the shared lexical rule — the clause
+    strings are imported from ``paths`` rather than restated, so the assertion
+    cannot drift from the shipped vocabulary.
+    """
+    config = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
+
+    with pytest.raises(paths_mod.StoreKeyError, match=re.escape(clause)):
+        config.extend_cache_path(bad_folder)
+
+
+def test_extend_cache_path_accepts_a_single_segment_folder(tmp_cache_dir: Path) -> None:
+    """Plan 14-04 / STORE-02 / D-02: a real per-tile folder name still joins onto the root.
+
+    The guard must not break the live downstream callers it wraps — pc2img
+    passes a per-tile id through this route.
+    """
+    config = LazyDiskCacheConfig(enable_caching=True, cache_path=tmp_cache_dir)
+
+    extended = config.extend_cache_path("tile_03")
+
+    assert extended.cache_path == tmp_cache_dir / "tile_03"
+    assert extended.enable_caching is config.enable_caching
+
+
+def test_extend_cache_path_with_no_source_path_still_returns_none(caplog: pytest.LogCaptureFixture) -> None:
+    """Plan 14-04 / STORE-02 / D-02: the ``cache_path is None`` branch is otherwise untouched.
+
+    This is the branch downstream callers hit when caching is off: a good folder
+    name still emits the informational log entry and still returns a
+    configuration carrying ``cache_path=None``.
+    """
+    config = LazyDiskCacheConfig(enable_caching=False, cache_path=None)
+
+    with caplog.at_level(logging.INFO, logger="GSEGUtils.lazy_disk_cache.lazy_disk_cache"):
+        extended = config.extend_cache_path("tile_03")
+
+    assert extended.cache_path is None
+    assert any("cannot extend" in record.getMessage() for record in caplog.records), (
+        "the informational log entry for the None-source branch was lost"
+    )
+
+
+def test_extend_cache_path_with_no_source_path_still_refuses_a_bad_folder() -> None:
+    """Plan 14-04 / STORE-02 / D-02: the guard is not conditional on configuration state.
+
+    A bad folder name is a caller mistake whether or not a path exists to join
+    it onto. If validation were ordered behind the ``None`` short-circuit this
+    would return a configuration instead of raising — the same shape as the dead
+    ``if self._cache_dir`` conditional this phase removes from the store.
+    """
+    config = LazyDiskCacheConfig(enable_caching=False, cache_path=None)
+
+    with pytest.raises(paths_mod.StoreKeyError, match=re.escape(paths_mod.CLAUSE_RESERVED)):
+        config.extend_cache_path("..")
+
+
+# ---------------------------------------------------------------------------
+# Phase 14 Plan 16 — the D-28 withdrawal of the three builder aliases
+# ---------------------------------------------------------------------------
+
+#: The three withdrawn builder-alias methods, paired with the module-level free
+#: function that replaces each and the artefact suffix that function appends.
+#: The pairing is the point: this is a migration, not an obituary, and the
+#: second half of the test below is what says so.
+WITHDRAWN_BUILDER_ALIASES = (
+    ("_get_npy_path", "get_npy_path", "NPY_SUFFIX"),
+    ("_get_meta_path", "get_meta_path", "META_SUFFIX"),
+    ("_get_legacy_pickle_path", "get_legacy_pickle_path", "LEGACY_PICKLE_SUFFIX"),
+)
+
+
+def test_withdrawn_builder_aliases_are_gone_from_the_class(tmp_cache_dir: Path) -> None:
+    """Plan 14-16 / MIG-01 / D-28 / T-14-73.
+
+    **Why these went, when Plan 14-05 gave them a full deprecation cycle.** The
+    cycle was granted on the sentence *"precisely because they have measured live
+    callers"* — but the measurement was of **callers**, and their callers are
+    downstream, not internal. Re-measured this round: **7** internal
+    ``self._get_*_path`` call sites at ``v0.5.3``, ``origin/main`` and
+    ``origin/develop/gsd``; **0** at phase-14 HEAD, removed by ``d83c22d``
+    (*"feat(14-05): route every store path through the shared builders"*) — the
+    same plan that wrote the deprecation. So an **override** of these has been
+    inert since before the promise was written: the deprecation warning's advice
+    (*call the free function instead*) is advice for a caller, and for an
+    overrider it restores nothing.
+
+    **Two assertions, and the second is the one that matters.** Absence alone
+    records a removal. The free-function equality re-asserts, against the
+    surviving surface, exactly what the deleted delegation test was protecting:
+    that the replacement returns the paths the aliases returned. A downstream
+    reading this test should be able to see its migration in it.
+
+    No stub, no ``__getattr__`` shim and no re-export: a partial withdrawal is
+    the defect MIG-01 is about, in the other direction.
+    """
+    store = _make_store(tmp_cache_dir)
+    assert store._cache_dir == tmp_cache_dir, (
+        "the free functions take the cache directory explicitly, so a caller migrating off the "
+        "methods needs this to be the directory the store is actually using"
+    )
+    key = "k0"
+
+    for method_name, builder_name, suffix_name in WITHDRAWN_BUILDER_ALIASES:
+        assert not hasattr(DiskBackedStore, method_name), (
+            f"DiskBackedStore.{method_name} resolves again; D-28 withdrew the whole "
+            "artefact-naming override surface in one move, and a partial restoration is the "
+            "half-true deprecation promise MIG-01 is about"
+        )
+        assert not hasattr(store, method_name), (
+            f"an instance resolves {method_name}; the method is gone from the class but something "
+            "re-creates it per instance, which is the same surface by another route"
+        )
+
+        # The migration half: the replacement returns the path the alias
+        # returned, for this store's own cache directory.
+        builder = getattr(paths_mod, builder_name)
+        suffix = getattr(paths_mod, suffix_name)
+        assert builder(store._cache_dir, key) == tmp_cache_dir / f"{key}{suffix}", (
+            f"paths.{builder_name} no longer returns what {method_name} returned; the withdrawal "
+            "would then be a removal rather than a migration"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Plan 14-20 / D-31 / STORE-02 + STORE-03 — write-flavoured containment for the
+# ``.dat`` memmap artefact.
+#
+# The four artefact families the phase already guards are all built through
+# ``paths._build``, which calls ``_assert_contained``. The memmap artefact is
+# not: its path is derived by re-suffixing an already-checked path and opened
+# directly. Measured before this group was written, on this host:
+#
+#   * allocation through a planted ``<key>.dat`` symlink -> no exception, the
+#     sentinel outside the cache directory was overwritten;
+#   * ``load(mode="w+")`` through the same plant -> no exception, the sentinel
+#     truncated 256 -> 64 bytes;
+#   * ``load(mode="r+")`` -> no exception, and the *handle it installs* is
+#     mutable, so a write through it reaches the sentinel.
+#
+# ``_assert_contained`` cannot be reused unchanged for this: it deliberately
+# leaves the final component unresolved (D-17) so that a legitimately *adopted*
+# entry still loads, which is STORE-03 and is already verified. The
+# write-flavoured helper adds final-component resolution **on top** of it.
+#
+# BOUNDARY: this group covers containment only. Torn-write safety for ``.dat``
+# (temp file -> fsync -> atomic replace, as ``_store_entry`` already does for the
+# codec pair) is STORE-08 / Phase 15, paired with deferred item D-14-01.
+# ---------------------------------------------------------------------------
+
+_SENTINEL_BYTES = b"S" * 256
+
+
+def _plant_outside_sentinel(cache_dir: Path, outside_dir: Path, name: str = "entry.dat") -> Path:
+    """Symlink ``<cache_dir>/<name>`` at a fresh sentinel inside ``outside_dir``.
+
+    Builds the symlink **explicitly** rather than relying on the ambient temp
+    tree, for the reason the STORE-03 symlink group records: CI's temp tree on
+    ``ubuntu-latest`` is a real directory while macOS ``mkdtemp`` and ETH
+    ``/scratch`` are not, so a test that depends on the ambient shape passes in
+    CI while testing nothing.
+    """
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = outside_dir / "victim.bin"
+    sentinel.write_bytes(_SENTINEL_BYTES)
+    link = cache_dir / name
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(sentinel)
+    return sentinel
+
+
+def _make_entry(cache: Path, name: str = "entry", n: int = 8) -> DiskBackedNDArray:
+    """Build an entry on the **configured** branch, so ``_cache_path`` is ``<cache>/<name>.dat``.
+
+    The configured branch matters: on the unconfigured one ``_init_from_config``
+    calls ``tempfile.mkstemp`` and the ``.dat`` lands in the system temp
+    directory, where a containment test would be testing the temp directory
+    rather than a cache directory.
+    """
+    return DiskBackedNDArray(
+        np.arange(n, dtype=np.float64),
+        cache_path=cache / name,
+        enable_caching=True,
+        purge_disk_on_gc=False,
+    )
+
+
+def test_memmap_write_refuses_a_planted_symlink_pointing_outside_its_directory(tmp_path: Path) -> None:
+    """The escape, end to end: allocation through a planted symlink is refused, sentinel intact.
+
+    Driven through the public construction path rather than by calling the
+    helper, so it exercises the **call site** in ``_convert_to_memmap`` rather
+    than the helper's contract.
+
+    Asserts on the sentinel's **bytes and length**, not on its existence. A check
+    that refuses to *create* and a check that refuses to *truncate* are different
+    checks, and only the byte comparison distinguishes them — ``"w+"`` truncates
+    an existing target in place rather than replacing it, so an existence
+    assertion stays green against a completely unguarded write. Measured before
+    the guard existed: this construction left the sentinel's bytes changed.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
+    before = sentinel.read_bytes()
+
+    with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
+        _make_entry(cache)
+
+    assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value), (
+        "the write-flavoured refusal must report the same containment clause the read-flavoured one "
+        "publishes; BC-GSEG-006 offers that clause text as a grep target, and a second wording would "
+        "make the guarantee unsearchable at exactly the route that carries the data"
+    )
+    assert sentinel.read_bytes() == before, (
+        "the sentinel outside the cache directory was modified despite the refusal — the check "
+        "raised but something still wrote through the planted symlink"
+    )
+    assert sentinel.stat().st_size == len(before), "the sentinel was truncated despite the refusal"
+
+
+def test_memmap_write_accepts_a_symlink_whose_target_stays_inside_its_directory(tmp_path: Path) -> None:
+    """The positive case that keeps the fix from becoming a blanket symlink ban (STORE-03).
+
+    Without this test the cheapest implementation that passes the escape test is
+    *refuse every symlinked final component*, which would break the legitimately
+    adopted entry D-17 and STORE-03 exist to protect. The existing symlink group
+    in ``test_store_containment.py`` does not cover it for this artefact: it
+    exercises the codec pair, which is built through a different seam.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    real_target = cache / "adopted_payload.bin"
+    real_target.write_bytes(b"\x00" * 64)
+    (cache / "entry.dat").symlink_to(real_target)
+
+    entry = _make_entry(cache)  # must not raise
+    entry.offload()
+
+    assert (cache / "entry.dat").is_symlink(), "the test stopped exercising the adopted-entry shape"
+    assert real_target.exists(), "the write through the inside-resolving link did not reach its target"
+    entry.load(mode="r+")
+    assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64)), (
+        "an adopted entry whose link resolves inside the directory must still round-trip; refusing "
+        "it would be the STORE-03 regression this test exists to catch"
+    )
+
+
+def test_memmap_reopen_path_is_containment_checked_too(tmp_path: Path) -> None:
+    """The reopen branch is guarded too, not only the allocation branch.
+
+    ``_convert_to_memmap`` has two ``np.memmap`` calls: the allocate-or-reopen
+    call under ``if self._mmap is None`` and a second **reopen** call under
+    ``elif self._mmap.mode != "r+"``. A check placed inside the first branch
+    passes the escape test above and fails this one, because the ``elif`` would
+    then open the planted symlink with no verification at all.
+
+    Reaching the ``elif`` needs a live memmap whose mode is not ``"r+"``, which
+    is what ``load(mode="r")`` leaves behind.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    entry = _make_entry(cache)
+    entry.offload()
+    entry.load(mode="r")
+    assert entry._mmap is not None and entry._mmap.mode != "r+", (
+        "the fixture did not leave a non-'r+' memmap live, so this test would take the allocation "
+        "branch and stop distinguishing the two call sites"
+    )
+
+    # ...then the swap, exactly as someone with write access to the cache dir would do it.
+    (cache / "entry.dat").unlink()
+    sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
+    before = sentinel.read_bytes()
+
+    with pytest.raises(paths_mod.StoreContainmentError):
+        entry._convert_to_memmap()
+    assert sentinel.read_bytes() == before
+    assert sentinel.stat().st_size == len(before)
+
+
+def test_memmap_load_refuses_a_planted_symlink_on_both_mutating_modes(tmp_path: Path) -> None:
+    """``load()`` is a **second** mutable open of the same path, and it is guarded (RV-01).
+
+    This is the route a fix named after ``_convert_to_memmap`` leaves open with
+    the suite green. ``load``'s ``mode`` defaults to the mutable ``"r+"`` and
+    accepts the truncating ``"w+"`` from the caller, and before this guard both
+    reached ``np.memmap(self._cache_path, ..., mode=mode)`` with no containment
+    check at all.
+
+    Measured on this host before the guard existed, one fresh entry and one
+    fresh 256-byte sentinel per mode:
+
+    * ``load(mode="w+")`` → no exception, sentinel **truncated 256 → 64 bytes**;
+    * ``load(mode="r+")`` → no exception, sentinel bytes unchanged **by the call**
+      but the handle it installs is mutable, so a write through it reached the
+      sentinel.
+
+    Both halves therefore assert the exception **and** the sentinel's bytes
+    **and** its length. Length is not redundant: a check that refuses to create
+    is not the same as one that refuses to truncate, and ``"w+"`` truncates.
+    """
+    for mode in ("r+", "w+"):
+        cache = tmp_path / f"cache_{mode.replace('+', 'p')}"
+        cache.mkdir()
+        outside = tmp_path / f"outside_{mode.replace('+', 'p')}"
+
+        entry = _make_entry(cache)
+        entry.offload()
+        assert (cache / "entry.dat").exists(), "the entry never wrote its .dat, so the plant is meaningless"
+
+        # Fresh entry and fresh sentinel per mode, so one mode's damage cannot
+        # be read as the other's.
+        (cache / "entry.dat").unlink()
+        sentinel = _plant_outside_sentinel(cache, outside)
+        before = sentinel.read_bytes()
+
+        with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
+            entry.load(mode=mode)  # type: ignore[arg-type]
+
+        assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value), (
+            f"load(mode={mode!r}) refused, but not with the published containment clause"
+        )
+        assert sentinel.read_bytes() == before, (
+            f"load(mode={mode!r}) refused but the sentinel outside the cache directory still changed"
+        )
+        assert sentinel.stat().st_size == len(before), (
+            f"load(mode={mode!r}) refused but the sentinel was truncated — measured at 256 -> 64 "
+            "bytes before the guard existed, which is why length is asserted separately"
+        )
+
+
+def test_memmap_load_non_mutating_modes_are_unaffected_by_the_guard(tmp_path: Path) -> None:
+    """``"r"`` and ``"c"`` behave exactly as before, per the recorded mode scope.
+
+    The scope is a decision with a measured reason, not an omission. Neither
+    mode reaches the file — ``"r"`` opens read-only and ``"c"`` is copy-on-write,
+    so its writes never leave RAM — and extending the write-flavoured
+    final-component resolution onto a read is exactly what D-17 and STORE-03
+    refuse. The residual is recorded rather than implied: ``load(mode="r")``
+    through a planted symlink can still **read** a file outside the directory.
+    That is disclosure, not corruption, and it is out of scope for a
+    containment-on-write decision.
+    """
+    for mode in ("r", "c"):
+        cache = tmp_path / f"cache_{mode}"
+        cache.mkdir()
+        entry = _make_entry(cache)
+        entry.offload()
+        entry.load(mode=mode)  # type: ignore[arg-type]
+        assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64)), (
+            f"load(mode={mode!r}) stopped round-tripping; the guard was applied to a mode the "
+            "four-mode table measured as non-mutating"
+        )
+
+
+def test_unconfigured_branch_entry_still_allocates_and_still_loads() -> None:
+    """The ``mkstemp`` branch is not refused by the explicit base (RV-02).
+
+    With no ``cache_path`` configured, ``_init_from_config`` creates the ``.dat``
+    with :func:`tempfile.mkstemp` and its parent is the **system temp
+    directory**. The check still runs there and still has a well-defined base —
+    it is simply near-vacuous, because that branch has **no cache-directory
+    root** at all. What must not happen is the explicit base turning a
+    near-vacuous check into a refusal.
+    """
+    entry = DiskBackedNDArray(
+        np.arange(8, dtype=np.float64),
+        enable_caching=True,
+        purge_disk_on_gc=False,
+    )
+    dat = entry._cache_path
+    try:
+        assert dat.suffix == ".dat" and dat.parent == Path(tempfile.gettempdir()), (
+            f"the unconfigured branch put the .dat at {str(dat)!r}, so this test is no longer "
+            "measuring the mkstemp branch it is named for"
+        )
+        entry.offload()
+        entry.load(mode="r+")
+        assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64))
+    finally:
+        dat.unlink(missing_ok=True)
+
+
+def test_write_containment_helper_refuses_an_escaping_final_component(tmp_path: Path) -> None:
+    """The helper's own contract, asserted directly rather than through a call site.
+
+    Kept alongside the end-to-end tests because the two fail for different
+    reasons: this one reddens when the helper's logic is wrong, the end-to-end
+    ones redden when a call site is missing. A run where only one group is red
+    says which of the two happened.
+    """
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    sentinel = _plant_outside_sentinel(cache, tmp_path / "outside")
+    before = sentinel.read_bytes()
+
+    with pytest.raises(paths_mod.StoreContainmentError) as excinfo:
+        paths_mod._assert_write_contained(cache, cache / "entry.dat")
+    assert paths_mod.CLAUSE_ESCAPES in str(excinfo.value)
+    assert sentinel.read_bytes() == before
+
+    # A path whose parent chain leaves the directory is refused too, by the
+    # delegated _assert_contained layer rather than by the new one.
+    with pytest.raises(paths_mod.StoreContainmentError):
+        paths_mod._assert_write_contained(cache, cache / ".." / "outside" / "victim.bin")
+
+
+def test_write_containment_helper_accepts_an_inside_link_and_a_not_yet_created_path(
+    tmp_path: Path,
+) -> None:
+    """Two acceptances the helper must keep: the adopted entry, and allocation."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    # Allocation is the normal case: the path does not exist yet.
+    paths_mod._assert_write_contained(cache, cache / "not_yet.dat")
+
+    # An ordinary file inside the directory.
+    plain = cache / "plain.dat"
+    plain.write_bytes(b"x" * 8)
+    paths_mod._assert_write_contained(cache, plain)
+
+    # A final-component symlink resolving INSIDE the directory (STORE-03).
+    real_target = cache / "adopted_payload.bin"
+    real_target.write_bytes(b"x" * 8)
+    link = cache / "entry.dat"
+    link.symlink_to(real_target)
+    paths_mod._assert_write_contained(cache, link)
+
+
+def test_memmap_write_accepts_a_path_inside_a_cache_directory_that_is_itself_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """The shape ``ubuntu-latest`` cannot see (STORE-03).
+
+    The base is fully resolved, so a symlinked cache directory compares equal to
+    itself and every ordinary path inside it stays accepted. This is the default
+    under ``mkdtemp`` on macOS (``/var`` -> ``/private/var``) and normal on ETH
+    ``/scratch``; CI's real temp tree makes a regression here invisible.
+    """
+    real = tmp_path / "real_cache"
+    real.mkdir()
+    linked = tmp_path / "linked_cache"
+    linked.symlink_to(real, target_is_directory=True)
+    assert linked.is_symlink() and linked.resolve() != linked, (
+        "the fixture did not build a real symlinked directory, so this test exercises the ordinary "
+        "path while claiming to cover the symlinked-base case"
+    )
+
+    # Helper contract: not-yet-allocated, then an ordinary file.
+    paths_mod._assert_write_contained(linked, linked / "probe.dat")
+    (linked / "probe.dat").write_bytes(b"\x00" * 8)
+    paths_mod._assert_write_contained(linked, linked / "probe.dat")
+
+    # And end-to-end for the memmap artefact specifically: allocate, offload and
+    # reload a real entry through the symlinked cache directory. This is the half
+    # the codec-pair symlink group in test_store_containment.py does not reach.
+    entry = _make_entry(linked)
+    entry.offload()
+    assert (real / "entry.dat").exists(), (
+        "the offload through the symlinked cache directory wrote no .dat into the real directory"
+    )
+    entry.load(mode="r+")
+    assert np.array_equal(np.asarray(entry), np.arange(8, dtype=np.float64))
+
+
+def test_memmap_write_accepts_a_mkstemp_candidate_against_the_system_temp_directory() -> None:
+    """The unconfigured branch is not a special case inside the helper.
+
+    When no cache path is configured, ``_init_from_config`` creates the ``.dat``
+    with ``tempfile.mkstemp`` and its parent is the **system temp directory**.
+    The check still runs and still has a well-defined base there — it is simply
+    near-vacuous, because that branch has no cache-directory root at all. The
+    helper must not need to know which branch produced the path, which is the
+    whole reason the base is a parameter rather than something it derives.
+    """
+    fd, name = tempfile.mkstemp(suffix=".dat")
+    os.close(fd)
+    candidate = Path(name)
+    try:
+        paths_mod._assert_write_contained(candidate.parent, candidate)
+    finally:
+        candidate.unlink(missing_ok=True)
