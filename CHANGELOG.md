@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.6.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.3...v0.6.0) (2026-08-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **lazy_disk_cache:** The minimum supported numpy is now 2.2, raised from 2.0, and an install pinned below numpy 2.2 will not resolve GSEGUtils 0.6.0. The reason is a behaviour change rather than a preference: numpy 2.2.0 changed `np.memmap` on an empty file from raising `ValueError` to succeeding and padding the file to one byte, and the memmap conversion is reachable from ordinary use — through `_init_from_config`, through `offload`, and through the public `enable_caching()` — so a caller who enables caching later would hit the older, raising behaviour. Raising the floor removes that failure mode instead of branching on the version. The `< 2.4` ceiling is unchanged and is not stale: `sphinx -W` stops resolving `numpy.typing.DTypeLike` from numpy 2.4.1 here, and CI gates a docs job on it.
+* **lazy_disk_cache:** Four things move for downstream callers of `GSEGUtils.lazy_disk_cache`.
+
+### ✨ Features
+
+* **lazy_disk_cache:** atomic purge primitive for a key and its artefacts ([b149bc9](https://github.com/gseg-ethz/GSEGUtils/commit/b149bc9b835bb2c1fd9c282399bea36103f6f3eb))
+* **lazy_disk_cache:** contain store keys and every path built from them ([30200fb](https://github.com/gseg-ethz/GSEGUtils/commit/30200fb8ca1c506eb18e1010688e63daad4a801a))
+
+
+### 🤖 Continuous Integration
+
+* **13-10:** capture the apply response body instead of discarding it ([#45](https://github.com/gseg-ethz/GSEGUtils/issues/45)) ([b14b0f4](https://github.com/gseg-ethz/GSEGUtils/commit/b14b0f4911f6be0009d9bdb6bbfeb4f52836d9f3))
+* **13-10:** revert the transient docs-job rename — proof complete ([#44](https://github.com/gseg-ethz/GSEGUtils/issues/44)) ([434ad8f](https://github.com/gseg-ethz/GSEGUtils/commit/434ad8fe817b01bc6aeedeeb0face12e21c25ee7))
+* **13-10:** TRANSIENT — rename the docs job to prove the preflight refuses ([#43](https://github.com/gseg-ethz/GSEGUtils/issues/43)) ([219cd12](https://github.com/gseg-ethz/GSEGUtils/commit/219cd1201d76141a9c56395f983556c9ec2e7f75))
+* **13-15:** make the ruleset payloads appliable, and fail loud on a refused read ([#48](https://github.com/gseg-ethz/GSEGUtils/issues/48)) ([3bdaf72](https://github.com/gseg-ethz/GSEGUtils/commit/3bdaf72e14285472e94b8aeae4f903c4a7e47eeb))
+* **13-16:** the base-ref integrity check and its narrowed exception (D-19/D-23) ([#49](https://github.com/gseg-ethz/GSEGUtils/issues/49)) ([e852259](https://github.com/gseg-ethz/GSEGUtils/commit/e8522590222bed1666b7aaac4dbb458535c690ff))
+* **13-18:** capture the classifier's stderr and warn when the fast path fails open (D-A) ([#62](https://github.com/gseg-ethz/GSEGUtils/issues/62)) ([0550698](https://github.com/gseg-ethz/GSEGUtils/commit/05506981bd59ad72d7f8ea5a46e2dba99b2f237c))
+* **13:** promote the Phase 13 release flow to main ([#41](https://github.com/gseg-ethz/GSEGUtils/issues/41)) ([66a5f10](https://github.com/gseg-ethz/GSEGUtils/commit/66a5f10b59fa428b26041aa6b1306bb846c8fe1d))
+
 ## [0.5.3](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.2...v0.5.3) (2026-07-11)
 
 
