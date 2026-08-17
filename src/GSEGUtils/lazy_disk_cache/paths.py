@@ -45,6 +45,8 @@ __all__ = [
     "get_legacy_pickle_path",
     "get_npy_tmp_path",
     "get_meta_tmp_path",
+    "get_memmap_path",
+    "get_memmap_tmp_path",
 ]
 
 from collections.abc import Callable
@@ -629,19 +631,124 @@ def is_valid_store_key(key: str) -> bool:
 # class attributes, ``LazyDiskCache._MEMMAP_SUFFIX`` on the ABC, and bare
 # literals inside ``_store_entry`` — because ``disk_backed_store.py`` imports
 # *from* ``lazy_disk_cache.py`` and neither could reach the other's constants.
-# That split has already produced one shipped defect (``_purge_cache_pair``
-# hardcodes ".npy"/".meta.json" and its FRAG-03 intent has never held). The
-# constants live here so there is one vocabulary and one seam.
+# That split has already produced one shipped defect: the finalizer helper
+# hardcoded ".npy"/".meta.json" and asserted a FRAG-03 intent that no route in
+# the package could reach. The constants live here so there is
+# one vocabulary and one seam.
 #
-# BOUNDARY: moving the vocabulary is this phase's job; actually fixing the
-# ``_purge_cache_pair`` dead branch is STORE-06 and belongs to Phase 15. The
-# move is what makes that fix a one-liner rather than a refactor.
+# DISCHARGED — plan 15-04, STORE-06. This block used to end "BOUNDARY, and the
+# owner has now arrived", pointing forward at a fix Phase 15 owed. The fix has
+# landed, so the pointer is replaced by its outcome and the two claims above it
+# are corrected in place rather than silently dropped — the pattern D-31 used
+# when it extended D-17.
+#
+# First correction: the hardcoded suffixes are gone. The finalizer callback is
+# now ``lazy_disk_cache._purge_memmap_file`` and unlinks exactly one file, the
+# entry's own memmap.
+#
+# Second correction: the FRAG-03 intent not holding was recorded here as the
+# defect. It is not — it is the only reason the code was safe. Making that dead
+# ``.npy`` branch live was measured to empty the cache directory at entry GC
+# and to make the first lazy reload fail with ``KeyError`` (15-CONTEXT D-12),
+# so the branch was **deleted rather than completed**. Codec-pair removal is
+# owned by ``DiskBackedStore.purge``, at the level where the pair is written.
+# The vocabulary move is what made both of those one-liners rather than
+# refactors.
 
 NPY_SUFFIX: Final[str] = ".npy"
 META_SUFFIX: Final[str] = ".meta.json"
 LEGACY_PICKLE_SUFFIX: Final[str] = ".pkl"
 MEMMAP_SUFFIX: Final[str] = ".dat"
 TMP_SUFFIX: Final[str] = ".tmp"
+
+
+# ---------------------------------------------------------------------------
+# Phase-15 artefact-name recognition (D-15-G7)
+# ---------------------------------------------------------------------------
+
+#: The store artefact NAME vocabulary, and the reason it is a DERIVATION rather
+#: than a list. Every element is built from the five suffix constants directly
+#: above, so a sixth suffix cannot be added there and forgotten here — the block
+#: that owns the vocabulary owns all of it, which is the single-seam rule D-14
+#: established and the reason `_store_artefact_suffix` lives in this module
+#: rather than in the store that consumes it.
+#:
+#: The seven elements are the four base suffixes plus the three `.tmp` forms the
+#: builders actually produce. There is deliberately no `.tmp` form of the legacy
+#: pickle: no builder writes one, and inventing a name the package cannot create
+#: would be restating the vocabulary rather than deriving it.
+#:
+#: ORDERED LONGEST FIRST, by construction rather than by hand. See
+#: `_store_artefact_suffix` for why that ordering is a correctness requirement.
+_ARTEFACT_SUFFIXES: Final[tuple[str, ...]] = tuple(
+    sorted(
+        (
+            NPY_SUFFIX,
+            META_SUFFIX,
+            LEGACY_PICKLE_SUFFIX,
+            MEMMAP_SUFFIX,
+            f"{NPY_SUFFIX}{TMP_SUFFIX}",
+            f"{META_SUFFIX}{TMP_SUFFIX}",
+            f"{MEMMAP_SUFFIX}{TMP_SUFFIX}",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _store_artefact_suffix(name: str) -> Optional[str]:
+    """Report which store artefact suffix ``name`` carries, or ``None``.
+
+    A module-private predicate in the shape of :func:`_assert_contained` and
+    :func:`_assert_write_contained`: deliberately absent from ``__all__``, and
+    called by :class:`DiskBackedStore` the same way those two already are. It
+    exists so the store can ask *"is this name one the store builds?"* without
+    growing a second artefact vocabulary of its own.
+
+    **The question it answers, and the question it does not.** It decides
+    whether a **name** is *shaped like* a store artefact. It does **not** decide
+    whether a file **is** one: it opens nothing, stats nothing, consults no
+    cache directory, no store and no tracking state. That is the entire point
+    at the one call site that matters (D-15-G7). The alternative predicate —
+    *"is this the built artefact path of some other tracked key?"* — would make
+    a destructive verb's refusal depend on whether a garbage collection had run,
+    which is the shape round-2 finding CR2-04 condemned, and would miss the
+    untracked orphan that is the likeliest victim of all.
+
+    **Longest-first ordering is a correctness requirement, not a style
+    choice.** ``<key>`` + ``.npy`` + ``.tmp`` ends with both the temporary
+    suffix and the plain one. Iterating shortest-first would report the plain
+    ``.npy`` form for a temporary name, so a caller that compares the reported
+    suffix against what it built would compare the wrong pair. The ordering is
+    produced by sorting :data:`_ARTEFACT_SUFFIXES` on length at construction, so
+    a suffix added later is placed correctly without anyone remembering to.
+
+    **Why the legacy pickle suffix is in the vocabulary.** D-09 forbids
+    :meth:`DiskBackedStore.purge` from removing a legacy ``<key>.pkl`` *by
+    name*. A rule that then let the same method follow a symlink to one would
+    delete through a link exactly what the rule forbids deleting directly,
+    which is not a narrower policy but the same policy with a hole in it.
+
+    Parameters
+    ----------
+    name : str
+        A bare file name — ``Path.name``, not a full path. Passing a path-like
+        string still works, because the test is a suffix test, but the caller is
+        expected to have taken the final component already.
+
+    Returns
+    -------
+    str or None
+        The longest store artefact suffix ``name`` ends with, or ``None`` when
+        it ends with none of them. The returned value is one of the elements of
+        :data:`_ARTEFACT_SUFFIXES`, so a caller may compare it by identity of
+        content against the constants rather than re-deriving it.
+    """
+    for suffix in _ARTEFACT_SUFFIXES:
+        if name.endswith(suffix):
+            return suffix
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1220,67 @@ def get_meta_tmp_path(cache_dir: Path, key: str) -> Path:
     return _build(cache_dir, key, f"{META_SUFFIX}{TMP_SUFFIX}")
 
 
+def get_memmap_path(cache_dir: Path, key: str) -> Path:
+    """Return the on-disk ``<key>.dat`` memmap path inside ``cache_dir``.
+
+    Internal construction detail with no downstream caller, and deliberately
+    absent from the package's published surface.
+
+    Parameters
+    ----------
+    cache_dir : Path
+        The configured cache directory.
+    key : str
+        The store key.
+
+    Returns
+    -------
+    Path
+        The validated, contained memmap path.
+
+    Raises
+    ------
+    StoreKeyError
+        If ``key`` is not a legal single-segment store key.
+    StoreContainmentError
+        If the path would resolve outside ``cache_dir``.
+    """
+    return _build(cache_dir, key, MEMMAP_SUFFIX)
+
+
+def get_memmap_tmp_path(cache_dir: Path, key: str) -> Path:
+    """Return the temporary ``<key>.dat.tmp`` write path inside ``cache_dir``.
+
+    Internal construction detail with no downstream caller, and deliberately
+    absent from the package's published surface.
+
+    The name exists because ``<key>.dat.tmp`` is a real artefact with a real
+    lifetime — it persists from creation until its rename, and a crash in
+    between leaves one indefinitely — so a removal verb that did not know the
+    name would leak the very file the atomicity fix creates (D-14).
+
+    Parameters
+    ----------
+    cache_dir : Path
+        The configured cache directory.
+    key : str
+        The store key.
+
+    Returns
+    -------
+    Path
+        The validated, contained temporary memmap path.
+
+    Raises
+    ------
+    StoreKeyError
+        If ``key`` is not a legal single-segment store key.
+    StoreContainmentError
+        If the path would resolve outside ``cache_dir``.
+    """
+    return _build(cache_dir, key, f"{MEMMAP_SUFFIX}{TMP_SUFFIX}")
+
+
 #: Every builder, by name. Deliberately **not** in ``__all__``: it is a
 #: test-facing seam rather than published surface. The guarded-builder contract
 #: test iterates this registry instead of hand-listing cases, so a sixth builder
@@ -1124,4 +1292,6 @@ STORE_PATH_BUILDERS: dict[str, Callable[[Path, str], Path]] = {
     "get_legacy_pickle_path": get_legacy_pickle_path,
     "get_npy_tmp_path": get_npy_tmp_path,
     "get_meta_tmp_path": get_meta_tmp_path,
+    "get_memmap_path": get_memmap_path,
+    "get_memmap_tmp_path": get_memmap_tmp_path,
 }

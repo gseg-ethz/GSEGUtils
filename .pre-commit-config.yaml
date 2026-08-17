@@ -40,7 +40,13 @@ repos:
         # so plugin packages must be declared as additional_dependencies here.
         additional_dependencies:
           - "pydantic~=2.11"
-          - "numpy>=2.0,<2.4"
+          # Kept in lockstep with pyproject.toml's numpy requirement (D-16-G1).
+          # Both declarations currently resolve to the same 2.3.x, since pip takes
+          # the highest satisfying version and the floor is not binding here — so
+          # this edit buys consistency, not a behaviour change. It matters when the
+          # ceiling moves or a constraint forces a lower pick: two numpy pins that
+          # can silently disagree is the drift this repo has already been bitten by.
+          - "numpy>=2.2,<2.4"
           - "numpydantic~=1.10"
 
   - repo: local

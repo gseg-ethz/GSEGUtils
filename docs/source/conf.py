@@ -67,6 +67,36 @@ nitpick_ignore_regex: list[tuple[str, str]] = [
     (r"py:class", r"Vector_[A-Za-z0-9_]+_T"),
     (r"py:class", r"ArrayDtypes"),
     (r"py:data", r"ArrayDtypes"),
+    # ── deliberately unpublished lazy_disk_cache internals ──────────────────────
+    # Plan 15-09 added `_register_entry` and `_reconcile_artefact_targets`, which
+    # the lazy_disk_cache page renders because its automodule carries
+    # `:private-members:`. Their docstrings cross-reference symbols that are
+    # intentionally NOT part of the documented surface, so the refs can never
+    # resolve and the roles are prose pointers for a source reader rather than
+    # broken links to fix:
+    #   * `paths._assert_contained` / `paths._assert_write_contained` — the
+    #     containment helpers, which `lazy_disk_cache/__init__.py`'s own module
+    #     docstring records as "deliberately unpublished"; no page documents
+    #     `GSEGUtils.lazy_disk_cache.paths`.
+    #   * `__setitem__` — a real `DiskBackedStore` mapping route, but a dunder,
+    #     and this automodule does not enable `:special-members:`.
+    #   * `_LAZY_DISK_CACHE_CLASS_REGISTRY` / `_resolve_lazy_disk_cache_class` —
+    #     module-private registry internals behind the published
+    #     `register_lazy_disk_cache_class` extension point.
+    # Scoped to these exact names rather than to a private-name pattern, so a
+    # future broken ref to some OTHER private symbol still fails the build.
+    (r"py:func", r"paths\._assert(_write)?_contained"),
+    (r"py:meth", r"__setitem__"),
+    (r"py:data", r"_LAZY_DISK_CACHE_CLASS_REGISTRY"),
+    (r"py:func", r"_resolve_lazy_disk_cache_class"),
+    # `register_lazy_disk_cache_class` is the one entry here that IS published
+    # (it is in `lazy_disk_cache.__all__`); it is simply absent from this page's
+    # automodule `:members:` allow-list, which predates plan 15-09. Ignored
+    # rather than documented, because adding it widens the published docs
+    # surface — a product decision, not a build fix, and it drags two of its own
+    # private refs in with it. Adding it to `:members:` is the alternative if a
+    # later phase wants the extension point documented.
+    (r"py:func", r"register_lazy_disk_cache_class"),
     # ── numpydantic vendor internals ────────────────────────────────────────────
     # numpydantic re-exports NDArray from its vendor copy of nptyping;
     # the vendor path is never in any inventory.
