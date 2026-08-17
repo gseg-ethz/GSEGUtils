@@ -335,8 +335,37 @@ What to catch
      - A built path would resolve outside the cache directory. Subclasses
        :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, so a broad handler
        catches both.
+   * - :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError`
+     - **The root of the purge-refusal family**, whose shared guarantee is that
+       a refused purge touched nothing. It has two members: the *foreign
+       process* case — :meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge`
+       was called from a process that did not construct the store — and the
+       *foreign artefact* case in the next row. **So one**
+       ``except StorePurgeRefusedError`` **covers both**, and code that needs to
+       tell them apart catches the subclass first. Read the type as "refused,
+       nothing touched" rather than as the process case alone; it used to
+       describe only the latter. Subclasses :class:`RuntimeError` — **not**
+       :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError` — because nothing is
+       wrong with the key; the refusal is about *the caller*. So the broad
+       ``except RuntimeError`` that worker code already writes catches it
+       without a new handler. Raised before any mutation, so a refused purge is
+       a bit-for-bit no-op.
+   * - :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeForeignArtefactError`
+     - An artefact of the key — a built path's resolved target, or a live
+       entry's own ``cache_path`` — resolves outside the store's cache
+       directory, so ``purge`` refused rather than reaching out there to unlink
+       it. Subclasses
+       :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError`, so an existing
+       broad handler keeps working and inherits the same no-op guarantee. The
+       entry's finalizer is deliberately **left armed**, so the file is still
+       reclaimed on collection; see :ref:`RemovingAKeyAndItsFiles`.
+   * - :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeIncompleteError`
+     - One or more of the key's artefacts could not be unlinked. Subclasses
+       :class:`OSError`, so an existing handler around a deleting operation
+       keeps working. Raised **once**, after every artefact has been attempted,
+       with the survivors named in the message. The key stays dropped.
 
-The two types are separate on purpose. A ``StoreKeyError`` is evidence about
+The two key-flavoured types are separate on purpose. A ``StoreKeyError`` is evidence about
 *the caller's key*; a ``StoreContainmentError`` is evidence about *the
 environment* — something planted a symlink in the cache directory. A per-item
 handler that skips one bad key should not silently swallow the second kind, so
@@ -393,9 +422,11 @@ been offloaded is re-adopted by the next ``store[key]``, which falls back to the
 loader for any untracked key, and again by the rescan when the store is
 reopened. Between the removal and that read, ``key not in store`` and
 ``store[key]`` both succeed. Treat this as a known limitation rather than a
-guarantee, and unlink the artefacts yourself if you need them gone; the atomic
-drop-key-and-delete-files operation is **STORE-04**, and it is not in this
-release.
+guarantee. **You no longer have to unlink the artefacts yourself:** the atomic
+drop-key-and-delete-files operation (**STORE-04**) ships as
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` — see
+:ref:`RemovingAKeyAndItsFiles` below. An earlier revision of this page said it
+was "not in this release", which was true when written and is not now.
 
 The full per-route enumeration with migration detail lives in ``BC-GSEG-006`` in
 ``MIGRATION-v1.0.md``.
@@ -503,6 +534,421 @@ time the process restarted.
    The scan covers whichever directories you point it at. Cache directories are
    often configuration-driven and may not all live where you expect, so run it
    over each root your application configures rather than over one known path.
+
+.. _RemovingAKeyAndItsFiles:
+
+Removing a key and its files
+----------------------------
+
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` is the durable
+counterpart to ``del store[key]``. Where the removal routes above drop tracking
+and leave everything on disk, ``store.purge(key)`` drops tracking **and**
+unlinks the key's artefacts — and it is the only removal that sticks, because
+with nothing on disk there is nothing for the next read or the reopen rescan to
+re-adopt.
+
+What it removes
+~~~~~~~~~~~~~~~
+
+**Every artefact whose name derives from the key** — stated as a rule rather
+than as a list, so it stays true when an artefact is added. Today that is
+``<key>.dat``, ``<key>.dat.tmp``, ``<key>.npy``, ``<key>.npy.tmp``,
+``<key>.meta.json`` and ``<key>.meta.json.tmp``. The ``.tmp`` names are in the
+set deliberately: each persists from creation until its rename, and a crash in
+between leaves one behind indefinitely, so a purge that skipped them would leak
+the very files the atomicity work creates.
+
+You can check it the way the rule is written — list the directory afterwards and
+find nothing derived from **that** key. Note the qualifier: a prefix glob such as
+``glob(f"{key}.*")`` also matches a *longer* key's artefacts, so ``feat`` and
+``feat2`` are not independent under a naive check.
+
+**And one file whose name does not derive from the key.** Each built path is
+followed to its **resolved target**, so where ``<key>.dat`` is a symlink pointing
+at a payload **inside** the cache directory — the legitimate *adopted entry* —
+the purge removes that payload along with the link. A file whose name is not
+derived from the key may therefore be removed by a purge of that key.
+
+The reason is mechanical. ``Path.unlink`` removes the link and never its target,
+so a purge that only unlinked names left the key's exact bytes sitting in the
+directory under another name **and reported a complete removal**.
+
+**The removal set in full, and it has no other members.** ``purge`` unlinks the
+six names built from the key and — where one of those names is a symlink — the
+single path that name resolves to. There is no third category: it does not reach
+another key's artefacts, it does not reach a live entry's own ``cache_path``, and
+it does not reach outside the cache directory. **That boundary is held by two
+refusals rather than asserted as a rule**, because as a bare rule it was once
+false on an input a caller can reach — before the second refusal below existed,
+one planted in-cache ``aggressor.dat`` aimed at a genuine, store-written
+``victim.npy`` made ``purge("aggressor")`` unlink it and return cleanly, leaving
+``"victim"`` tracked by the store and unreadable through it. Both refusals are
+raised before the first unlink and leave the directory bit-for-bit unchanged:
+
+* a built name whose resolved target lies **outside** the cache directory raises
+  :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeForeignArtefactError`;
+* a built name whose resolved target lies **inside** it but carries a store
+  artefact name that is not one of this key's own six raises
+  :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeAliasedArtefactError`.
+
+So *belonging* is decided by what a path resolves to rather than by what it is
+named, and the two refusals are what stop that resolution reaching past the key
+it was derived from. Both are described in full under
+:ref:`the refusal family <PurgeRefusalFamily>` below.
+
+**The residual limit, stated rather than guarded.** The cross-key shape above is
+now **refused**, and the earlier statement of this limit was wrong in three ways
+a review measured: it said two planted links were needed when **one** suffices;
+it described the file at risk as a shared adopted payload when the file actually
+destroyed was a **store-owned artefact** of a live key; and it argued that
+guarding the shape would cost a scan of every other key's link target, which the
+shipped refusal disproves — the test is a comparison of the target's *name* and
+scans nothing.
+
+What remains unguarded is narrower. **Two keys whose ``<key>.dat`` links point at
+the same payload, where that payload's own name is not one the store builds** —
+purging either removes the other's data. No store-owned write route can produce
+that shape, since each key builds its own ``<key>.dat`` name. The name test
+cannot see it either, and deliberately so: a payload named ``shared.bin`` is
+exactly the legitimate *adopted entry* shape the refusal has to let through.
+Telling the two apart needs ownership information a file name does not carry, so
+this is published as a limit rather than guarded by a rule that would break the
+adopted entry.
+
+The legacy ``<key>.pkl`` is **not** removed. It is unreadable by design — the
+store refuses it rather than invoking the pickle reader — and it is now also
+unremovable by the only removal verb, so a pre-0.5 cache directory keeps it
+forever and a directory listing after a *complete* purge still shows the key's
+name. That is a known, deliberate residue rather than a failed purge; nothing in
+the library will read it.
+
+What it deliberately leaves alone: an entry's own ephemeral backing file
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An entry constructed **without** a ``cache_path`` allocates one for itself, with
+``tempfile.mkstemp``. That file is the entry's own, and the policy attached to it
+is stated here because ``purge`` is where a reader meets the question:
+
+* **it was allocated by the entry**, not derived from any store key, and it lives
+  outside the cache directory by construction;
+* **its lifetime is OS-managed** — fire-and-forget, on whatever the platform's
+  temporary-file policy happens to be;
+* **it carries no recoverability guarantee.** Nothing promises the file is still
+  there later, and nothing in this package will look for it;
+* **``purge`` does not touch it.** It does not unlink it, it does not refuse on
+  account of it, and it does not disarm the cleanup that reclaims it.
+
+Dropping the entry is what reclaims the file: the entry's finalizer unlinks it
+when the object is collected, and a purge of the entry's key leaves that
+finalizer armed to do so. Ask an entry which case it is with the read-only
+:attr:`~GSEGUtils.lazy_disk_cache.LazyDiskCache.ephemeral` property; it is
+derived at construction from whether a ``cache_path`` was supplied, and it is
+deliberately not something a caller can set.
+
+**Say what this is not, in the same breath.** It is not a promise the file
+survives, not a place to put data you need back, and not a store-managed
+artefact. An entry that needs a durable backing file **supplies a
+``cache_path``**, which is then an artefact of the key under the ordinary rules
+above — inside the cache directory ``purge`` removes it, outside it ``purge``
+refuses, and neither decision is this policy's.
+
+The one operational lever the policy exposes is composition with the platform:
+``tempfile.mkstemp`` honours ``TMPDIR``, so a site that points ``TMPDIR`` at
+node-local scratch gets node-local spill with no code change and no store
+configuration.
+
+When it raises :class:`KeyError`
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Only when the key is absent from tracking and from disk.** Untracked-but-on-disk
+counts as present and is purgeable — and that is the case you will meet most,
+because it is exactly the state ``del store[key]`` leaves behind. A stricter
+reading ("tracked only") would make the orphan case unpurgeable through the one
+verb built to purge it.
+
+.. _PurgeRefusalFamily:
+
+When it refuses: three reasons, one guarantee
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every member of the refusal family guarantees the same thing, and it is the
+load-bearing part: **nothing was touched.** The raise happens before the first
+mutation, so the key is still tracked, every artefact is byte-identical, and no
+finalizer was disarmed. A single ``except`` on
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError` covers all three and
+gets that guarantee from each — they are three *reasons*, not three contracts.
+
+* :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError` itself — **the wrong
+  process.** The purge was issued from a process that did not construct the
+  store, so it would be deleting another process's data.
+* :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeForeignArtefactError` — **an
+  artefact outside the cache directory.** A built path's resolved target, or a
+  live entry's own ``cache_path``, lies outside the store's own root.
+* :exc:`~GSEGUtils.lazy_disk_cache.StorePurgeAliasedArtefactError` — **a link
+  aimed at another key's artefact.** A built path is a symlink whose resolved
+  target is inside the cache directory but carries a store artefact name that is
+  not one of this key's own six.
+
+The two artefact-shaped reasons are described in full below. The wrong-process
+one is described under
+:ref:`the purge_disk_on_gc override <PurgeOverridesGcFlag>`, because it is what
+makes that override safe rather than reckless.
+
+When it refuses a foreign artefact
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When **any** artefact of the key resolves **outside** the store's cache directory
+— a built path's resolved target, or a live entry's own ``cache_path`` —
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` raises
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeForeignArtefactError` and touches
+nothing at all.
+
+**A live entry's ``cache_path`` is consulted to decide the refusal and for
+nothing else.** It is never a member of the removal set, inside the cache
+directory or out — this half of the reconcile answers *may I proceed?* and never
+*what do I unlink?*. So an entry whose ``cache_path`` sits inside the cache
+directory but is not one of the key's six built names is neither removed nor
+refused on, and by the detach rule below its finalizer is not disarmed either.
+
+Three consequences follow that the refusal itself does not tell you.
+
+**The finalizer is deliberately left armed.** The file is still reclaimed when
+the entry is collected, exactly as it would have been had you never called
+``purge``. Refusing *and* disarming would turn a garbage-collectable file into a
+permanent leak created by the removal verb itself, which is the defect this
+refusal exists to prevent.
+
+**Dropping the entry is not the remedy, and the difference is the whole of it.**
+Letting the entry be collected reclaims **the entry's own backing file and
+nothing else**: the finalizer removes exactly one memmap by explicit design, and
+never the store-owned ``<key>.npy`` and ``<key>.meta.json`` written for that key.
+So while this refusal stands, that codec pair is reclaimed by **no removal verb
+this package exposes**. The remedy that does work is to **repoint or remove the
+offending path and purge again** — for a symlink pointing out of the cache
+directory, remove or repoint the link; for an entry constructed with an explicit
+``cache_path`` outside the cache directory, give it a path inside that directory
+or let the store derive one from the key. The exception message says the same
+thing, so an operator can act on it without reading this page.
+
+**A purge will not delete outside its own cache directory**, and that is a
+boundary rather than a limitation. A removal verb that followed a
+caller-supplied path wherever it pointed is precisely the shape the containment
+layer exists to prevent.
+
+The outward symlink is the same case and refuses for the same reason, and **this
+is a change**: a ``<key>.dat`` symlink whose target lies outside the cache
+directory now raises, where a previous release unlinked the link and left the
+target on disk. Remove or repoint the link and purge again.
+
+When it refuses a link aimed at another key's artefact
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When a built path of the key is a symlink whose resolved target is **inside** the
+cache directory but whose **name** carries a suffix this store builds — an array,
+a sidecar, a memmap, a legacy pickle or one of their temporary forms — while not
+being one of this key's own six names,
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` raises
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeAliasedArtefactError` and touches
+nothing.
+
+Containment answers *"may I delete inside my own directory?"*. That is not the
+same question as *"is this file mine to delete?"*, and only the second one
+licenses an unlink. **One planted link is enough** for the difference to matter:
+an in-cache ``aggressor.dat`` aimed at a genuine, store-written ``victim.npy``
+used to make ``purge("aggressor")`` unlink it and return cleanly, leaving
+``"victim"`` still tracked by the store and unreadable through it — a key the
+store advertises and can never load, with no warning emitted.
+
+**The test is on the target's name, and it consults nothing** — no registry, no
+tracking state, no other key's files. That is deliberate rather than merely
+cheap. A rule phrased as *"refuse if the target belongs to another tracked key"*
+would make a destructive verb's refusal flip on a garbage collection, and would
+leave the untracked orphan — the victim most likely to exist — unprotected.
+
+**This narrows the adopted entry, and the cost is published rather than left to
+be discovered.** Deciding from the name means the refusal **over-refuses**: it
+declines a legitimate *adopted entry* whose payload happens to be named with a
+suffix the store builds, even when that payload belongs to nobody. The worked
+pair, which is the contract rather than an illustration:
+
+* a planted in-cache ``<key>.dat`` aimed at a payload named ``payload.npy``
+  **refuses** — and it refuses **even when no key owns that payload**: no key
+  named ``payload`` is tracked, the file belongs to nobody, and the refusal fires
+  anyway, because the test reads the name and never the registry;
+* the same link aimed at a payload named ``payload.bin`` **still purges** — it is
+  followed and its payload is removed with it, exactly as before.
+
+**The remedy for the refusing row is one rename**: give the payload an extension
+the store does not build — ``.bin`` is the one this package's own adopted-entry
+tests use — repoint the link at the renamed file, and purge again. The exception
+message says the same thing, so an operator can act on it without reading this
+page.
+
+A destructive verb fails **closed**, which is why it errs this way: declining a
+purge costs a rename, while following the wrong link costs another key's data and
+costs it silently. The refused shape is one no store-owned write route can
+produce — each key builds its own ``<key>.dat`` name — so only an operator can
+plant it, and an operator can un-plant it.
+
+Which finalizers a purge disarms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**An entry's cleanup is disarmed if and only if that entry's backing file was in
+the set this call removed.** Not "if it was inside the cache directory", and not
+"if it belonged to the key" — the rule is membership of the removal set, and it
+is an *iff* in both directions.
+
+Detaching is bookkeeping, not authorization. *May I delete this file?* is
+answered by the cache directory; *did I delete this file?* is answered by the
+removal set, and only the second question licenses a detach. The two agree
+whenever a key has nothing but its own ``<key>.dat``, which is exactly why the
+territory-shaped rule looks correct until it is not. With
+``store["alpha"] = entry`` followed by ``store["beta"] = entry``, ``alpha.dat``
+is inside the cache directory but was never in ``beta``'s artefact set, and
+``purge("beta")`` must leave that finalizer armed, because ``alpha`` is still a
+live tracked key that would otherwise lose its only cleanup.
+
+The consequence you can act on: **after a purge, an entry whose backing file was
+not removed still cleans up after itself when it is collected**, exactly as it
+would have done had you never called ``purge``. And a refused purge removes
+nothing, so it disarms nothing at all.
+
+The comparison never becomes a removal. A live entry's ``cache_path`` is compared
+against the removal set and is **never added to it**; adding it would make
+``purge("beta")`` destroy ``alpha.dat`` in the example above, which is data
+destruction rather than bookkeeping.
+
+.. _PurgeOverridesGcFlag:
+
+An explicit purge overrides ``purge_disk_on_gc=False``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``purge_disk_on_gc`` governs *implicit, garbage-collection-time* deletion. **It
+is not a write-protect bit**, so an explicit
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.purge` proceeds regardless of
+its value — otherwise the method would be unusable in precisely the
+configuration that accumulates the most artefacts. Every purge that exercises
+the override logs an ``INFO`` record naming the key, so the override is
+transparent rather than merely permitted.
+
+**The counterweight is named in the same breath, because it is what makes the
+override safe rather than reckless:** a purge issued from a process that did not
+construct the store **refuses**, raising
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeRefusedError` before touching
+anything. So a stray purge inside a ``joblib`` / ``loky`` worker cannot delete
+the parent process's session data. The guard is on this method and nothing else:
+workers legitimately *write* — pickling a store force-offloads it — so guarding
+the write routes would break the worker path outright. Deletion is the only
+operation where "wrong process" means "destroying someone else's data".
+
+That type is now the **root of a refusal family** rather than the name of this
+one case: both the foreign-artefact refusal and the aliased-artefact refusal
+above subclass it, and all three members share the guarantee that a refused
+purge touched nothing. A single ``except StorePurgeRefusedError`` therefore
+covers the wrong-process case, the foreign-artefact case and the
+aliased-artefact case alike. The family grows by adding **reasons**, never by
+adding **contracts**.
+
+If some artefacts survive
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+POSIX gives no atomicity across several ``unlink`` calls, so **a partial
+directory state is the contract rather than a surprise**. Every artefact is
+attempted, the failures are collected, and one
+:exc:`~GSEGUtils.lazy_disk_cache.StorePurgeIncompleteError` names the survivors.
+**The key stays dropped** — re-tracking it would point a live entry at a
+half-deleted artefact set and would make the method non-idempotent, so calling
+``purge`` again after fixing the cause is the supported recovery.
+
+The residue you are most likely to meet is a surviving ``<key>.dat``. The
+``.dat`` memmap is *entry*-owned while the ``.npy`` + ``.meta.json`` codec pair
+is *store*-owned, and the two are unlinked in that order — sidecars first,
+payload last. Re-adding the key afterwards yields **the new data**, not the
+stale payload: the write routes replace the ``.dat`` rather than appending to
+it.
+
+What "atomic" does and does not mean here
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Read this before building a call site around the word.
+
+**What the guarantee is.** ``purge`` is atomic with respect to
+**store-owned ordering and refusal**:
+validation precedes every mutation, a refused purge
+touches nothing at all, and the key is dropped before the first unlink, so the
+tracking state never describes a half-deleted artefact set.
+
+**What it is not — first.** It is
+**not safe against concurrent mutation of the same key**.
+:class:`~GSEGUtils.lazy_disk_cache.DiskBackedStore` holds no
+store-level lock, so a ``store[key] = entry`` or
+:meth:`~GSEGUtils.lazy_disk_cache.DiskBackedStore.add_data_to_store` racing the
+call may have its freshly-written artefact unlinked underneath it, or may slip
+one in after the existence check.
+
+**What it is not — second.** It is **not globally atomic** across threads, or
+across processes sharing a cache directory. POSIX offers nothing that would make
+it so.
+
+**The supported model, stated rather than left as a bare warning:**
+single-threaded use per store. That is the same constraint this project states
+elsewhere — a ``PointCloudData`` is not multi-thread-mutable either. If several
+processes share a cache directory, coordinate above the store.
+
+One lock *is* taken, and it should not be mistaken for a store-wide guarantee:
+the live entry's ``RLock``, held for the finalizer detach alone and never across
+the unlinks. Holding it across the unlinks would be a guarantee that exists only
+when the key happens to be tracked — the untracked-orphan case has no entry and
+therefore no lock — and a guarantee that sometimes exists is a filter, not an
+invariant.
+
+Where the ``.dat`` atomicity guarantee holds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``<key>.dat`` memmap is written through a temporary and renamed over it, so
+an interrupted conversion cannot tear a previously-valid ``.dat``. **That route
+is POSIX-only.** It is selected on ``os.name == "posix"``; off POSIX the
+conversion falls back to a direct write on the final name, which is
+**not torn-write-safe** — an interruption there can leave a partially-written
+``.dat``.
+
+The reason is platform semantics rather than an unfinished port: replacing an
+open, memory-mapped file is not permitted on Windows, so the
+temporary-and-rename sequence cannot complete there. Note also that GSEGUtils
+declares **no OS classifiers** and is tested on Linux — so this is a scoped
+guarantee stated with its scope, not an unqualified one you should read as
+holding everywhere the package installs.
+
+**The destination's permission bits are carried across that rename — and only
+those.** ``os.replace`` moves the temporary's *inode*, so the temporary's mode,
+owner and ACLs land on the final name and whatever the destination had is
+discarded. An explicit step reads the destination's mode and restores it, so two
+consequences you can rely on: an entry created without an explicit ``cache_path``
+keeps the ``0600`` that ``tempfile.mkstemp`` gave its backing file, and an
+operator who tightened an existing artefact keeps that mode across a
+reconversion.
+
+**What is *not* carried, said plainly because the mode bits will look
+unchanged.** Only the permission bits are restored — ``stat.S_IMODE``.
+**Ownership, POSIX ACLs and extended attributes are not.** On a shared filesystem
+where a collaborator was granted access with ``setfacl``, or where the artefact
+was owned by another member of a shared group, every reconversion silently drops
+that ACL and re-owns the file to the writing process while the mode bits read
+exactly as before. On the widening axis this fails closed; on the availability
+axis it breaks a collaborator quietly. If you need those to survive, set the
+**directory's default ACL**, which new files inherit, rather than relying on the
+artefact's own.
+
+**Both limits belong in the same breath as the guarantee.** A *first* write into
+a configured cache directory still lands at the process umask default — there is
+no prior destination to read a mode from, and the library deliberately does not
+substitute a value of its own choosing, so this is unchanged rather than
+tightened. And there is a brief window between the temporary's creation and its
+mode being set, during which the temporary carries the umask default: on a
+directory other local users can read, the payload is exposed momentarily rather
+than permanently. The step narrows that exposure; it does not eliminate it.
+Closing the residue needs the temporary created through
+``tempfile.mkstemp(dir=...)`` with ``O_EXCL`` semantics, which is deferred.
 
 Modules
 -------
