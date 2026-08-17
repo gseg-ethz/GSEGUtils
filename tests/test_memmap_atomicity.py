@@ -736,19 +736,31 @@ def test_zero_length_array_converts_and_leaves_only_numpys_one_byte_pad(tmp_cach
     ``numpy >= 2.2, < 2.4``, and the floor is the reason this assertion may be
     unconditional.
 
-    Blast radius, stated accurately because an earlier draft of this docstring
-    got it wrong and the error is worth not repeating. The conversion is a
-    private method, but it is **not** unreachable from the public API: with
-    ``enable_caching=True`` both ``_init_from_config``
-    (``lazy_disk_cache.py`` ~323) and ``offload`` (~928) call it, so
-    ``add_data_to_store`` on a zero-length array reaches this exact resolution.
-    Measured on both sides: under numpy < 2.2 that public call **raises**
-    ``ValueError: cannot mmap an empty file``; under >= 2.2 it succeeds and
-    leaves a one-byte ``<key>.dat`` that reads back ``(0,) float32``. So the
-    floor raise removes a real user-visible failure mode, not merely a stale
-    assertion. It is only under the **default** ``enable_caching=False`` that
-    ``offload`` early-returns and no route reaches the conversion — do not
-    restate that narrow case as if it covered the whole public surface.
+    Blast radius, stated accurately on the third attempt — two earlier drafts
+    of this paragraph under-stated the surface, each time in the direction of
+    making the change look smaller than it is. Do not narrow it again without
+    re-running ``grep -n "_convert_to_memmap()"``.
+
+    The conversion is a private method, but it is **not** unreachable from the
+    public API. There are **three** call sites, and the third is the one both
+    earlier drafts missed:
+
+    * ``_init_from_config`` — on construction when ``enable_caching=True``.
+    * ``offload`` — when the buffer is not already a memmap.
+    * ``enable_caching()`` — a **public method**. An entry built with the
+      default ``enable_caching=False`` still reaches the conversion the moment
+      a caller turns caching on, so "the default is safe" is *not* true.
+
+    Measured on both sides, through public calls only: under numpy < 2.2 they
+    **raise** ``ValueError: cannot mmap an empty file``; under >= 2.2 they
+    succeed and leave a one-byte artefact that reads back ``(0,) float32``.
+    The floor raise therefore removes a real user-visible failure mode, not
+    merely a stale assertion.
+
+    This test drives the private method directly, because it is the narrowest
+    place to pin the resolution. The public reachability it describes is
+    asserted by ``test_the_public_enable_caching_route_reaches_the_same_resolution``
+    below — the claim is held by a test rather than by this prose.
     """
     entry = _make_entry(tmp_cache_dir, np.zeros((0,), dtype=np.float32), name="empty")
 
@@ -769,6 +781,40 @@ def test_zero_length_array_converts_and_leaves_only_numpys_one_byte_pad(tmp_cach
     read_back = np.asarray(entry)
     assert read_back.shape == (0,), f"the empty array did not read back empty: shape {read_back.shape} != (0,)"
     assert read_back.dtype == np.dtype(np.float32), f"float32 was changed to {read_back.dtype} across the route"
+
+
+def test_the_public_enable_caching_route_reaches_the_same_resolution(tmp_cache_dir: Path) -> None:
+    """D-16-G1 — the reachability claim, asserted rather than only described.
+
+    ``enable_caching()`` is public and calls ``_convert_to_memmap`` directly, so
+    an entry built with the default ``enable_caching=False`` over a zero-length
+    array still reaches the numpy >= 2.2 resolution as soon as a caller turns
+    caching on. Under numpy < 2.2 this same public call raises
+    ``ValueError: cannot mmap an empty file`` — which is why the floor exists.
+
+    Without this test the sibling test's docstring would be the only record of
+    the public surface, and a zero-length short-circuit added to the caching
+    path later would regress the documented behaviour with every test green.
+    """
+    entry = _make_entry(tmp_cache_dir, np.zeros((0,), dtype=np.float32), name="empty")
+
+    artefact = tmp_cache_dir / f"empty{paths.MEMMAP_SUFFIX}"
+    assert not artefact.exists(), "the default enable_caching=False must not convert on construction"
+
+    entry.enable_caching()
+
+    assert artefact.exists(), (
+        "the public enable_caching() route did not reach the conversion — if a zero-length "
+        "short-circuit was added, D-16-G1's user-visible-failure-mode claim needs revisiting"
+    )
+    assert artefact.stat().st_size == 1, (
+        f"expected numpy's one-byte pad via the public route, got {artefact.stat().st_size} bytes"
+    )
+    assert _temporaries_in(tmp_cache_dir) == [], "the public route left a temporary behind"
+
+    read_back = np.asarray(entry)
+    assert read_back.shape == (0,), f"the empty array did not read back empty via the public route: {read_back.shape}"
+    assert read_back.dtype == np.dtype(np.float32), f"float32 was changed to {read_back.dtype} on the public route"
 
 
 # ---------------------------------------------------------------------------
