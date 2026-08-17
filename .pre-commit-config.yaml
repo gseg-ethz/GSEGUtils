@@ -40,7 +40,10 @@ repos:
         # so plugin packages must be declared as additional_dependencies here.
         additional_dependencies:
           - "pydantic~=2.11"
-          - "numpy>=2.0,<2.4"
+          # Must track pyproject.toml's numpy requirement (D-16-G1). This hook's
+          # venv is resolved independently, so a stale floor here type-checks
+          # against stubs for numpy versions the package no longer supports.
+          - "numpy>=2.2,<2.4"
           - "numpydantic~=1.10"
 
   - repo: local
