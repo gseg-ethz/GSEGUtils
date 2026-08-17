@@ -32,7 +32,10 @@ dynamic = ["version", "readme"]
 
 dependencies = [ # https://packaging.python.org/en/latest/specifications/dependency-specifiers/#dependency-specifiers
                 # https://packaging.python.org/en/latest/specifications/version-specifiers/#id5
-    "numpy >= 2.0, < 2.4",
+    # numpy floor is 2.2, not 2.0 (D-16-G1): numpy 2.2.0 changed np.memmap on an EMPTY file from raising
+    # ValueError to succeeding and padding it to one byte. The < 2.4 ceiling is deliberate and NOT stale:
+    # sphinx -W stops resolving numpy.typing.DTypeLike from numpy 2.4.1 here, and CI gates a Docs job.
+    "numpy >= 2.2, < 2.4",
     "pydantic ~= 2.11",
     "numpydantic ~= 1.10",
     "psutil ~= 7.0",  # Phase 4 PERF-04 D-05 — RAM-aware streaming chunk size

@@ -29,17 +29,22 @@ import json
 import logging
 import os
 import tempfile
+import weakref
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     Any,
     Callable,
+    Final,
     Iterator,
+    Mapping,
     MutableMapping,
     Optional,
     Protocol,
     TypeGuard,
     Unpack,
     cast,
+    overload,
     runtime_checkable,
 )
 
@@ -47,10 +52,208 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import ConfigDict, validate_call
 
+from . import paths
 from .disk_backed_ndarray import DiskBackedNDArray
 from .lazy_disk_cache import LazyDiskCache, LazyDiskCacheConfig, LazyDiskCacheKw
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Phase-15 purge refusals (D-07 + the D-10 aggregate)
+# ---------------------------------------------------------------------------
+
+
+class StorePurgeRefusedError(RuntimeError):
+    """Root of the :meth:`DiskBackedStore.purge` refusal family.
+
+    ↻ **WIDENED by Plan 15-09 (D-15-G2a).** This class used to describe itself
+    as one case — *"raised when* :meth:`DiskBackedStore.purge` *is called from a
+    foreign process"* — and that stopped being the whole truth the moment it
+    acquired a child. The widening is corrected here in text rather than left to
+    be inferred, because a caller who wrote ``except StorePurgeRefusedError``
+    around a purge, which the migration note tells them to, now catches a shape
+    whose *message* says "wrong process" and whose *reason* is something else.
+
+    **What every member of this family guarantees, and it is the load-bearing
+    part: nothing was touched.** The refusal is raised before the first
+    mutation, so the key is still tracked, every artefact is byte-identical, and
+    every finalizer is still armed (SC-2). That is a property a caller can act
+    on with one ``except``: *do not retry blindly, and do not go looking for
+    damage, because there is none.*
+
+    Three members today:
+
+    * this class, raised directly for the **foreign-process** case (D-05/D-08) —
+      a purge issued from a forked or unpickled copy would be deleting the
+      constructing process's data;
+    * :exc:`StorePurgeForeignArtefactError`, for the **foreign-artefact** case
+      (D-15-G2) — an artefact of the key resolves outside the store's own cache
+      directory, so removing it would make ``purge`` an arbitrary-delete verb;
+    * :exc:`StorePurgeAliasedArtefactError`, for the **aliased-artefact** case
+      (D-15-G7) — a built path of the key is a symlink whose resolved target is
+      *inside* the cache directory but carries a store artefact name that is not
+      one of this key's own, so following it would make ``purge`` a cross-key
+      data-destruction primitive.
+
+    The family grows by adding **reasons**, never by adding **contracts**: each
+    new member is a different answer to *why*, and the same answer to *what
+    happened*, which is nothing.
+
+    The hierarchy choice is unchanged and still correct. It deliberately does
+    **not** join ``StoreKeyError``'s :class:`ValueError` hierarchy, and the
+    difference is the whole point of a second type: nothing is wrong with the
+    key. :class:`RuntimeError` says *you called this in the wrong place*, which
+    is exactly what happened in both cases, and the broad
+    ``except RuntimeError`` that worker code already writes still catches them
+    (D-07). Re-parenting this class under a ``StoreError`` root buys taxonomic
+    tidiness at the cost of a published-type change, which Phase 14's D-12 rated
+    one-way; **adding a child below it is not that change** — no existing handler
+    stops catching anything it caught before.
+    """
+
+
+class StorePurgeForeignArtefactError(StorePurgeRefusedError):
+    """Raised when an artefact of the key resolves outside the store's cache directory.
+
+    **What it means.** :meth:`DiskBackedStore.purge` reconciled the key's
+    effective artefact set — the resolved target of each of the six built paths
+    that exists, plus the resolved ``_cache_path`` of each live registered entry
+    that supplied its own — and found a member outside ``cache_dir``. Rather
+    than reach out there and unlink it, the method refused and touched nothing.
+
+    **What it is NOT raised for** (D-15-G5, entry 82). An entry constructed
+    without a ``cache_path`` allocates one with :func:`tempfile.mkstemp`, which
+    is outside the cache directory by construction. That path is **ephemeral**:
+    fire-and-forget under an OS-managed lifetime, and not the store's to manage.
+    ``purge`` skips such entries entirely, so an ordinary
+    ``store[key] = DiskBackedNDArray(arr)`` does **not** raise this. Only an
+    **explicitly supplied** path outside the cache directory does.
+
+    **Why it refuses rather than reaches** (D-15-G2). A removal verb that
+    deletes arbitrary caller-supplied filesystem locations is precisely the
+    shape Phase 14's containment layer exists to prevent. The offending path is
+    not built from the key — it is either an entry's own ``cache_path``, chosen
+    by whoever constructed the entry, or the target of a symlink someone planted
+    in the cache directory — so unlinking it would let a caller aim ``purge`` at
+    any file the process can write.
+
+    **What a caller can do about it — and what dropping the entry does not
+    buy.** ``purge`` is not the tool for this file. Dropping the entry lets
+    garbage collection reclaim **the entry's own backing file, and nothing
+    else**: the finalizer runs ``_purge_memmap_file``, which by explicit design
+    removes exactly one file and never the store-owned ``<key>.npy`` +
+    ``<key>.meta.json`` codec pair. So while this refusal stands, that pair is
+    reclaimed by **no removal verb this package exposes** — an earlier version
+    of this paragraph and of the exception message prescribed the drop-and-GC
+    route as though it recovered them, and it never could (round-2 review
+    finding CR2-04, part 1).
+
+    The actionable fix is therefore to **repoint or remove the offending path
+    and purge again**: for an outward symlink, remove or repoint the link; for
+    an entry constructed with an explicit ``cache_path`` outside the cache
+    directory, give it a path inside that directory or let the store derive one
+    from the key.
+
+    That the entry's own file *does* stay reclaimable is a real property and it
+    is deliberate: this method did **not** detach the entry's finalizer.
+    Disarming the only cleanup a file has while declining to remove it is how a
+    removal verb manufactures a permanent leak; see the *What a future reader
+    must not "fix"* list on :meth:`DiskBackedStore.purge`.
+
+    **Why it subclasses** :exc:`StorePurgeRefusedError` **rather than standing
+    alone** (D-15-G2a). Its defining property is not "bad key" and not "wrong
+    process" — it is *nothing was touched*, which is exactly the parent's
+    contract minus the parent's original reason. Subclassing turns
+    "refused implies no-op" into a type-level statement one ``except`` can rely
+    on, instead of a coincidence two sibling types happen to share. Rejected: a
+    standalone :class:`RuntimeError` subclass, which a carefully-written
+    ``except StorePurgeRefusedError`` would stop catching on a shape it wants to
+    treat identically; and parenting under ``StoreContainmentError``, whose
+    family is :class:`ValueError`-rooted and is about a path built **from the
+    key**, which this one by definition is not.
+    """
+
+
+class StorePurgeAliasedArtefactError(StorePurgeRefusedError):
+    """Raised when a built path of the key is a symlink aimed at another store artefact name.
+
+    **What the reconcile found.** One of the six paths
+    :meth:`DiskBackedStore.purge` builds from the key is a symlink; its resolved
+    target is *inside* the cache directory, so containment is satisfied; and the
+    target's **name** carries a suffix the store itself builds — an array, a
+    sidecar, a memmap, a legacy pickle or one of their temporary forms — while
+    not being one of *this* key's six names. In short: the link is aimed at
+    somebody else's artefact.
+
+    **Why it refuses rather than reaches** (D-15-G7). Following that target is a
+    **cross-key data-destruction primitive**, and one planted link is enough to
+    fire it. Reproduced in the round-2 review: an in-cache ``aggressor.dat``
+    symlink pointing at a genuine, store-written ``victim.npy`` made
+    ``purge("aggressor")`` unlink ``victim.npy``, return **cleanly**, and leave
+    ``"victim"`` still tracked by the store and unreadable through it — a key the
+    store advertises and can never load, with no warning emitted. Containment
+    answers *"may I delete inside my own directory?"*, which is not the same
+    question as *"is this file mine to delete?"*, and only the second one
+    licenses an unlink.
+
+    **The test is on the name, and it consults nothing.** No registry, no
+    tracking state, no other key's files. That is deliberate: a rule phrased as
+    *"refuse if the target belongs to another **tracked** key"* would make a
+    destructive verb's refusal flip on a garbage collection — the shape round-2
+    finding CR2-04 condemned — and would leave the untracked orphan, the victim
+    most likely to exist, unprotected.
+
+    **The cost, published rather than left to be discovered.** Deciding from the
+    name means this refusal **over-refuses**: it declines a legitimate *adopted
+    entry* (D-17, STORE-03) whose payload happens to be named with a suffix the
+    store builds, even when that payload belongs to nobody. The worked pair,
+    which is the contract rather than an illustration:
+
+    * a planted in-cache ``<key>.dat`` aimed at a payload named ``payload.npy``
+      **refuses** — and it refuses **even when no key owns that payload**: no
+      key named ``payload`` is tracked, the file belongs to nobody, and the
+      refusal fires anyway, because the test reads the name and never the
+      registry;
+    * the same link aimed at a payload named ``payload.bin`` **still purges** —
+      it is followed and its payload is removed with it, exactly as before.
+
+    **The remedy for the refusing row is one rename**: give the payload an
+    extension the store does not build — ``.bin`` is the one this package's own
+    adopted-entry tests use — and purge again. The exception message says the
+    same thing, so an operator can act on it without reading this page.
+
+    **Why it errs this way.** A destructive verb fails **closed**. Declining a
+    purge costs a rename; following the wrong link costs another key's data, and
+    costs it silently. The refused shape is one no store-owned write route can
+    produce — each key builds its own ``<key>.dat`` name — so only an operator
+    can plant it, and an operator can un-plant it.
+
+    **Why it subclasses** :exc:`StorePurgeRefusedError` (D-15-G2a, applied a
+    second time rather than re-argued). Its defining property is the family's,
+    not its own: **nothing was touched.** It is raised before the first mutation,
+    so the key is still tracked, every artefact is byte-identical, and no
+    finalizer was disarmed. It is a *sibling reason*, not a *different
+    contract* — one ``except StorePurgeRefusedError`` still catches all three
+    refusals and still gets the same guarantee from each.
+    """
+
+
+class StorePurgeIncompleteError(OSError):
+    """Raised when some of a key's artefacts survived :meth:`DiskBackedStore.purge`.
+
+    The D-10 aggregate. POSIX gives no atomicity across N unlinks, so the
+    contract is stated rather than implied: every artefact is attempted, the
+    failures are collected, and one exception names the survivors.
+
+    :class:`OSError` rather than a bare :class:`ExceptionGroup`, deliberately.
+    A caller of a deleting operation already writes ``except OSError``; an
+    ``ExceptionGroup`` is not caught by it, so the migrating downstream's
+    existing handler would silently stop working at exactly the moment it was
+    needed. It is published for the same reason its sibling is — a name a
+    documented migration tells you to catch, but does not export, is reachable
+    only if you insist.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +351,28 @@ class Factory[T: LazyDiskCache](Protocol):
 type Validator[T] = Callable[[object], TypeGuard[T]]
 
 
+# ---------------------------------------------------------------------------
+# Phase-14 pop sentinel (D-25)
+# ---------------------------------------------------------------------------
+
+#: Distinguishes "no default was supplied" from ``default=None`` in
+#: :meth:`DiskBackedStore.pop`.
+#:
+#: ``None`` cannot serve as that marker, and this is a property of *this* store
+#: rather than a stylistic preference: the entry mapping is typed
+#: ``dict[str, Optional[T]]`` — ``None`` is what an *offloaded* entry looks like
+#: — so a caller writing ``store.pop(key, None)`` is supplying a perfectly
+#: legitimate default and must stay distinguishable from a caller writing
+#: ``store.pop(key)``. Encoding "missing" as ``None`` would silently convert the
+#: no-default form into the defaulting one and stop ``pop(key)`` raising, which
+#: is the half of D-25 that is deliberately *not* changing.
+#:
+#: Annotated ``Any`` so it can be the default of a parameter annotated
+#: ``T | D``. That is sound rather than a hole: the object is never returned and
+#: never compared as a value — it is only ever tested with ``is``.
+_POP_DEFAULT_MISSING: Final[Any] = object()
+
+
 class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     """Mapping of string keys to :class:`LazyDiskCache` entries with shared offload directory.
 
@@ -173,15 +398,26 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     mutation is unsupported (see PROJECT.md threading constraint).
     """
 
-    _DBNDArrayFileExt = ".npy"
-    _DBNDArrayMetaExt = ".meta.json"
-    _LegacyPickleExt = ".pkl"
+    # D-27 — THE ARTEFACT-SUFFIX ATTRIBUTES ARE GONE, AND THEIR ABSENCE IS THE
+    # MECHANISM. This class used to publish three suffix aliases here and invite
+    # subclasses to repoint them. Every codec suffix now comes from `paths`, so
+    # a subclass cannot introduce a second vocabulary and there is nothing left
+    # for a later round to re-diverge. The rationale in full — including what the
+    # class gives up and what the deletion does *not* buy — is in the rescan
+    # comment in `__init__`, beside the code the property protects.
 
     _store: dict[str, Optional[T]]
     _cache_dir: Path
     _enable_caching: bool
     _automatic_offloading: bool
     _purge_disk_on_gc: bool
+    #: The pid of the process that ran ``__init__`` (D-05). Read only by
+    #: :meth:`purge`; see the assignment for the four-route measurement.
+    _owner_pid: int
+    #: Weak references to the live entries each key has had (D-15-G1). Read
+    #: only through :meth:`_registered_entries`; see the assignment in
+    #: :meth:`__init__` for what it is for and what it must never become.
+    _entry_registry: dict[str, list[weakref.ref[T]]]
 
     _factory: Factory[T]
     _value_type: Optional[type[T] | tuple[type[T], ...]]
@@ -203,6 +439,58 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             self._cache_dir = Path(tempfile.mkdtemp())
         else:
             self._cache_dir = config.cache_path
+        # D-05 — the worker guard's whole mechanism, captured once here and
+        # compared per `purge()` call. Measured before it was chosen, on all
+        # four routes a store can travel:
+        #
+        #   pickle.loads(pickle.dumps(store))  the attribute rides
+        #                                      `__getstate__`'s `__dict__.copy()`
+        #                                      and `__setstate__`'s
+        #                                      `__dict__.update`, so a worker
+        #                                      copy sees the PARENT's pid and
+        #                                      differs from its own -> refuses
+        #   os.fork()                          no pickle at all; the child
+        #                                      inherits `__dict__` wholesale and
+        #                                      its own pid differs -> refuses
+        #   copy.copy(store) same process      same pid -> allowed, correctly
+        #   a store CONSTRUCTED in a worker    owns its own files, gets its own
+        #                                      pid here -> allowed, correctly
+        #
+        # No new pickle plumbing is needed for any of that, which is why the
+        # attribute is a plain assignment and not a `__getstate__` special case.
+        #
+        # REJECTED, and recorded so it is not re-proposed: a `__setstate__`-
+        # stamped "reconstructed copy" flag. Measured to false-positive on
+        # `copy.copy` (refusing a legitimate same-process copy, since that route
+        # also travels `__setstate__`) and to miss `fork` entirely, since no
+        # pickle is involved there. Carrying both signals is the "symmetric
+        # hooks that must stay in sync forever" shape Phase 14's D-03 removed by
+        # re-deriving rather than storing.
+        self._owner_pid = os.getpid()
+        # D-15-G1 — THE WEAK ENTRY REGISTRY, in three sentences.
+        #
+        # WHAT IT IS FOR: it answers the one question `purge` could not
+        # otherwise ask — *which live entries belong to this key when the
+        # mapping no longer holds them?* — because `del`, `pop` and
+        # `offload(pickle_container=True)` all leave `self._store.get(key)`
+        # returning nothing while a live entry, and its armed
+        # `weakref.finalize`, is still in the caller's hands.
+        # WHAT IT MUST NEVER BECOME: a strong reference, a resurrection
+        # mechanism, or state that outlives a pickle — it holds `weakref.ref`
+        # objects only, `__getstate__` drops it (a `weakref.ref` is not
+        # picklable) and `__setstate__` rebuilds it empty and re-registers what
+        # the restored mapping can see.
+        # WHICH ROUTES POPULATE IT: the four that install a LIVE entry into
+        # `_store` — `__setitem__`, `add_data_to_store`, `__getitem__`'s
+        # load-and-install, and `__setstate__`. The reopen rescan below installs
+        # `None`, not an entry, so it registers nothing and that is a fact
+        # rather than an omission.
+        #
+        # No drop route clears it. `__delitem__`, `pop`, `clear` and `offload`
+        # deliberately leave it alone, and THAT IS THE MECHANISM: it is exactly
+        # the entries those routes make unreachable through the mapping that
+        # `purge` still has to disarm.
+        self._entry_registry = {}
         self._automatic_offloading = config.automatic_offloading and config.cache_path is not None
         self._purge_disk_on_gc = config.purge_disk_on_gc
 
@@ -210,16 +498,206 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         self._value_type = value_type
         self._validator = validator
 
-        if self._cache_dir is not None:
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
+        # Unconditional: the former `if self._cache_dir is not None` guard was
+        # dead for exactly the reason recorded while its twin was deleted from
+        # `add_data_to_store` — `__init__` assigns a `Path` on *both* branches a
+        # few lines up, so no route can present a cache directory the
+        # interpreter reads as empty. Leaving one instance of the pattern
+        # standing weakened the argument the phase made when it removed the
+        # other (WR-09), so both are gone and the claim now holds in both places
+        # it was made.
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Scan for existing files. We track any key that has a Phase-2 codec
-            # pair (.npy + .meta.json); legacy .pkl files are intentionally NOT
-            # registered here so __getitem__ surfaces them as a cache miss with
-            # the D-05 INFO log via _load_entry.
-            available_files = [f for f in self._cache_dir.glob(f"*{self._DBNDArrayFileExt}") if f.is_file()]
-            for f in available_files:
-                self._store[f.stem] = None
+        # Scan for existing files. We track any key that has a Phase-2 codec
+        # pair (.npy + .meta.json); legacy .pkl files are intentionally NOT
+        # registered here so __getitem__ surfaces them as a cache miss with
+        # the D-05 INFO log via _load_entry.
+        available_files = [f for f in self._cache_dir.glob(f"*{paths.NPY_SUFFIX}") if f.is_file()]
+        for f in available_files:
+            # D-09 — WARN AND SKIP. This route reconstructs keys from
+            # filenames that are ALREADY on disk, so what it sees is
+            # pre-existing data, not a caller mistake. Raising here would
+            # turn "open an old cache directory" into a crash, which is
+            # precisely the outcome the policy split exists to prevent.
+            #
+            # This is DELIBERATELY the opposite of __setstate__'s policy
+            # (D-10, which raises), and the asymmetry is the substance of
+            # the split rather than an inconsistency: a rescan that raised
+            # would crash on legitimate legacy data, whereas an unpickle
+            # that merely warned would hand back a store silently missing
+            # entries — data loss disguised as success, inside a worker,
+            # which is the hardest class of failure to attribute.
+            #
+            # ACCEPTED COST, chosen with eyes open and recorded in D-09:
+            # the refused file stays on disk, untracked and unreachable,
+            # leaking the same way a nested key leaks today. The migration
+            # note's cache-directory scan snippet (which imports
+            # `is_valid_store_key`) is what makes that leak visible and
+            # actionable rather than silent. Do not "fix" this into a raise.
+            #
+            # D-22 (Plan 14-10) extends that accepted cost to ONE MORE CLASS of
+            # file rather than changing the policy. Two halves, and both are
+            # needed:
+            #
+            #   1. The key is derived by stripping the artefact suffix off the
+            #      file NAME, not with `Path.stem`. `Path('.npy').stem` is
+            #      '.npy' — a leading dot reads as a name, not an extension —
+            #      which is a legal-looking key the builders can never rebuild,
+            #      so the store used to advertise through `keys()` an entry it
+            #      could never load. The published scan snippet meanwhile
+            #      reported '' for that same byte on disk. One file, two keys,
+            #      neither of them the other: the doc/code drift the snippet's
+            #      design exists to prevent, moved from the RULE to the
+            #      DERIVATION.
+            #
+            #   2. The derived key must rebuild the file it came from, checked
+            #      through the shared builder. Half one alone makes the property
+            #      true by COINCIDENCE of the current suffix vocabulary; the
+            #      rebuild is what makes it an invariant. That is the same
+            #      filter-versus-invariant distinction this phase draws about
+            #      paths, applied to keys.
+            #
+            #      D-27 (Plan 14-16, CR-01) FINISHES that half BY DELETION, and
+            #      it supersedes D-26's answer to the same question. The
+            #      superseded position is stated here rather than quietly
+            #      dropped, because it was held on purpose and it reads as the
+            #      obvious fix to anyone who arrives at this code cold.
+            #
+            #      WHAT D-26 DID, AND WHY IT WAS NOT ENOUGH. The glob, the
+            #      derivation and (as of D-26) the rebuild all read the withdrawn
+            #      artefact-suffix instance attribute — the three names are
+            #      enumerated in `MIGRATION-v1.0.md` under BC-GSEG-006 and in the
+            #      regression test's `WITHDRAWN_SUFFIX_ATTRS`, and deliberately
+            #      NOT here, so that grepping this module for them returns
+            #      nothing. NOTHING ELSE IN THE CLASS READ THEM:
+            #      `_load_entry`, `_store_entry` and `offload` call
+            #      `paths.get_npy_path` / `paths.get_meta_path`, which read the
+            #      module constants. So the attribute governed DISCOVERY and
+            #      nothing governed RETRIEVAL. For the base class the two are the
+            #      same object, so nothing showed. For the subclass the change was
+            #      written for, they disagreed for every file: measured, such a
+            #      store adopted `['alpha']`, answered `'alpha' in s` with True,
+            #      emitted NO warning, and raised `KeyError` on every read. Round 3
+            #      traded "empty store plus a per-file warning" for "non-empty
+            #      store, no warning, every advertised key unreadable" — which is
+            #      the worse of the two by this module's own standard.
+            #
+            #      WHY DELETION RATHER THAN UNIFICATION. Unification — moving
+            #      retrieval and writing onto the instance vocabulary — is the
+            #      larger diff, and it leaves the divergence POSSIBLE: a fifth
+            #      seam added later reads whichever vocabulary its author reaches
+            #      for. Deleting the attribute makes the divergence
+            #      UNREPRESENTABLE. That is the same filter-versus-invariant
+            #      distinction this phase draws everywhere else, applied to the
+            #      vocabulary itself.
+            #
+            #      WHAT THE CLASS GIVES UP. A subclass can no longer choose its
+            #      artefact extension. That capability never worked: measured, a
+            #      suffix-repointing subclass WROTE THE BASE SUFFIX
+            #      (`beta.npy`, not `beta.sub.npy`), because the write path
+            #      ignored the attribute — so it could not produce an artefact its
+            #      own glob would find, and reopening its own directory adopted
+            #      nothing. The documentation paragraph calling the repoint a
+            #      supported configuration was therefore false in both directions,
+            #      and it is gone with the attribute.
+            #
+            #      IN-02 GOES WITH IT. `key = f.name[: -len(suffix)]` degenerates
+            #      to the empty key for EVERY file when the suffix is empty
+            #      (`-len('')` is `0`, so the slice is `f.name[:0]`), and the empty
+            #      suffix was reachable only through the published override point.
+            #      The slice length is now decided at import time, so the
+            #      degenerate case is unreachable and needs no separate guard.
+            #
+            #      WHAT THE DELETION DOES NOT BUY — READ THIS CLAUSE BEFORE
+            #      REPEATING THE CLAIM ANYWHERE. This leaves `DiskBackedStore` with
+            #      ONE **CODEC** ARTEFACT VOCABULARY: `.npy` / `.meta.json` /
+            #      `.pkl`. It does NOT leave the class, and certainly not the
+            #      package, with one artefact vocabulary full stop. The `.dat`
+            #      memmap suffix keeps its own, duplicated between
+            #      `paths.MEMMAP_SUFFIX` and `LazyDiskCache._MEMMAP_SUFFIX`, and
+            #      unifying those is STORE-08 / Phase 15 work (filed beside
+            #      D-14-01) that this round does not do. The unqualified claim
+            #      would be false at the moment it was written, which is the same
+            #      defect class as the documentation sentence deleted above.
+            #
+            # ORDERING, which is what keeps D-09's prohibition intact: check the
+            # cheap predicate FIRST — it cannot raise, and it is what makes the
+            # warning fire for the shapes D-09 already covered. Only then
+            # rebuild, and compute the rebuild inside a handler, because the
+            # shared builder RAISES for a refused key and can raise a
+            # containment error on an odd directory. A round-trip check that
+            # propagated would violate the very policy it is being added under.
+            key = f.name[: -len(paths.NPY_SUFFIX)]
+            skip_reason: Optional[str] = None
+            if not paths.is_valid_store_key(key):
+                skip_reason = "the key derived from its name is not a legal store key"
+            else:
+                try:
+                    # The PUBLISHED builder, not `paths._build`. D-26 reached for
+                    # the private seam only so it could pass a per-instance
+                    # suffix; with the attribute gone there is no second suffix to
+                    # pass, so the private seam buys nothing and this is the same
+                    # builder `_load_entry` and `_store_entry` already call.
+                    # Discovery and retrieval now cannot disagree.
+                    rebuilt = paths.get_npy_path(self._cache_dir, key)
+                except paths.StoreKeyError as exc:
+                    skip_reason = f"the shared path builder refuses the key derived from its name ({exc})"
+                else:
+                    if rebuilt != f:
+                        skip_reason = "the key derived from its name does not rebuild this file"
+
+            if skip_reason is not None:
+                # One call site, not two, with the reason interpolated: a
+                # downstream grepping its logs has one message shape to match.
+                #
+                # D-13 (Plan 14-12, CR-01) — EVERY UNTRUSTED COMPONENT OF THAT
+                # SHAPE IS QUOTED, and this is the message where the rule
+                # actually bites. It is the ONLY one in this subsystem whose
+                # input is genuinely untrusted: it renders names read off the
+                # cache directory, written by whoever can write into it, and a
+                # newline is a legal POSIX filename character. The derived key
+                # beside it was already `%r`; the filename was not, which is
+                # what makes the omission an oversight rather than a policy.
+                #
+                # The failure mode is not a garbled line but a WELL-FORMED
+                # FORGED RECORD: the reproduction planted a filename that made
+                # one `logger.warning` call emit three lines, the second reading
+                # "WARNING:all clear, 0 files skipped" while a file was in fact
+                # being skipped. That is worse here than anywhere else in the
+                # module precisely because D-09 chose warn-and-skip — the log is
+                # the ONLY signal this policy leaves the reader, and BC-GSEG-006
+                # tells downstreams to grep it.
+                #
+                # `str(self._cache_dir)` rather than the `Path`, so `%r` renders
+                # the path TEXT quoted rather than the `PosixPath(...)`
+                # constructor repr — the shape `_refuse` already established with
+                # `repr(str(cache_dir))`, so the two messages read alike.
+                #
+                # `skip_reason` is checked rather than assumed: two of its three
+                # values are module-owned literals, and the third interpolates a
+                # `StoreKeyError` built by `_refuse`, which already applies
+                # `repr` to both the key and the cache directory — so it is safe
+                # transitively rather than by construction. The regression test
+                # asserts the WHOLE emitted record is single-line, which covers
+                # that branch whatever produced it.
+                logger.warning(
+                    "Skipping cache file %r in cache directory %r: %s (derived key %r), so it "
+                    "cannot be tracked and the entry is unreachable. The file is left untouched; "
+                    "scan the directory with GSEGUtils.lazy_disk_cache.is_valid_store_key to find "
+                    "every affected entry.",
+                    f.name,
+                    str(self._cache_dir),
+                    skip_reason,
+                    key,
+                )
+                continue
+            # D-15-G1 — NOT a registration site, and the absence is a fact
+            # rather than an omission. This route installs `None`, not an
+            # entry: there is no object to weakly reference and no finalizer to
+            # disarm later. A store reopened over an existing directory
+            # therefore carries an EMPTY registry and reaches such a key
+            # through the untracked-orphan path in `purge` (D-02) instead.
+            self._store[key] = None
 
     def _check_T(self, value: object) -> T:
         if not isinstance(value, LazyDiskCache):
@@ -233,11 +711,309 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
         return cast(T, value)
 
-    def __getitem__(self, key: str) -> T:
-        """Return the entry for ``key``, loading it from disk on a cache miss.
+    def _register_entry(self, key: str, entry: T) -> None:
+        """Record a weak reference to ``entry`` under ``key`` (D-15-G1).
+
+        Called from every route that installs a **live** entry into ``_store``,
+        so that :meth:`purge` can reach the entry's finalizer after ``del``,
+        ``pop`` or ``offload`` have taken it back out again.
+
+        **This helper performs no filesystem syscall, and that is a constraint
+        rather than a coincidence.** :meth:`__setitem__` documents of itself
+        that its check "performs no ``stat``, no ``resolve`` and no other
+        filesystem syscall, so this route stays pure in-memory and is safe to
+        call inside a ``loky`` worker" (STORE-01 / SC-1, D-15-G2) — and it calls
+        this helper. A later edit that added a path computation here would
+        therefore break a documented guarantee of a *different* method, from a
+        function whose own docstring said nothing about it. The reconciliation
+        that genuinely needs to resolve paths lives in :meth:`purge`, where
+        resolving is already permitted and where D-15-G2 puts it.
+
+        **Presence is tested with** ``is``**, never** ``==``. Entries are
+        array-like, and :func:`register_lazy_disk_cache_class` is a published
+        extension point through which a downstream may register a subclass that
+        defines ``__eq__``; an equality test here would then be a broadcast
+        comparison and would raise on the truth value of an array. The same
+        reasoning is why the structure is a list of weak references rather than
+        a :class:`weakref.WeakSet`, which would additionally require its members
+        to be hashable — a subclass defining ``__eq__`` has ``__hash__`` set to
+        ``None``, so the failure would arrive at a consumer's insertion site
+        with a :exc:`TypeError` naming neither this file nor the cause.
+        """
+        live = [ref for ref in self._entry_registry.get(key, ()) if ref() is not None]
+        if not any(ref() is entry for ref in live):
+            live.append(weakref.ref(entry))
+        self._entry_registry[key] = live
+
+    def _registered_entries(self, key: str) -> list[T]:
+        """Return ``key``'s still-live registered entries, pruning dead references.
+
+        The **only** read path into :attr:`_entry_registry`; nothing else may
+        reach into it directly. Dead references are dropped on the way through
+        and a key whose list empties is removed outright, so the mapping does
+        not grow without bound on a long-lived store (STORE-05, axis 3).
+
+        The references stay **weak** throughout: dereferencing one here binds
+        the entry for the duration of the caller's loop and nothing longer, so
+        an entry the caller has dropped is still collected and its finalizer
+        still fires under the default ``purge_disk_on_gc=True``.
+        """
+        entries: list[T] = []
+        live: list[weakref.ref[T]] = []
+        for ref in self._entry_registry.get(key, ()):
+            entry = ref()
+            if entry is None:
+                continue
+            live.append(ref)
+            entries.append(entry)
+        if live:
+            self._entry_registry[key] = live
+        else:
+            self._entry_registry.pop(key, None)
+        return entries
+
+    def _reconcile_artefact_targets(
+        self, artefacts: tuple[Path, ...], registered: list[T]
+    ) -> tuple[dict[Path, Path], Optional[tuple[str, str, Path, Path, Optional[str]]]]:
+        """Resolve ``key``'s effective artefact set and report the first member it may not touch.
+
+        The reconcile step D-15-G2 puts in :meth:`purge`, factored out so the
+        method's body reads as *reconcile, refuse, detach, drop, unlink*. It
+        performs **reads only** — no mutation of any kind — which is what lets
+        :meth:`purge` call it above its first mutation and keep SC-2's
+        bit-for-bit no-op true for the refusal it may raise as a result.
+
+        What this method consults, in full, and **what each half is consulted
+        for** — the two are not the same, and describing them as one set is what
+        let review finding CR2-01 pass a review:
+
+        * for each of the six built paths **that exists**, its resolved target.
+          This half decides both **refusal** and **removal**: the link-target map
+          returned here is what :meth:`_unlink_artefacts` deletes alongside the
+          built paths themselves.
+        * for each **live, non-ephemeral registered entry**, its resolved
+          ``_cache_path``. This half decides **refusal only** — and, in
+          :meth:`purge`, the finalizer detach, by comparison against the set of
+          files that call actually removed (D-15-G6). It is **never** added to
+          anything that gets unlinked: an entry's own backing file is not an
+          artefact of the key being purged, and unlinking it would make
+          ``purge("beta")`` destroy the file of an entry still live under
+          ``"alpha"``.
+        * an **ephemeral** entry — one that allocated its own backing file
+          because no ``cache_path`` was supplied — is **not consulted at all**
+          (D-15-G5, entry 82). Its path is neither a refusal ground nor a removal
+          candidate, so a ``store[key] = DiskBackedNDArray(arr)`` entry does not
+          veto removal of the store's own artefacts.
+
+        **The second refusal ground: an aliased target** (D-15-G7). A built path
+        that is a symlink is followed to its resolved target, and that target is
+        refused — not followed — when its **name** carries a suffix the store
+        itself builds while not being one of this key's own six names. Deciding
+        it from the name is what keeps this method a pure read: the question goes
+        to ``paths._store_artefact_suffix``, which consults no registry, no
+        tracking state and no other key's files, so the answer cannot flip on a
+        garbage collection. Without it, one planted in-cache ``<key>.dat`` aimed
+        at another key's genuine payload made ``purge`` unlink that payload and
+        return cleanly (round-2 finding CR2-03). The refusal **over-refuses** a
+        legitimate adopted payload that happens to carry such a name, which is
+        the deliberate fail-closed side for a destructive verb and is published
+        as a worked pair on :exc:`StorePurgeAliasedArtefactError`.
+
+        A member this method may not touch is reported rather than raised on, so
+        the ``raise`` itself stays visible in :meth:`purge`'s own body above the
+        detach — the ordering SC-2 rests on should be readable in the method that
+        owns it, not delegated out of sight. Both grounds travel back through
+        **one** output carrying a discriminator, rather than through a second
+        return value: two outputs would let a future edit report one and forget
+        the other, and the single-refusal shape is what keeps this method
+        read-only on every path out of it.
+
+        Containment goes through :func:`paths._assert_write_contained`, which is
+        the existing expression of *"the resolved path is inside this base"*: it
+        delegates the parent chain to :func:`paths._assert_contained` and adds
+        final-component resolution when — and only when — the component is a
+        symlink. That is exactly the discrimination needed here, and it is the
+        **write-flavoured** check for the right reason: an unlink is a mutation,
+        so the adopted-entry leniency D-17 grants a *read* must not apply. No
+        third containment comparison is written in this module.
+
+        Parameters
+        ----------
+        artefacts : tuple[pathlib.Path, ...]
+            The six paths :meth:`purge` built from the key.
+        registered : list[T]
+            The key's live entries, already read out of the weak registry by the
+            caller so the registry is consulted exactly once per purge.
+
+        Returns
+        -------
+        tuple[dict[pathlib.Path, pathlib.Path], tuple or None]
+            The link-target map — populated **only** for artefacts that are
+            symlinks, so the ordinary shape adds no unlink call at all — and
+            either ``None`` or a five-field refusal report for the first member
+            this method may not touch. The fields, in order: the **discriminator**
+            (``"outside"`` for a member that resolves out of the cache directory,
+            ``"aliased"`` for a target carrying another key's artefact name), the
+            human-readable origin clause, the offending path, its resolved
+            target, and the colliding store artefact suffix — the last being
+            ``None`` for every ground but ``"aliased"``.
+        """
+        # The key's own six names, compared by NAME rather than by resolved path
+        # and that is the load-bearing detail. Resolving the built paths here
+        # would resolve `<key>.dat` THROUGH the planted link, putting the
+        # victim's own name into the set and making the refusal below
+        # unreachable in exactly the case it exists for.
+        built_names = {artefact.name for artefact in artefacts}
+        link_targets: dict[Path, Path] = {}
+        for artefact in artefacts:
+            if not artefact.exists():
+                # A path that is not there has no target to resolve and nothing
+                # outside to protect. A DANGLING `<key>.dat` link falls here and
+                # stays purgeable: unlinking the link itself is an in-cache
+                # operation whatever it points at, so refusing would be strictly
+                # unhelpful.
+                continue
+            try:
+                paths._assert_write_contained(self._cache_dir, artefact)
+            except paths.StoreContainmentError:
+                return link_targets, ("outside", "a built artefact path", artefact, artefact.resolve(), None)
+            if artefact.is_symlink():
+                target = artefact.resolve()
+                # D-15-G7 — THE ALIASED TARGET, REFUSED BEFORE IT IS EVER RECORDED.
+                # This is the one site the refusal must precede: `link_targets` is
+                # what `_unlink_artefacts` deletes, so a target that reaches the
+                # map is already condemned. Containment has passed by now, which
+                # is precisely why it is not enough — the target is inside the
+                # cache directory and still is not this key's to delete (CR2-03).
+                #
+                # LEXICAL, AND IT CONSULTS NOTHING. The vocabulary question goes to
+                # `paths`, which owns every name this package builds (D-14), so the
+                # store never grows a second copy of it. The rejected alternative —
+                # "is this the built path of some other TRACKED key?" — would make
+                # this refusal depend on whether a garbage collection had run
+                # (CR2-04's condemned shape) and would leave the untracked orphan,
+                # the likeliest victim, unprotected.
+                aliased_suffix = paths._store_artefact_suffix(target.name)
+                if aliased_suffix is not None and target.name not in built_names:
+                    return link_targets, ("aliased", "a built artefact path", artefact, target, aliased_suffix)
+                link_targets[artefact] = target
+
+        for entry in registered:
+            # D-15-G5 (entry 82) — AN EPHEMERAL ENTRY IS SKIPPED ENTIRELY, BEFORE THE
+            # CONTAINMENT TEST. Its backing file was allocated by `mkstemp`, lives
+            # under an OS-managed lifetime, and is not the store's to manage: there is
+            # nothing here to refuse on. The skip also costs no detach, because an
+            # allocated path can never be one of the six built names and so can never
+            # be in `purge`'s removal set. Without it, an ordinarily-constructed
+            # `store[key] = DiskBackedNDArray(arr)` made its key PERMANENTLY
+            # unpurgeable — the entry's `/tmp` path fails containment, `purge` refuses
+            # forever, and the store-owned `<key>.npy` + `<key>.meta.json` become
+            # reachable by no removal verb the package exposes (CR2-04).
+            #
+            # Read through the PUBLISHED property, and tolerate its absence the way
+            # the `_cache_path` read below already does: a downstream subclass
+            # registered through `register_lazy_disk_cache_class` may predate this
+            # attribute, and a removal verb must not crash on one. Absent means
+            # `False`, which is the pre-D-15-G5 behaviour for that entry.
+            if getattr(entry, "ephemeral", False):
+                continue
+            cache_path = getattr(entry, "_cache_path", None)
+            if cache_path is None:
+                continue
+            entry_path = Path(cache_path)
+            try:
+                paths._assert_write_contained(self._cache_dir, entry_path)
+            except paths.StoreContainmentError:
+                return link_targets, (
+                    "outside",
+                    "a live entry's own cache_path",
+                    entry_path,
+                    entry_path.resolve(),
+                    None,
+                )
+
+        return link_targets, None
+
+    def _unlink_artefacts(self, key: str, artefacts: tuple[Path, ...], link_targets: dict[Path, Path]) -> None:
+        """Unlink every artefact of ``key``, collecting failures and raising once (D-10).
+
+        The last step of :meth:`purge`, and the only one that is a *step* rather
+        than a decision: everything above it validates, refuses or reconciles.
+        It lives here rather than inline because ``purge``'s ordering argument is
+        the thing a reader has to follow, and a fourteen-line failure-collection
+        loop sitting under it competes for attention with the four guards that
+        actually carry the contract.
+
+        **Order: sidecars and ``.tmp`` names first, payloads last.** POSIX gives
+        no atomicity across N unlinks, so a partial failure must leave a state
+        the reader ALREADY treats as a cache miss — :meth:`_load_entry` requires
+        both halves of the codec pair — rather than a pair whose sidecar
+        disagrees with its array. The caller supplies ``artefacts`` already in
+        that order; this method preserves it and does not re-sort.
+
+        **Failures are collected, not aborted on**, so one unreadable artefact
+        does not strand the other five, and one aggregate names every survivor.
+
+        **Each built path's resolved target goes first** where there is one
+        (D-15-G2a). ``link_targets`` is populated only for artefacts that ARE
+        symlinks, so on the ordinary shape this issues no extra syscall at all:
+        for a regular file ``resolve()`` is mere absolutisation and a second
+        unlink would be a no-op, so it is not performed rather than performed
+        and wasted. That keeps behaviour identical on a host whose temp
+        directory is itself a symlink (macOS ``/var``, ETH ``/scratch``) and
+        keeps the per-artefact failure injection in ``test_store_purge.py``
+        aimed at exactly one call. Both unlinks share one ``try``, so a failure
+        on either is collected and named by the built path a caller knows.
 
         Raises
         ------
+        StorePurgeIncompleteError
+            If one or more artefacts could not be unlinked.
+        """
+        failures: list[OSError] = []
+        survivors: list[Path] = []
+        for artefact in artefacts:
+            try:
+                target = link_targets.get(artefact)
+                if target is not None:
+                    target.unlink(missing_ok=True)
+                artefact.unlink(missing_ok=True)
+            except OSError as exc:
+                failures.append(exc)
+                survivors.append(artefact)
+        if failures:
+            surviving = ", ".join(repr(str(p)) for p in survivors)
+            raise StorePurgeIncompleteError(
+                f"Purge of {key!r} was incomplete: {len(survivors)} of {len(artefacts)} artefacts "
+                f"could not be unlinked and survive on disk — {surviving}. The key has been "
+                "dropped from tracking and stays dropped: re-tracking it would point a live "
+                "entry at a half-deleted artefact set and would make purge non-idempotent "
+                "(D-10). Remove the listed files, or fix the permissions on the cache "
+                "directory, and call purge again — it is safe to repeat."
+            ) from failures[0]
+
+    def __getitem__(self, key: str) -> T:
+        """Return the entry for ``key``, loading it from disk on a cache miss.
+
+        The key is validated lexically **first**, before the in-memory lookup
+        and therefore before :meth:`_load_entry` can build or probe any path
+        (D-11). D-11 deliberately *extends* SC-1, which is written over the
+        routes that write into ``_store``: without a read-side check,
+        ``store['../victim']`` is caught only by the resolved containment deep
+        in the load path, so the invariant still holds but the caller gets a
+        differently-shaped error than the equivalent write would give, at the
+        cost of a ``resolve`` rather than a string comparison. It also closes a
+        read-side existence probe — :meth:`_load_entry`'s legacy-``.pkl``
+        ``exists()`` check would otherwise run on an unvalidated path.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01,
+            D-11). ``StoreKeyError`` subclasses :class:`ValueError`, **not**
+            :class:`KeyError` (D-12), so a caller wrapping a read in
+            ``except KeyError`` does not catch it. See :meth:`get`, which is
+            overridden precisely because of that.
         KeyError
             If no in-memory entry and no on-disk codec pair exist for ``key``,
             or if a legacy ``.pkl`` is present (refused without invoking
@@ -246,21 +1022,892 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
             If the on-disk JSON sidecar has an unsupported ``schema_version``
             or an unknown ``lazy_disk_cache_class``.
         """
+        paths.validate_store_key(key, self._cache_dir)
+
         obj = self._store.get(key, None)
         if obj is not None:
             return obj
 
         loaded_obj = self._load_entry(key)
         self._store[key] = loaded_obj
+        # D-15-G1 — registration route 3 of 4: the ADOPTION route. A key
+        # reloaded from disk installs a live entry with its own freshly-armed
+        # finalizer, so it is a registration site for exactly the same reason
+        # the two write routes are.
+        self._register_entry(key, loaded_obj)
         return loaded_obj
 
+    @overload
+    def get(self, key: str, /) -> Optional[T]: ...
+
+    @overload
+    def get[D](self, key: str, /, default: T | D) -> T | D: ...
+
+    def get[D](self, key: str, /, default: Optional[T | D] = None) -> Optional[T | D]:
+        """Return the entry for ``key``, or ``default`` if it is absent or illegal.
+
+        **This override is not redundant with the inherited method — deleting it
+        silently re-breaks the accessor.** :class:`DiskBackedStore` subclasses
+        :class:`~typing.MutableMapping`, whose :meth:`~typing.Mapping.get` is
+        ``try: return self[key] except KeyError: return default``. D-12 makes
+        :exc:`StoreKeyError` a :class:`ValueError` — deliberately *not* a
+        :class:`KeyError`, because :meth:`add_data_to_store` already raises
+        ``KeyError`` for "key exists". So the moment D-11 makes
+        :meth:`__getitem__` validate, the inherited ``get`` stops catching the
+        refusal and ``store.get('../victim', None)`` **raises** where it
+        previously returned ``None``. D-11 enumerated ``__contains__`` and
+        ``__delitem__`` explicitly and never reached ``.get()``, which inherits
+        the new behaviour without anyone deciding it should.
+
+        The catch tuple ``(KeyError, StoreKeyError)`` is therefore deliberate.
+        It preserves D-11's shape rather than weakening it: ``__contains__`` is
+        an explicit dict-backed membership test, so ``'../victim' in store`` is
+        ``False`` today and stays ``False``; with this override the **three**
+        interrogative read routes agree (membership is ``False``, ``get``
+        returns the default, and :meth:`pop` returns the default when one was
+        supplied) while the subscript still raises. No illegal key reaches
+        :meth:`_load_entry` by any route.
+
+        ↻ **CORRECTED by Plan 14-14 (D-25, § WR-01).** That sentence used to say
+        *two*, and the miscount was not a typo — it was the defect. ``pop``
+        reaches the subscript by exactly this route and stopped agreeing the
+        moment D-11 and D-12 landed, one accessor over from the change this
+        docstring argues for, with nobody deciding it. The surrounding argument
+        is unchanged because it was correct; only its enumeration was short. See
+        :meth:`pop`.
+
+        The rejected alternative was widening :meth:`__getitem__` to raise
+        :class:`KeyError` instead, so the inherited ``get`` would keep working.
+        That contradicts D-12's hard constraint — it would collide with
+        :meth:`add_data_to_store`'s existing "key exists" ``KeyError`` and make
+        the read route's error shape differ from every write route's, which is
+        the inconsistency D-11 exists to remove.
+
+        **The containment carve-out (WR-03), which is why the handler is
+        ordered rather than a single tuple.** D-12 makes
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreContainmentError` a *subclass* of
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, so the tuple above
+        caught it too — and swallowing it is exactly what the published
+        contract page tells consumers not to do:
+
+            *"A per-item handler that skips one bad key should not silently
+            swallow the second kind, so catch the base type only where you mean
+            'this key was bad'."*
+
+        This method **is** such a handler, and it is the library's own. A
+        refused key is evidence about *the caller's key*; a containment
+        violation is evidence about *the environment* — something planted a
+        symlink in the cache directory — and degrading that into a ``None``
+        turns an attack signal into an ordinary cache miss inside the caller's
+        loop. So the subclass is caught and re-raised **before** the broader
+        tuple. The order is the entire mechanism: a subclass caught after its
+        base is never reached, and inverting these two clauses silently
+        restores the swallow.
+
+        *Reachability, stated honestly rather than implied.* For a plain
+        :class:`str` key this carve-out cannot fire from here: once the lexical
+        layer has accepted the key it carries no separator, so the built path's
+        parent is lexically the cache directory and
+        :func:`~GSEGUtils.lazy_disk_cache.paths._assert_contained` is
+        unconditionally satisfied. It fires for a :class:`str` **subclass**
+        whose ``__str__`` disagrees with its characters, and it would fire on
+        any future lexical-layer regression — which is precisely when the
+        signal is most wanted, and precisely when a swallowed one would be
+        least recoverable.
+
+        Parameters
+        ----------
+        key : str
+            The store key to look up.
+        default : optional
+            Returned when ``key`` is absent from the store *or* refused by the
+            lexical rule. Defaults to ``None``, matching ``Mapping.get``.
+
+        Returns
+        -------
+        T or default
+            The entry, or ``default``.
+
+        Raises
+        ------
+        StoreContainmentError
+            If the path built for ``key`` would resolve outside the cache
+            directory. Deliberately **not** converted into ``default`` (WR-03).
+        """
+        try:
+            return self[key]
+        except paths.StoreContainmentError:
+            # Environment evidence, not a bad key — never swallowed by a read.
+            # Must stay ABOVE the tuple below: it is a subclass of one of its
+            # members, so a handler ordered the other way never reaches here.
+            raise
+        except (KeyError, paths.StoreKeyError):
+            return default
+
+    @overload
+    def pop(self, key: str, /) -> T: ...
+
+    @overload
+    def pop[D](self, key: str, /, default: T | D) -> T | D: ...
+
+    def pop[D](self, key: str, /, default: T | D = _POP_DEFAULT_MISSING) -> T | D:
+        """Remove ``key`` and return its entry, or ``default`` if it is absent or illegal.
+
+        **This override is not redundant with the inherited method, for the
+        identical reason :meth:`get` is not — and it is here because the phase
+        broke this accessor without noticing.**
+        :class:`~typing.MutableMapping`'s ``pop`` is
+        ``try: value = self[key] except KeyError: return default``, so the moment
+        D-11 made :meth:`__getitem__` validate and D-12 made the refusal a
+        :class:`ValueError` rather than a :class:`KeyError`, ``pop`` stopped
+        catching it: ``store.pop('../victim', None)`` began **raising** where it
+        previously returned ``None``. That is the same mechanism, one accessor
+        over from the one it was diagnosed on. D-25 restores it, so every
+        *defaulting or interrogative read* route agrees again — membership
+        answers ``False``, :meth:`get` returns its default, and this returns its
+        default.
+
+        **Only the defaulting form is restored.** ``pop(key)`` with no default
+        raises on a miss in every mapping, and for an illegal key it raises
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, consistent with the
+        subscript (D-11/D-12) and with :meth:`~typing.MutableMapping.setdefault`.
+        Widening the fix to the bare form would make ``pop`` the one mapping
+        route that answers a miss with ``None``.
+
+        **Why** :meth:`~typing.MutableMapping.setdefault` **is deliberately left
+        raising**, stated here rather than left to be inferred from which method
+        happens to be overridden. ``setdefault`` travels the same subscript and
+        would move the same way — and it is a **write** route: it *inserts*, and
+        refusing an illegal key at a write route is the whole point of this
+        phase. A ``setdefault('../victim', entry)`` that returned its default
+        would answer as though the key were fine and then be expected to have
+        stored something under it. So the two accessors diverge **on purpose**;
+        a reader who finds one overridden and the other not is looking at a
+        decision, not an oversight. It is pinned by
+        ``test_route_setdefault_still_raises_because_it_is_a_write_route``.
+
+        **The containment carve-out, and why the handler is ordered.** Exactly as
+        in :meth:`get`:
+        :exc:`~GSEGUtils.lazy_disk_cache.StoreContainmentError` is a *subclass*
+        of :exc:`~GSEGUtils.lazy_disk_cache.StoreKeyError`, so the broader catch
+        below would swallow it too — the library's own per-item handler doing
+        what the published contract page tells consumers not to do. A refused key
+        is evidence about *the caller's key*; a containment violation is evidence
+        about *the environment*, and degrading it into a default turns an attack
+        signal into an ordinary cache miss inside the caller's loop. The subclass
+        is therefore re-raised **before** the broader clause, and the order is
+        the entire mechanism: a subclass caught after its base is never reached,
+        so inverting these two clauses silently restores the swallow in a second
+        place.
+
+        **The delete is preserved, and it is what keeps this a** ``pop``. On
+        success the key is removed through :meth:`__delitem__` before the value
+        is returned. Losing that step would turn a write route into a read and
+        leave this method a second :meth:`get` under another name; it is asserted
+        directly rather than assumed.
+
+        ↻ **CORRECTED by Plan 14-17 (D-29, § WR-02).** The paragraph above was
+        true only of the *success* path, and the two things it left unsaid were
+        both wrong in shipped code.
+
+        **First, the delete now happens on the refusal path too, when there is
+        something to delete.** The handler below could not tell *no such key*
+        from *key exists, payload unreadable* — both arrive as ``KeyError`` —
+        so ``pop`` answered a present-but-unloadable key with the default and
+        **left it tracked**. ``dict.pop(k, d)`` removes ``k`` when ``k`` is
+        present; this now does too, on **both** forms, so they differ only in
+        what they return. A caller draining a store with ``pop(k, None)``
+        previously completed a removal loop having removed nothing and having
+        been told nothing.
+
+        **Second, and it is not changed here: the delete is in-memory only.**
+        It drops tracking and **leaves the on-disk artefacts** — the ``.npy``,
+        the ``.meta.json`` and the ``.dat`` — exactly where they are. So a
+        popped *offloaded* key is re-adopted by the very next subscript, since
+        :meth:`__getitem__` falls back to :meth:`_load_entry` for any untracked
+        key, and again by the reopen rescan. Between the ``pop`` and that
+        subscript, ``key not in store`` and ``store[key]`` both succeed, which
+        is a :class:`~typing.Mapping` contract violation and is a **known
+        limitation rather than a designed guarantee**. It is not fixed here on
+        purpose: **STORE-05** requires that *where the data lives*, *whether the
+        key is tracked* and *whether the file outlives the object* stay three
+        separate axes and be characterization-tested, and **STORE-04** owns the
+        atomic drop-key-and-delete-files primitive, with its no-partial-effect
+        and no-stale-finalizer requirements. Adding an unlink here would
+        collapse the first and half-implement the second. Pinned by
+        ``test_route_pop_of_an_offloaded_entry_leaves_its_artefacts_and_the_key_is_re_adopted``,
+        which says in its own docstring that it characterizes a limitation.
+
+        Parameters
+        ----------
+        key : str
+            The store key to remove. **Positional-only**, matching
+            ``dict.pop``; ``pop(key=..., default=...)`` raises
+            :class:`TypeError`. Recorded in ``BC-GSEG-006`` delta (3) (§ IN-03)
+            because it is a silent narrowing of ``MutableMapping``'s signature
+            on the route that entry otherwise documents as a *restoration*.
+        default : optional
+            Returned when ``key`` is absent from the store, refused by the
+            lexical rule, *or* present with a payload that cannot be loaded —
+            and in that last case the key is **removed** first. The word
+            *absent* used to stand alone here, and it is what made the no-op on
+            a present key read as correct (§ WR-02a). When **no** default is
+            supplied the refusal or the lookup error propagates instead — but
+            the removal still happens — and the two cases are told apart by
+            :data:`_POP_DEFAULT_MISSING`, because ``None`` is a legitimate
+            caller-supplied default for an ``Optional``-valued store.
+
+        Returns
+        -------
+        T or default
+            The removed entry, or ``default``.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key and no default
+            was supplied (STORE-01, D-11/D-12).
+        KeyError
+            If ``key`` is legal but absent and no default was supplied.
+        StoreContainmentError
+            If the path built for ``key`` would resolve outside the cache
+            directory. Deliberately **not** converted into ``default``, however
+            the call was made (WR-03). **Nothing is removed when this
+            propagates** — it is evidence about the environment, so the store is
+            left intact for the caller to inspect.
+        """
+        try:
+            value = self[key]
+        except paths.StoreContainmentError:
+            # Environment evidence, not a bad key — never swallowed by a read.
+            # Must stay ABOVE the tuple below: it is a subclass of one of its
+            # members, so a handler ordered the other way never reaches here.
+            #
+            # D-29 restructured the clause below and deliberately did NOT touch
+            # this one, in either of the two ways it could have gone wrong:
+            # it stays first, and it removes nothing. A containment violation
+            # says something planted a symlink in the cache directory; dropping
+            # the key on the way out would destroy the evidence.
+            raise
+        except (KeyError, paths.StoreKeyError):
+            # D-29 / § WR-02a. This is the only place that can tell *no such
+            # key* from *key exists, payload unreadable* — both arrive here as
+            # a `KeyError`, and collapsing them is what made `pop(k, default)`
+            # answer for a key it then left tracked. The membership test is
+            # the distinction, and it must come BEFORE the `raise`, so that the
+            # bare and defaulting forms differ only in what they return.
+            if key in self:
+                del self[key]
+            if default is _POP_DEFAULT_MISSING:
+                raise
+            return default
+        del self[key]
+        return value
+
+    def clear(self) -> None:
+        r"""Remove every tracked key, whether or not its payload can be loaded.
+
+        **Overridden because the inherited implementation returned successfully
+        with the store still populated** (D-29, § WR-04).
+        :class:`~typing.MutableMapping`'s ``clear`` is
+        ``while True: self.popitem()`` under ``except KeyError: pass``, and
+        ``popitem`` reaches the validating subscript — so the first tracked key
+        whose payload cannot be loaded raises :class:`KeyError`, the handler
+        reads that as *the mapping is empty*, and the loop stops. Measured over
+        four tracked keys with one unloadable:
+        ``['a', 'ghost', 'b', 'c']`` → ``['ghost', 'b', 'c']``, **raising
+        nothing**. One key of four dropped, and the caller told it succeeded.
+
+        **This removes tracking only** — the same in-memory scope :meth:`pop`
+        and :meth:`__delitem__` have. No artefact is unlinked, so every cleared
+        key that was offloaded is re-adopted by the reopen rescan. STORE-04 owns
+        the combined drop-and-delete; see :meth:`__delitem__`.
+
+        **Why the loop is over a snapshot of the keys and goes through**
+        :meth:`__delitem__`, rather than one bulk ``self._store.clear()``. The
+        inherited version's fault is not that it loops but that it *reads a
+        payload* on the way; :meth:`__delitem__` reads nothing, builds no path
+        and cannot raise for a key that is tracked, so looping through it has
+        the defect designed out rather than guarded against. Going through the
+        documented removal route also keeps the hook a subclass may already
+        rely on: a subclass whose ``__delitem__`` unlinks would silently stop
+        unlinking under a bulk clear, and would leak an artefact per key.
+
+        The trailing check is the prohibition made structural rather than
+        inferred: a route that cannot honour a key must raise, not drop part of
+        the work and report success.
+
+        **Why** :meth:`~typing.MutableMapping.popitem` **is deliberately left
+        inherited**, stated here rather than left to be inferred from which
+        method happens to be overridden — the same courtesy :meth:`pop`'s
+        docstring extends to ``setdefault``. Its two ``KeyError``\\ s are
+        **distinguishable**: on a non-empty store the payload error propagates
+        as ``KeyError(key)`` (measured ``args == ('ghost',)``), while on an
+        empty one ``next(iter(self))`` raises a bare ``KeyError`` (measured
+        ``args == ()``). The information this method needed was therefore always
+        present, and the round-3 defect was a handler that discarded it — **the
+        fault was in the handler, not in the signal**, and with ``clear`` no
+        longer routing through ``popitem`` nothing depends on it. Three
+        override shapes were considered and each is worse than leaving it:
+
+        * *Return a value anyway.* It would make ``popitem`` the one route that
+          answers with a value for a key whose payload cannot be produced.
+        * *Raise and remove, mirroring the bare* :meth:`pop`. For ``pop`` the
+          caller named the key, so removing it is what they asked for; for
+          ``popitem`` the store chose the key, and the caller cannot recover
+          which one from the exception — so it would destroy tracking for a key
+          they never identified.
+        * *Raise a different type.* It changes nothing about the ambiguity and
+          breaks the ``Mapping`` contract's documented ``KeyError`` on empty.
+
+        Pinned by
+        ``test_route_popitem_is_left_inherited_and_its_key_error_carries_the_key``,
+        so a reader who finds ``clear`` overridden and ``popitem`` not can tell
+        a decision from an oversight by grepping the suite.
+
+        Raises
+        ------
+        RuntimeError
+            If the store is still non-empty after every tracked key has been
+            passed to :meth:`__delitem__` — reachable only through a subclass
+            whose ``__delitem__`` does not remove. Raising is the point: the one
+            thing this method must never do is return short.
+        """
+        for key in list(self._store):
+            del self[key]
+        if self._store:
+            raise RuntimeError(
+                f"clear() ran to completion with {sorted(self._store)!r} still tracked; a "
+                "__delitem__ override that does not remove turns clear() back into the silently "
+                "short route D-29 fixed (WR-04)"
+            )
+
     def __setitem__(self, key: str, value: T) -> None:
-        """Validate ``value`` and store it under ``key`` in memory."""
+        """Validate ``key`` lexically and ``value`` structurally, then store in memory.
+
+        The key check is the **first** statement, ahead of ``_check_T`` and the
+        store write (STORE-01). SC-1 constrains *how* it is done: the check
+        performs no ``stat``, no ``resolve`` and no other filesystem syscall, so
+        this route stays pure in-memory and is safe to call inside a ``loky``
+        worker. Nothing may be added here that touches the filesystem — the
+        resolved-containment layer lands in the path builders instead, which is
+        the reason the two layers are separated at all.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01). The
+            key is not tracked when this raises.
+        TypeError
+            If ``value`` fails the value-type / validator checks.
+        """
+        paths.validate_store_key(key, self._cache_dir)
         self._store[key] = self._check_T(value)
+        # D-15-G1 — registration route 2 of 4, and it HONOURS the no-syscall
+        # property this method's own docstring publishes: `_register_entry`
+        # performs no filesystem access at all, by contract stated in its
+        # docstring rather than by luck. Naming the coupling here because it
+        # runs the wrong way round — a future edit that added a path
+        # computation inside `_register_entry` would break a documented
+        # guarantee of THIS method from inside a different function, and
+        # nothing in the type system would notice.
+        self._register_entry(key, value)
 
     def __delitem__(self, key: str) -> None:
-        """Remove ``key`` from the in-memory store."""
+        """Remove ``key`` from the in-memory store, **leaving its files on disk**.
+
+        This is the whole removal mechanism — :meth:`pop` and :meth:`clear` both
+        route through it — and the second half of that first sentence is the
+        half a reader actually needs. It drops tracking. It unlinks nothing: the
+        ``.npy``, the ``.meta.json`` and the ``.dat`` stay exactly where they
+        are.
+
+        **The consequence, stated rather than left to be discovered.** For an
+        *offloaded* entry the removal does not survive the next read:
+        :meth:`__getitem__` falls back to :meth:`_load_entry` for any untracked
+        key, so the very next ``store[key]`` re-adopts it, and so does the
+        reopen rescan. Between the two, ``key not in store`` and ``store[key]``
+        both succeed, which is a :class:`~typing.Mapping` contract violation.
+        Treat it as a **known limitation, not a designed guarantee** — the
+        earlier one-line docstring said only *"removes from the in-memory
+        store"*, which is true and answers about half of what a caller reading
+        it is trying to find out (D-29, § WR-02b).
+
+        **The durable counterpart is** :meth:`purge`, **and the pair is the
+        whole answer.** ``del store[key]`` drops tracking and unlinks nothing;
+        :meth:`purge` drops tracking **and** removes every artefact whose name
+        derives from the key, and it is the only removal that sticks — it
+        sticks *because* it unlinks, since with nothing on disk there is
+        nothing for the next read or the reopen rescan to re-adopt. Reach for
+        this method when you mean *stop tracking this key in this process*, and
+        for :meth:`purge` when you mean *this key and its data are gone*.
+
+        **The re-adoption above is measured, not described**, and the
+        measurement is a standing assertion rather than a transcript:
+        ``tests/test_store_lifecycle_axes.py::test_delitem_is_undone_by_the_very_next_read``
+        pins the read-back half and
+        ``tests/test_store_lifecycle_axes.py::test_a_fresh_store_re_adopts_a_deleted_key``
+        pins the fresh-store half. If either goes red, this docstring is what
+        became wrong.
+
+        **Do not "finish" this method** by adding an ``unlink`` here. **STORE-05**
+        is the reason: it requires that *where the data lives* (offload),
+        *whether the key is tracked* (this method) and *whether the file
+        outlives the object* (``purge_disk_on_gc``) remain three separate axes
+        and be characterization-tested. An unlink on this route would collapse
+        the first two into one — and the operation you would be reaching for
+        already exists, one method away, with the validate-before-mutate
+        ordering and the process guard that make it safe.
+
+        No key validation runs here, and that is D-11's decision rather than an
+        omission: removal builds no path, so there is nothing to contain, and a
+        key already tracked has been through a validating write route.
+        """
         del self._store[key]
+
+    def purge(self, key: str) -> None:
+        """Drop ``key`` from tracking **and** unlink every artefact derived from it.
+
+        The durable counterpart to :meth:`__delitem__`, and the half that method
+        deliberately does not do. Where ``del store[key]`` is *untrack
+        temporarily* — undone by the very next read, and by any fresh store over
+        the same directory — this is the removal that sticks, and it sticks
+        *because* it unlinks: with nothing on disk there is nothing to re-adopt.
+
+        **What it removes, by rule rather than by list.** Every artefact whose
+        name derives from ``key``: ``<key>.dat``, ``<key>.dat.tmp``,
+        ``<key>.npy``, ``<key>.npy.tmp``, ``<key>.meta.json`` and
+        ``<key>.meta.json.tmp`` (D-14). The ``.tmp`` names are in the set and
+        not an oversight — each persists from creation until its rename, and a
+        crash in between leaves one indefinitely, so a purge that skipped them
+        would leak the very files the atomicity work creates. The legacy
+        ``<key>.pkl`` is **not** removed (D-09); see the *Notes*.
+
+        **And one file whose name does NOT derive from the key** (D-15-G2a):
+        each built path is followed to its **resolved target**, so an adopted
+        ``<key>.dat`` — a symlink pointing at a real payload inside the cache
+        directory, the legitimate *adopted entry* D-17 and STORE-03 protect —
+        takes that payload with it. Without this the method removed the link,
+        left the key's exact bytes sitting in the directory under another name,
+        and reported a complete removal. The rule is still "everything belonging
+        to this key and nothing else"; what changed is that belonging is decided
+        by what a path *resolves to* rather than by what it is *named*.
+
+        **And one target it refuses to follow** (D-15-G7). A built path that is
+        a symlink whose resolved target is inside the cache directory but whose
+        **name** carries a suffix this store builds — and is not one of this
+        key's own six names — raises :exc:`StorePurgeAliasedArtefactError`
+        instead. Containment answers *"may I delete inside my own directory?"*;
+        it does not answer *"is this file mine to delete?"*, and one planted
+        in-cache ``<key>.dat`` aimed at another key's genuine payload used to
+        make this method destroy it and return cleanly. The rule costs a
+        deliberate **over-refusal** — an adopted payload merely *named* like a
+        store artefact is declined too — which is the fail-closed side for a
+        removal verb and is published as a worked pair on that exception.
+
+        **A known limit, stated rather than guarded.** Two keys whose
+        ``<key>.dat`` links point at the *same* payload are handled badly:
+        purging one removes the other's data. It is not reachable through any
+        store-owned write route — each key builds its own ``<key>.dat`` name —
+        only by an operator planting two links at one target. Guarding it would
+        mean scanning every other key's link target on every purge, which is a
+        cost paid by every caller for a shape none of them can produce. D-15-G7
+        narrows this limit without closing it: where the shared payload is
+        *named* like a store artefact the aliased refusal now fires for both
+        keys, and where it is not — the ordinary adopted-payload naming — the
+        limit stands exactly as described.
+
+        **The consequence, stated rather than left to be discovered.** An
+        explicit purge wins over ``purge_disk_on_gc=False`` (D-03). That flag
+        governs *implicit, GC-time* deletion; it is not a write-protect bit, and
+        reading it as one would make this method unusable in precisely the
+        configuration that accumulates the most artefacts. Every purge that
+        exercises the override logs an INFO record naming the key, so the
+        override is transparent rather than merely permitted.
+
+        **What a future reader must not "fix".** Five things:
+
+        1. The step below detaches the live entry's finalizer **directly**, and
+           must not be routed through :meth:`LazyDiskCache.disable_purge`, which
+           looks like the tidy call and is the wrong one — it also flips
+           ``_purge_disk_on_gc``, which the ``__getstate__``/``__setstate__``
+           loky dance snapshots and replays.
+        2. The key is dropped **before** the first unlink and stays dropped even
+           when an unlink fails. Re-tracking it on failure would point a live
+           entry at a half-deleted artefact set and would make this method
+           non-idempotent (D-10).
+        3. Untracked-but-on-disk counts as present. Do not tighten this to
+           "tracked only": that is exactly the state ``del store[key]`` leaves
+           behind, and exactly the state a caller most needs to clean up, so the
+           tighter reading would make the orphan case unpurgeable through the
+           one verb built to purge it (D-02).
+        4. A **member this method may not touch is refused, never reached**, and
+           the refusal deliberately does **not** detach that entry's finalizer.
+           Both halves are load-bearing and both look like omissions. Unlinking
+           the path wherever it points would make this a verb that deletes
+           arbitrary caller-supplied filesystem locations — the shape Phase 14's
+           containment layer exists to prevent. Detaching anyway, "for
+           consistency", would destroy the only cleanup that file has and
+           convert a GC-reclaimable file into a permanent leak created by the
+           removal verb itself. Do not add either. There are two such members,
+           and they are two *reasons* rather than two contracts: a **foreign
+           artefact**, outside the cache directory (D-15-G2), and an **aliased
+           target**, inside it but carrying another key's artefact name
+           (D-15-G7). Do not collapse the second into the first — containment
+           has already passed by the time it fires, which is exactly why it is
+           needed — and do not replace its name test with a scan of the other
+           tracked keys, which would make a destructive verb's refusal flip on a
+           garbage collection.
+        5. The detach is **gated on membership of the set this call removed**,
+           never on whether the file sits inside the cache directory (D-15-G6).
+           Read together with item 4 these are one policy and not two
+           coincidences: *a refusal detaches nothing, and a completion detaches
+           exactly what it removed.* Territory answers "may I delete it?" and
+           deletion answers "did I delete it?"; the two converge for the
+           single-key case, which is why the territory version looks like it
+           works. It fails on ``store["alpha"] = e; store["beta"] = e;
+           store.purge("beta")``, where ``alpha.dat`` is inside the cache
+           directory but belongs to a key still live and tracked. **The
+           comparison never becomes a removal**: an entry's own ``cache_path``
+           is compared against the set and is never added to it, because adding
+           it would make that same call destroy ``alpha.dat``.
+
+        Parameters
+        ----------
+        key : str
+            The store key to purge. Validated lexically before anything else
+            runs, and re-validated by every path builder.
+
+        Raises
+        ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01).
+            Raised before any path is built and before anything is touched.
+        StoreContainmentError
+            If a path built for ``key`` would resolve outside the cache
+            directory (STORE-02). A subclass of ``StoreKeyError``.
+        StorePurgeRefusedError
+            If the calling process is not the one that constructed this store
+            (D-05). Raised before any mutation, so a refused purge is a no-op.
+        StorePurgeForeignArtefactError
+            If any artefact of ``key`` — a built path's resolved target, or a
+            live registered entry's resolved ``cache_path`` — lies outside this
+            store's cache directory (D-15-G2). A **subclass** of
+            :exc:`StorePurgeRefusedError`, so one ``except`` on the parent
+            catches both refusals and gets the same guarantee from each: raised
+            before the first mutation, so nothing was touched and no finalizer
+            was disarmed.
+        StorePurgeAliasedArtefactError
+            If a built path of ``key`` is a symlink whose resolved target is
+            inside the cache directory but carries a store artefact name that is
+            not one of ``key``'s own six (D-15-G7). Also a **subclass** of
+            :exc:`StorePurgeRefusedError`, with the same guarantee, and it
+            deliberately over-refuses an adopted payload merely named like a
+            store artefact — the remedy, given in the message, is to rename that
+            payload to an extension this store does not build.
+        KeyError
+            If ``key`` is present neither in tracking nor on disk (D-02).
+        StorePurgeIncompleteError
+            If one or more artefacts could not be unlinked. The key is still
+            dropped, and the message names each survivor.
+
+        Notes
+        -----
+        **The atomicity boundary, stated as what it is.** "Atomic" here — in
+        STORE-04's text and in the ordering below — means *atomic with respect
+        to store-owned ordering and refusal*: validation precedes every
+        mutation, a refused purge touches nothing, and the key is dropped before
+        the first unlink so the tracking state never describes a half-deleted
+        artefact set. It does **not** mean globally atomic, and the two
+        negatives are worth saying rather than leaving to be inferred.
+        **The registry changes none of this** (D-15-G1). It is per-process state
+        that says nothing about another process, and it is consulted without any
+        lock of its own, so both negatives below stand exactly as they did —
+        adding it improved *which entries* the detach reaches, never *what
+        happens under concurrent mutation*.
+        ``DiskBackedStore`` holds no store-level lock, so this method is
+        **not safe against concurrent mutation of the same key** — a
+        ``__setitem__`` or :meth:`add_data_to_store` racing this call may write
+        an artefact between the existence check and the unlink, or have its
+        freshly-written artefact unlinked underneath it. It is likewise
+        **not globally atomic** across threads, or across processes sharing a
+        cache directory, where POSIX offers nothing that would make it so.
+
+        Do not read the one lock that *is* taken as more than it is: the live
+        entry's ``RLock`` is held for the finalizer detach alone, never across
+        the unlinks. Holding it across N unlinks would be a guarantee that
+        exists only when the key happens to be tracked — the D-02 orphan case
+        has no entry and therefore no lock — and a guarantee that sometimes
+        exists is a filter, not an invariant. Single-threaded per-store use is
+        the supported model, matching the project's threading constraint that a
+        ``PointCloudData`` is not multi-thread-mutable either.
+
+        **The process guard is on this method and nothing else** (D-08), and the
+        asymmetry is deliberate rather than an omission. Workers legitimately
+        *write*: ``__getstate__`` force-calls ``offload(pickle_container=True)``
+        before pickling, so a guard on the write routes would break the joblib
+        path outright. Deletion is the only operation where "wrong process" means
+        "destroying someone else's data", so it is the only one guarded. Do not
+        generalise the check to ``__setitem__`` or :meth:`add_data_to_store`.
+
+        **The legacy pickle is left alone** (D-09), with a consequence recorded
+        as deferred rather than hidden: a ``<key>.pkl`` is unreadable by design
+        and now unremovable by the only removal verb, so a pre-0.5 cache
+        directory keeps it and a listing after a "complete" purge still shows
+        the key's name.
+        """
+        # 1. LEXICAL REFUSAL FIRST. Nothing below may run for a key the STORE-01
+        #    rule rejects. SC-2 requires a refused purge to be a bit-for-bit
+        #    no-op, and the only way to guarantee that is to refuse before the
+        #    first filesystem call rather than after it — the reverse order is
+        #    what once made a missing-key error irreversibly destructive
+        #    downstream.
+        paths.validate_store_key(key, self._cache_dir)
+
+        # 2. EVERY PATH THROUGH THE BUILDERS (D-14) — never string concatenation,
+        #    never `with_suffix` on another builder's result, never a glob. Each
+        #    builder re-validates the key and verifies containment, so these six
+        #    names are the only six paths this method can ever unlink, and an
+        #    escaping key has already raised by the time the tuple exists.
+        #    `get_legacy_pickle_path` is deliberately NOT built (D-09).
+        sidecars_and_tmp = (
+            paths.get_meta_path(self._cache_dir, key),
+            paths.get_meta_tmp_path(self._cache_dir, key),
+            paths.get_npy_tmp_path(self._cache_dir, key),
+            paths.get_memmap_tmp_path(self._cache_dir, key),
+        )
+        payload = (
+            paths.get_npy_path(self._cache_dir, key),
+            paths.get_memmap_path(self._cache_dir, key),
+        )
+        artefacts = (*sidecars_and_tmp, *payload)
+
+        # 3. THE WORKER GUARD (D-05/D-06/D-08). Above the existence check and
+        #    above every mutation, because a purge issued from a forked or
+        #    unpickled copy would be deleting the PARENT process's data — so the
+        #    refusal has to happen before anything is touched, not after. It
+        #    raises rather than warn-and-no-op (D-06): in a tile worker this
+        #    fails the tile, which is the correct outcome for a call that would
+        #    otherwise have destroyed data belonging to another process.
+        #    THE ORDERING IS THE POINT: the comparison lives here, above the
+        #    existence check and above every mutation. Moving it below the unlink
+        #    loop still raises and still looks like a guard, and is what the
+        #    ordering mutation proof breaks on purpose — measured, with the
+        #    forked child exiting `_CHILD_PURGED` rather than `_CHILD_REFUSED`.
+        current_pid = os.getpid()
+        if current_pid != self._owner_pid:
+            raise StorePurgeRefusedError(
+                f"Refusing to purge {key!r}: this store was constructed by process "
+                f"{self._owner_pid} and purge was called from process {current_pid}. "
+                "A store's cache files belong to the process that constructed it, so a purge "
+                "issued here would delete another process's data — which is why deletion is "
+                "the one route guarded on process identity while the write routes are not "
+                "(D-08: workers legitimately write, and pickling a store force-offloads it, "
+                "so guarding writes would break the joblib path outright). Construct a store "
+                "in this process for files this process owns, or return the key to the "
+                "constructing process for cleanup."
+            )
+
+        # 4. EXISTENCE (D-02). The key counts as present when it is tracked OR
+        #    when any of the six derived artefacts is on disk. Untracked-but-on-
+        #    disk is exactly what `del store[key]` leaves behind, so the looser
+        #    reading is the one that makes the orphan case reachable. No `bool`
+        #    return: a silent no-op on a typo'd key would also make the removal
+        #    verbs disagree with `__delitem__` and `pop` about missing keys.
+        tracked = key in self._store
+        if not tracked and not any(p.exists() for p in artefacts):
+            raise KeyError(key)
+
+        # 5. ONLY NOW MUTATE — and the finalizer goes first. Without the detach,
+        #    a stale `weakref.finalize` survives this call and deletes whatever
+        #    occupies its recorded path when the entry is eventually collected,
+        #    eating a LATER entry created under the same key (the ABA hazard).
+        #    `disable_purge()` is the wrong call here even though it performs the
+        #    same detach: it also flips `_purge_disk_on_gc`, which the
+        #    `__getstate__`/`__setstate__` loky dance snapshots and replays, so
+        #    routing through it would silently rewrite an entry's durability
+        #    intent as a side effect of deleting a different key's files. The
+        #    entry lock is taken for the detach alone, because `enable_purge` and
+        #    `disable_purge` both take it and the detach must not race them.
+        #
+        #    D-15-G1 — WHY THE ENTRIES COME FROM THE REGISTRY AND NOT FROM THE
+        #    MAPPING, recorded because the line this replaces looked correct.
+        #    The detach used to be gated on `self._store.get(key)` returning a
+        #    live object, and that expression is the wrong question: it is
+        #    `None` for an OFFLOADED entry — the mapping is typed
+        #    `dict[str, Optional[T]]` — and absent for the untracked orphan
+        #    `del` and `pop` leave behind, which is precisely the state D-02
+        #    widened the EXISTENCE check above to reach. The existence check was
+        #    widened and the detach was not, so the two disagreed about what
+        #    "this key" means. Measured at 0956838, before this change: the
+        #    finalizer stayed ARMED on THREE of the four routes out of the
+        #    mapping (`offload`, `del`, `pop`), and a forced collection then ate
+        #    a LATER entry's `<key>.dat` — a deletion attributable to nothing in
+        #    the caller's code, arriving at an arbitrary GC (G-1 / SC-3). The
+        #    weak registry is what makes the two agree: no drop route clears it,
+        #    so this loop reaches every live entry the key has ever had, tracked
+        #    or not.
+        registered = self._registered_entries(key)
+
+        # 4b. RECONCILE, AND REFUSE RATHER THAN REACH (D-15-G2). Build the key's
+        #     effective artefact set — the resolved target of each built path
+        #     that exists, plus each live registered entry's resolved
+        #     `_cache_path` — and refuse outright if any member lies outside
+        #     this store's cache directory.
+        #
+        #     THE PLACEMENT IS THE PROPERTY, and it is the same ordering
+        #     argument the PID guard above makes, applied a second time rather
+        #     than a second coincidence: this check sits ABOVE THE FIRST
+        #     MUTATION, beside the lexical refusal and the worker guard. Moved
+        #     into the unlink loop it would still raise and would still look
+        #     like a guard, while having already detached a finalizer and
+        #     dropped a key — destroying the no-op that is the entire shared
+        #     contract of the `StorePurgeRefusedError` family (SC-2). Pinned by
+        #     `test_a_refused_purge_leaves_the_key_tracked_and_every_finalizer_armed`
+        #     and mutation-proven by moving this block below the detach.
+        #
+        #     WHY REFUSE RATHER THAN UNLINK WHEREVER IT POINTS: a removal verb
+        #     that deletes arbitrary caller-supplied filesystem locations is the
+        #     exact shape Phase 14's containment layer exists to prevent. And
+        #     the refusal must NOT detach — the finalizer it would disarm is the
+        #     only cleanup that foreign file has, so disarming it converts a
+        #     GC-reclaimable file into a permanent leak created by the removal
+        #     verb itself (G-2b, measured: purge returned CLEANLY and the file
+        #     was still on disk after a forced collection).
+        link_targets, refusal = self._reconcile_artefact_targets(artefacts, registered)
+        if refusal is not None:
+            ground, origin, offending, resolved_target, aliased_suffix = refusal
+            if ground == "aliased":
+                # D-15-G7 — THE ALIASED TARGET (round-2 finding CR2-03). Raised
+                # here, in `purge`'s own body and above the detach, for the same
+                # reason its sibling is: the SC-2 no-op is a property of WHERE the
+                # raise sits, and moving it out of sight is how it gets lost.
+                raise StorePurgeAliasedArtefactError(
+                    f"Refusing to purge {key!r}: {origin}, {str(offending)!r}, is a symlink resolving to "
+                    f"{str(resolved_target)!r}, which is inside this store's cache directory but carries the "
+                    f"store artefact suffix {aliased_suffix!r} and is not one of the names built for "
+                    f"{key!r}. That target is another key's store artefact, not this key's payload, so "
+                    "following it would make purge destroy data belonging to a key the caller never named "
+                    "— and it would do so silently, leaving that key tracked and unreadable. Nothing has "
+                    "been touched: the key is still tracked, every artefact is byte-identical and every "
+                    "finalizer is still armed. Two actions work. Either remove or repoint the offending "
+                    "link, if it was planted by mistake. Or, if this really is a legitimate adopted entry "
+                    "whose payload merely happens to be named like a store artefact, RENAME THE PAYLOAD TO "
+                    "AN EXTENSION THIS STORE DOES NOT BUILD — .bin is a safe choice, and is the one this "
+                    "package's own adopted-entry tests use — repoint the link at the renamed file, and "
+                    "purge again. The test is on the target's NAME and never on the store's registry, so "
+                    "the rename is sufficient however the payload is or is not tracked."
+                )
+            raise StorePurgeForeignArtefactError(
+                f"Refusing to purge {key!r}: {origin}, {str(offending)!r}, resolves to "
+                f"{str(resolved_target)!r}, which is outside this store's cache directory "
+                f"{str(self._cache_dir)!r}. Nothing has been touched — the key is still tracked, every "
+                "artefact is byte-identical and every finalizer is still armed — because unlinking a path "
+                "outside its own root would make purge a verb that deletes arbitrary filesystem locations, "
+                "which is the shape the containment layer exists to prevent. purge is not the tool for this "
+                "file, and what dropping the entry does buy is narrower than it sounds: garbage collection "
+                "reclaims the ENTRY'S OWN backing file and nothing else — the finalizer removes exactly that "
+                "one file by explicit design — so while this refusal stands the store-owned <key>.npy and "
+                f"<key>.meta.json written for {key!r} are reclaimed by no removal verb this package exposes. "
+                "The actionable fix is to repoint or remove the offending path and purge again: for a symlink "
+                "pointing out of the cache directory, remove or repoint the link; for an entry constructed "
+                "with an explicit cache_path outside the cache directory, give it a path inside this "
+                "directory or let the store derive one from the key."
+            )
+
+        # 5b. THE DISARM SET IS THE REMOVAL SET (D-15-G6, DESIGN-DECISIONS entry
+        #     83). Recorded at length because the line this replaces looked
+        #     correct, and because the plausible alternative is wrong in a way
+        #     that only shows on a shape no single-key test produces.
+        #
+        #     TERRITORY IS THE WRONG PREDICATE. "Disarm where purge has rights,
+        #     i.e. inside its own cache directory" answers *may I delete it?*.
+        #     The bookkeeping question is *did I delete it?*, and only the second
+        #     one licenses a detach. The two CONVERGE for the single-key case,
+        #     which is precisely why the territory version would look like it
+        #     worked. The counterexample that separates them:
+        #
+        #         store.add_data_to_store("alpha", arr)
+        #         store["beta"] = store["alpha"]     # one entry, two keys
+        #         store.purge("beta")
+        #
+        #     `alpha.dat` is INSIDE the cache directory, so territory says
+        #     disarm; it was never in `beta`'s artefact set, so deletion says
+        #     don't; and deletion is correct — `alpha` is still a live tracked
+        #     key whose entry would lose its only cleanup (CR2-02). The same
+        #     predicate closes CR2-01, where a contained entry path that is not
+        #     one of the six built names was disarmed by a call that removed it
+        #     from nowhere.
+        #
+        #     WHAT THE SET IS, NAMED PRECISELY. It is the RESOLVED REMOVAL SET
+        #     USED FOR THE FINALIZER COMPARISON — the resolved form of the six
+        #     built names, unioned with the link targets the reconcile already
+        #     resolved (not re-resolved here, so the no-TOCTOU property holds
+        #     verbatim). It is deliberately NOT "every path this call unlinks":
+        #     where a built name is a symlink, `_unlink_artefacts` deletes the
+        #     LINK PATH ITSELF as well as its resolved target, and the link path
+        #     is not a member of this set. That is harmless for the comparison —
+        #     an entry pointed at the link resolves to the same target and
+        #     matches anyway — but the two sets are not equal and no comment here
+        #     may claim they are.
+        #
+        #     ENTRY PATHS ARE COMPARED AGAINST THIS SET AND NEVER ADDED TO IT.
+        #     D-15-G6's *Where* clause says contained entry paths "reach the
+        #     removal set"; that means they reach the COMPARISON, where before
+        #     they reached only the containment refusal. Adding them to what gets
+        #     unlinked would make `purge("beta")` destroy `alpha.dat` above —
+        #     re-creating CR2-02 as data destruction rather than closing it.
+        #     `purge` unlinks nothing beyond the six built names and those
+        #     resolved targets.
+        #
+        #     The entry lock stays scoped to the detach alone (entry 80): the
+        #     membership test is a pure read and is done before it is taken.
+        removed = {p.resolve() for p in artefacts} | set(link_targets.values())
+        for entry in registered:
+            entry_cache_path = getattr(entry, "_cache_path", None)
+            if entry_cache_path is None or Path(entry_cache_path).resolve() not in removed:
+                # This call is not removing this file. Disarming its finalizer
+                # would destroy the only cleanup it has and manufacture the leak
+                # D-15-G2 refuses to create.
+                continue
+            if hasattr(entry, "_finalizer"):
+                with entry._lock:
+                    entry._finalizer.detach()
+
+        # 6. Drop the key. Before the unlinks, so the tracking state never
+        #    describes a half-deleted artefact set.
+        if tracked:
+            del self._store[key]
+        # The detached finalizers have nothing left to say, so the key's
+        # registry list goes with the key. A later entry inserted under the same
+        # key registers fresh, which is what keeps the detach scoped to the
+        # purged lifetime rather than applied to the key's registration
+        # generally.
+        self._entry_registry.pop(key, None)
+
+        # D-03 transparency. The flag is never read as a permission bit; it is
+        # read here only to record that the override happened. The key is passed
+        # as a lazy `%s` argument and never f-string-interpolated (CWE-117, the
+        # same fix Phase 14's CR-01 applied to the rescan WARNING).
+        if not self._purge_disk_on_gc:
+            logger.info(
+                "Explicit purge of key %s overrides purge_disk_on_gc=False: that flag governs "
+                "implicit GC-time deletion, not explicit removal, so this key's artefacts are "
+                "being unlinked (D-03).",
+                key,
+            )
+
+        # 7. UNLINK — sidecars and `.tmp` names first, payloads last, each built
+        #    path's resolved target ahead of the path itself where there is one.
+        #    The whole step is `_unlink_artefacts`, which owns the D-10
+        #    collect-and-raise-once contract and D-15-G2(a)'s resolved-target
+        #    rule; the ordering argument this method is built around lives in the
+        #    four guards above it, and inlining a failure-collection loop under
+        #    them competed with that for the reader's attention. It is also what
+        #    keeps `purge` inside the module's complexity budget after two new
+        #    branches landed in it, which is a real constraint rather than a
+        #    stylistic one.
+        self._unlink_artefacts(key, artefacts, link_targets)
 
     def __iter__(self) -> Iterator[str]:
         """Iterate over the keys currently tracked by the store."""
@@ -277,18 +1924,6 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
     def __repr__(self) -> str:
         """Return a debug representation listing the currently-tracked keys."""
         return f"<DiskBackedStore({list(self._store.keys())})>"
-
-    def _get_npy_path(self, feature: str) -> Path:
-        """Return the on-disk ``.npy`` path for ``feature``."""
-        return self._cache_dir / f"{feature}{self._DBNDArrayFileExt}"
-
-    def _get_meta_path(self, feature: str) -> Path:
-        """Return the on-disk JSON sidecar path for ``feature``."""
-        return self._cache_dir / f"{feature}{self._DBNDArrayMetaExt}"
-
-    def _get_legacy_pickle_path(self, feature: str) -> Path:
-        """Return the legacy pre-Phase-2 ``.pkl`` path for ``feature`` (refused on read)."""
-        return self._cache_dir / f"{feature}{self._LegacyPickleExt}"
 
     def add_data_to_store(
         self,
@@ -316,14 +1951,33 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
 
         Raises
         ------
+        StoreKeyError
+            If ``key`` is not a legal single-segment store key (STORE-01).
+            Validated **first**, before the "key exists" check and before any
+            path is built, and **unconditionally**. The former
+            ``if self._cache_dir`` guard on the cache-path construction below
+            was dead code (``Path`` defines no ``__bool__`` and ``__init__``
+            assigns a ``Path`` unconditionally) and has been removed, so no
+            route can present a cache directory the interpreter reads as empty
+            and thereby skip the builder.
+        StoreContainmentError
+            If the ``.npy`` path built for ``key`` would resolve outside the
+            cache directory (STORE-02). A subclass of ``StoreKeyError``.
         KeyError
             If ``key`` is already present in the store.
         """
+        paths.validate_store_key(key, self._cache_dir)
+
         if key in self:
             raise KeyError(f"Key {key} already exists in store.")
 
         enable_caching = enable_caching_override if enable_caching_override is not None else self._enable_caching
-        cache_path = self._get_npy_path(key) if self._cache_dir else None
+        # Unconditional: the former `if self._cache_dir else None` guard was
+        # dead (`Path` defines no `__bool__`, and `__init__` always assigns a
+        # `Path`), so it could only ever have looked like a route that skips
+        # the builder — and with the builder now carrying the containment
+        # check, a route that skips it is a route that skips validation.
+        cache_path = paths.get_npy_path(self._cache_dir, key)
         automatic_offloading = (
             automatic_offloading_override if automatic_offloading_override is not None else self._automatic_offloading
         )
@@ -340,15 +1994,130 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         )
 
         self._store[key] = self._check_T(new_container)
+        # D-15-G1 — one of the four registration routes. Immediately after the
+        # install, so a `del` / `pop` / `offload` between here and the next
+        # `purge` cannot make the entry's armed finalizer unreachable.
+        self._register_entry(key, new_container)
 
     @property
-    def store(self) -> dict[str, Optional[T]]:
-        """Return the internal mapping of keys to in-memory entries (``None`` if offloaded)."""
-        return self._store
+    def store(self) -> Mapping[str, Optional[T]]:
+        """Return a **read-only view** of the mapping of keys to in-memory entries.
+
+        The value is ``None`` where an entry is currently offloaded to disk.
+
+        Mutating the returned mapping raises :exc:`TypeError` — assignment,
+        ``del``, ``update``, ``pop``, ``clear`` and ``setdefault`` all refuse.
+        Reads are unaffected: membership, iteration, ``len`` and subscript-read
+        behave exactly as they did. The accessor is *narrowed*, not removed.
+
+        Notes
+        -----
+        D-19 — **the route is closed structurally rather than validated.**
+        Before this, the property handed out ``self._store`` itself, so
+        ``store.store['../victim'] = entry`` installed an illegal key with no
+        validation and ``keys()`` duly reported it. STORE-01's claim is written
+        over *every* route that writes into the internal mapping — "including
+        the routes that bypass the public insertion API" — so adding a fifth
+        validation site here would have left that claim an **enumeration** of
+        the routes someone remembered, rather than an **invariant**. A
+        read-only view removes the route instead of guarding it: there is no
+        write to validate, so there is no site to forget.
+
+        ↻ **CORRECTED by Plan 14-12 (CR-02).** The paragraph above is kept
+        exactly as it was written, and the *argument* in it is the thing worth
+        keeping — but the claim as made was **premature**. When it was written,
+        ``__getstate__`` was still a second route into the same mapping
+        through a public protocol method: its ``self.__dict__.copy()`` is
+        shallow, so the state it returned carried ``_store`` **itself**, and
+        ``copy.copy(store)`` handed back a store sharing the original's entry
+        mapping. What closed it is the detached snapshot in
+        ``__getstate__`` (Plan 14-12); the claim holds now, and did not
+        before. That is the argument proving itself: a claim quantified over
+        *every route* but maintained by **enumerating** routes degrades
+        silently at the next route somebody adds — which is precisely how this
+        one was missed for a round. Do not restore the unqualified wording.
+
+        ↻ **CORRECTED A THIRD TIME by Plan 14-18 (D-32, § WR-03).** Both
+        paragraphs above stay exactly as written — the D-19 argument because it
+        is right, and Plan 14-12's correction because it is the second of three
+        instances of one defect and the sequence is the point. What is withdrawn
+        is a single sentence, by annotation rather than by deletion: **"the claim
+        holds now" was false when it was written.** Round 3 detached the
+        snapshot on the way *out*; :meth:`__setstate__` still installed the
+        caller's mapping on the way *in*, because ``self.__dict__.update(state)``
+        binds the state's ``_store`` **object** onto the instance. Measured
+        against the round-3 tree: ``store._store is state["_store"]`` was
+        ``True``, and writing ``state["_store"]["../victim"] = None`` after the
+        call put ``'../victim'`` in ``keys()``.
+
+        **What this note claims, and what it deliberately does not.** The route
+        closed in round 4 is :meth:`__setstate__`'s installation of the incoming
+        mapping; the mechanism is a rebind to a fresh ``dict``, placed after the
+        instance-dict update and before the reload loop; the plan is 14-18. It
+        does **not** claim that every route is now covered. That claim has been
+        made three times and falsified three times, each time by a route the
+        asserting round had itself edited, and nothing in this module enforces
+        it — the quantifier is maintained by whoever last enumerated the routes,
+        which is the failure the paragraph above names one sentence before
+        committing it. Three routes, three mechanisms, three plans is what is
+        known: the ``store`` property (read-only view, 14-08), ``__getstate__``
+        (detached snapshot, 14-12), ``__setstate__`` (detaching rebind, 14-18).
+
+        *What would enforce the withdrawn claim, written down so the withdrawal
+        does not read as a shrug —* **and explicitly not built here, not
+        promised, and not part of this round.** *One mechanism rather than a
+        longer list: make* ``_store`` *unreachable as a plain attribute — a
+        private mapping type whose own* ``__setitem__`` *validates — so every
+        write route that exists, or is ever added, passes through one site by
+        construction and no route can be forgotten because none can bypass it.
+        Until something of that shape exists, a per-route enumeration is a
+        snapshot of one author's memory and should be written as one.*
+
+        *Measured basis, not assumed.* Across ``30_GSEGUtils``,
+        ``41_pchandler``, ``pc2img`` and ``iof3D`` there are **zero
+        write-through sites** for this property; every measured usage is a
+        read.
+
+        This is deliberately the **same evidence principle as D-01's sealed
+        ``cache_path`` setter**, and the pair should be read as one policy
+        rather than two unrelated removals: in both cases a public mutation
+        route was withdrawn outright, with no deprecation cycle, *because the
+        measurement said nobody was using it that way*. Where the evidence says
+        the opposite it is honoured the other way — D-15 gives the promoted
+        path builders a full deprecation cycle precisely because they have
+        measured live callers.
+
+        *The one known downstream cost*, named here so the next reader meets it
+        beside the change: pc2img's legacy alias property ``image_data``
+        (``disk_backed_image_store.py``) simply returns ``self.store`` but is
+        annotated ``-> dict[str, DiskBackedImageData | None]``. That annotation
+        becomes wrong under a :class:`~types.MappingProxyType` return and turns
+        pc2img's strict mypy red until it widens to
+        :class:`~collections.abc.Mapping`. It is a one-line fix downstream, and
+        it is a breaking change to a published API — carried in the migration
+        note as **BC-GSEG-007**.
+
+        Returns
+        -------
+        Mapping[str, Optional[T]]
+            A read-only proxy over the internal mapping. It is a *view*, not a
+            copy: entries offloaded or loaded after this call are visible
+            through it.
+        """
+        return MappingProxyType(self._store)
 
     @property
     def cache_dir(self) -> Path:
-        """Return the directory where offloaded codec pairs are written."""
+        """Return the directory where offloaded codec pairs are written.
+
+        The ``-> Path`` annotation is **enforced**, including across the one
+        route that could falsify it. :meth:`__init__` assigns a ``Path`` on both
+        of its branches, and since Plan 14-14 (§ WR-03) :meth:`__setstate__`
+        refuses any pickled containment base that is not one — absent and
+        ``None`` included — so this accessor cannot return a value the
+        annotation forbids. Before that it could, and a type checker had no way
+        to see it happen.
+        """
         return self._cache_dir
 
     def keys(self) -> list[str]:
@@ -396,11 +2165,16 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                 continue
             if pickle_container:
                 self._store_entry(key, obj)
+                # D-15-G1 — the entry registry is deliberately left alone here.
+                # This line is the one a reader will suspect, because it is what
+                # makes `self._store.get(key)` return `None` for a still-live
+                # entry; leaving the weak reference in place is exactly what
+                # lets `purge` still find and disarm that entry's finalizer.
                 self._store[key] = None
                 logger.debug(
                     "Wrote codec pair for %s under %s and cleared in-memory reference.",
                     key,
-                    self._get_npy_path(key),
+                    paths.get_npy_path(self._cache_dir, key),
                 )
                 del obj
             else:
@@ -415,10 +2189,10 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         treats as cache miss. Disk-full / permission errors are re-raised after
         best-effort ``.tmp`` cleanup.
         """
-        npy_final = self._get_npy_path(key)
-        json_final = self._get_meta_path(key)
-        npy_tmp = npy_final.with_suffix(".npy.tmp")
-        json_tmp = self._cache_dir / f"{key}.meta.json.tmp"
+        npy_final = paths.get_npy_path(self._cache_dir, key)
+        json_final = paths.get_meta_path(self._cache_dir, key)
+        npy_tmp = paths.get_npy_tmp_path(self._cache_dir, key)
+        json_tmp = paths.get_meta_tmp_path(self._cache_dir, key)
         try:
             # _describe_buffer returns (shape, dtype, in_memory_array). We
             # serialise the live buffer; np.save writes the ndarray with its
@@ -480,9 +2254,9 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         non-``None`` ``cache_path`` so ``enable_purge`` can register) holds
         either way.
         """
-        npy_path = self._get_npy_path(key)
-        json_path = self._get_meta_path(key)
-        legacy_pkl = self._get_legacy_pickle_path(key)
+        npy_path = paths.get_npy_path(self._cache_dir, key)
+        json_path = paths.get_meta_path(self._cache_dir, key)
+        legacy_pkl = paths.get_legacy_pickle_path(self._cache_dir, key)
         if legacy_pkl.exists() and not (npy_path.exists() and json_path.exists()):
             logger.info(
                 "Legacy pre-Phase-2 cache file at %s is not loadable under the new "
@@ -520,10 +2294,53 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         The store itself is still pickled here (we serialise our own metadata
         like ``_cache_dir`` / ``_store`` keys); only the per-entry payloads have
         been moved to the codec-pair on disk by the time we get here.
+
+        The returned state is a **snapshot, detached at the mapping level**: its
+        ``_store`` is a fresh :class:`dict`, not this instance's own mapping, so
+        writing into it cannot reach the live store. It is **not** a deep copy —
+        the entry *values* are the same objects — and nothing more should be
+        read into the detachment than that.
         """
         if self._enable_caching:
             self.offload(pickle_container=True)
         state = self.__dict__.copy()
+        # D-19 completed (Plan 14-12, CR-02). `__dict__.copy()` is SHALLOW, so
+        # without this line `state["_store"] is self._store` and there are two
+        # consequences — a reader who sees only the pickle one will eventually
+        # "simplify" this away:
+        #
+        #   (a) the returned state is a LIVE WRITE ROUTE into `_store` through a
+        #       public protocol method, with no key validation on it. That is
+        #       the same shape as the `store` property CR-02 closed in round 1,
+        #       one accessor over, and it is what made D-19's structural-closure
+        #       claim false as written.
+        #   (b) `copy.copy(store)` — which travels `__reduce_ex__` →
+        #       `__getstate__` → `__setstate__` — handed back a store SHARING
+        #       the original's entry mapping. Insert into the copy and the
+        #       original grows the key; `del` from it and the original loses
+        #       one. That half has nothing to do with keys: it is a plain
+        #       data-integrity defect on a class explicitly designed to travel
+        #       through joblib/loky.
+        #
+        # It must stay AFTER the conditional offload above, or the copied values
+        # would be the pre-offload ones.
+        state["_store"] = dict(self._store)
+        # D-15-G1, in the same register as the D-19 note above: the weak entry
+        # registry does not cross this boundary, and it is REMOVED here rather
+        # than tolerated. A `weakref.ref` is not picklable, so leaving it in the
+        # state makes `pickle.dumps(store)` raise
+        # `TypeError: cannot pickle 'weakref.ReferenceType' object` — and the
+        # joblib path force-offloads and pickles on EVERY dispatch, so that
+        # would not be a rare failure but the common one.
+        #
+        # It rides `self.__dict__.copy()` unless this line exists, which is the
+        # same shallow-copy footgun the line above it corrects, one attribute
+        # over. `__setstate__` rebuilds the registry empty and re-registers
+        # every live entry the restored mapping can see; what it deliberately
+        # does NOT reconstruct is a registration for an entry the caller holds
+        # but the mapping does not, because such an entry is simply not visible
+        # across a pickle and claiming otherwise would be a lie in state.
+        state.pop("_entry_registry", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -532,8 +2349,235 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
         Per D-06 (__setstate__ symmetry), the per-entry load path routes through
         :meth:`_load_entry`, inheriting the legacy-refusal (D-05) and
         cache_path-propagation (W-5) behaviour automatically.
+
+        Raises
+        ------
+        StoreKeyError
+            If the pickled state carries a key the STORE-01 lexical rule
+            refuses (D-10), **or** if its ``_cache_dir`` is not a
+            :class:`~pathlib.Path` — absent and ``None`` included, since
+            :meth:`__init__` can produce neither (D-21 as tightened by § WR-03).
+
+        Notes
+        -----
+        D-10 — RAISE. Unpickling is a trust boundary, and this module already
+        treats it as one: :func:`_resolve_lazy_disk_cache_class` resolves
+        sidecar class names through an explicit allow-list with no
+        ``importlib`` fallback for exactly this reason. A *post-fix* pickle
+        cannot legitimately carry an illegal key — so an illegal key arriving
+        here means a legacy or a tampered pickle.
+
+        **Where that guarantee actually comes from, stated precisely because an
+        earlier version of this note got it wrong.** It does *not* come from
+        :meth:`__getstate__`: that method offloads when caching is enabled and
+        then copies the instance dictionary verbatim
+        (``state = self.__dict__.copy()``), validating **no keys of any kind**.
+        Reading it as a validating snapshot was a false premise, and
+        verification falsified it. The guarantee comes instead from the write
+        routes plus the read-only view: every route that installs a key into
+        ``_store`` validates it — :meth:`__setitem__`, :meth:`add_data_to_store`
+        and this method — the ``__init__`` rescan refuses to track one (D-09),
+        and after D-19 the mapping is no longer handed out mutably through the
+        public :attr:`store` accessor. So an illegal key cannot enter ``_store``
+        after construction, and therefore cannot be in a snapshot this codebase
+        produced. The conclusion below is unchanged; only its stated reason was
+        wrong.
+
+        ↻ **CORRECTED AGAIN by Plan 14-12 (CR-02).** The correction above is
+        Plan 14-08's, and it stays: **a note that has been wrong twice, with
+        both corrections visible, is a better warning to the next reader than a
+        note that reads as though it had always been right.** Do not collapse
+        these two into one tidy paragraph.
+
+        What 14-08's replacement text got wrong is its *conclusion*. Having
+        correctly quoted ``state = self.__dict__.copy()`` as validating no keys,
+        it concluded that an illegal key "cannot be in a snapshot this codebase
+        produced" — which did **not** follow from the quoted line, because that
+        line **aliased** the mapping rather than copying it. The snapshot was
+        the live ``_store``, so anyone holding a state object could write an
+        illegal key straight into the store the snapshot came from, and the
+        enumeration of write routes above was therefore incomplete at the moment
+        it was written. The conclusion follows **now**: Plan 14-12 makes
+        :meth:`__getstate__` return a detached ``dict``, so the snapshot is a
+        copy, and every route that installs a key into ``_store`` validates it.
+
+        ↻ **CORRECTED A THIRD TIME by Plan 14-18 (D-32, § WR-03).** Both
+        corrections above stay, per the instruction two paragraphs up — and
+        **this makes three, which is now the most useful thing this block
+        says.** The sentence withdrawn here is *"the conclusion follows now"*:
+        it did not follow, and the counterexample was again one line away, this
+        time inside this very method. ``self.__dict__.update(state)`` installs
+        the caller's ``_store`` **object**, so the restored store shared its
+        entry mapping with whoever held the state, and a write into that state
+        *after* the call installed a key into a store that had validated every
+        key it was shown. Measured on the round-3 tree: identity ``True``, and
+        ``keys()`` gaining ``'../victim'`` from a post-call write.
+
+        *Reachability, stated rather than implied, because a deserialization
+        defect reads as worse than it is unless its shape is named.*
+        :func:`pickle.loads` and :func:`copy.copy` both discard the state
+        mapping once restoration is done, so reaching this needs an explicit
+        ``__setstate__`` call by a caller who retains the state — the shape this
+        module's own tests use. That makes it narrower than the ``store``
+        property's route, and it was still a live, unvalidated write route into
+        ``_store`` on a trust boundary: precisely the thing the two paragraphs
+        above assert does not exist.
+
+        **The progression, which is the part worth carrying forward.** This is
+        one defect on three surfaces of one protocol pair. The ``store``
+        property handed out the live mapping (round 1, closed by D-19's
+        read-only view); ``__getstate__`` handed out the same mapping through a
+        shallow snapshot (round 2, closed by Plan 14-12's detached ``dict``);
+        ``__setstate__`` installed the caller's mapping on the way in (round 3,
+        closed by Plan 14-18's rebind below). Each was found by the round after
+        the one that declared the set complete.
+
+        **So this paragraph names a route and a mechanism and stops there.** The
+        route is this method's installation of the incoming mapping; the
+        mechanism is the rebind to a fresh ``dict``, placed after the
+        instance-dict update and ahead of the reload loop; the plan is 14-18. No
+        every-route quantifier is restored, because nothing enforces one — see
+        the matching note on the :attr:`store` property for what would, and for
+        why it is not built here.
+
+        This is DELIBERATELY the opposite of the ``__init__`` rescan's policy
+        (D-09, which warns and skips). Warning-and-skipping here would return a
+        store missing entries with no error: data loss disguised as success,
+        inside a worker. The rescan's input is pre-existing data on disk, so
+        crashing on it would be wrong; this route's input is a serialized
+        snapshot that should never have been illegal, so failing loudly is the
+        only way the caller learns anything.
+
+        The check runs **before** ``__dict__.update`` rather than beside the
+        per-entry reload below, because ``__dict__.update`` is itself a write
+        into ``_store`` — it installs every pickled key wholesale — and the
+        reload loop is gated on ``_enable_caching``. Validating first is the
+        only placement that covers all keys on every configuration and leaves
+        no partially-updated object behind.
+
+        **D-21 — the containment base is state too, and it was the one thing
+        crossing this boundary unchecked (WR-06).** Every incoming key used to be
+        validated against ``_cache_dir``, which was then installed *verbatim from
+        the same untrusted state*. ``_cache_dir`` is the authorization boundary
+        every builder resolves against, so validating keys against a base the
+        state itself chose does not constrain where bytes land: every key passes,
+        and every path lands wherever the base points. The type guard below
+        precedes the per-key loop for a concrete reason beyond tidiness — the
+        refusal message for a bad key interpolates the incoming base, so a
+        malformed base would otherwise be rendered into a message before anything
+        noticed it was malformed.
+
+        ↻ **TIGHTENED by Plan 14-14 (§ WR-03).** As first shipped the guard
+        carved out an absent or explicitly-``None`` base, to protect the
+        no-cache-path configuration. That configuration produces a
+        ``mkdtemp`` :class:`~pathlib.Path`, never ``None``, so the carve-out
+        protected nothing while admitting a state :meth:`__init__` cannot
+        produce — after which the store accepted keys and died on the first path
+        build with a bare :exc:`TypeError`. The test is now a single positive
+        one: the base must **be** a :class:`~pathlib.Path`.
+
+        **What that guard buys, and what it does not.** It catches *malformed or
+        legacy state* — which is the case D-10 actually names. It does **not**
+        defend against a hostile pickle: unpickling untrusted data is
+        arbitrary-code execution regardless of any validation this method
+        performs, so no check here is a security boundary against an attacker who
+        already controls the byte stream. Stated plainly rather than left implied,
+        because a guard on a deserialization route reads as a security boundary
+        unless it says otherwise, and the trust-boundary framing above would
+        otherwise be overclaimed.
+
+        **No ``expected_cache_dir`` parameter was added.** The review proposed an
+        opt-in check against a caller-supplied expected directory; it was
+        considered and declined, because the user did not want the extra public
+        surface — and a published parameter in a package on production PyPI
+        cannot be withdrawn without a break. The refusal is part of D-21 rather
+        than an omission; do not re-propose it as one.
         """
+        incoming_store: dict[str, Any] = state.get("_store", {})
+        incoming_cache_dir: Optional[Path] = state.get("_cache_dir")
+        # D-21. An absent base and an explicitly-absent base both stay legal: a
+        # store with no configured cache path is a supported configuration and
+        # this guard must not break it. Only a *present, non-Path* base is
+        # refused.
+        #
+        # ↻ CORRECTED by Plan 14-14 (§ WR-03). The sentence above is kept rather
+        # than deleted, because half of it is true and the half that is not is
+        # the instructive part. A store with no configured cache path IS a
+        # supported configuration — and it does NOT produce either of the shapes
+        # the carve-out admitted: `__init__` assigns a `Path` on BOTH of its
+        # branches, falling back to `Path(tempfile.mkdtemp())` when
+        # `config.cache_path` is `None`. So the carve-out protected no real
+        # configuration while admitting a state the constructor cannot produce.
+        #
+        # What that bought, measured rather than argued: the store accepted keys,
+        # tracked them, and then died at the first path build with
+        # `TypeError: unsupported operand type(s) for /: 'NoneType' and 'str'` —
+        # the untyped-crash class this phase replaced with typed refusals
+        # everywhere else — while `cache_dir` returned `None` under a `-> Path`
+        # annotation no type checker can see through a pickle.
+        #
+        # The test is therefore a single POSITIVE type test: absent, `None` and
+        # every other non-`Path` value are refused alike, because `__init__` can
+        # produce none of them. The configuration that genuinely needs protecting
+        # is the no-cache-path store, which carries a `Path` like any other and
+        # is covered by
+        # `test_route_setstate_ordinary_round_trips_still_work_under_every_configuration`
+        # and by the closing assertion of
+        # `test_route_setstate_refuses_a_cache_dir_shape_init_cannot_produce`.
+        #
+        # The guard stays AHEAD of the per-key loop, and that placement is a
+        # requirement rather than tidiness: the refusal message for a bad key
+        # interpolates the incoming base, so a guard below the loop would render
+        # a malformed base into a message before anything noticed it was
+        # malformed. Pinned by `test_route_setstate_reports_the_base_before_the_keys`.
+        if not isinstance(incoming_cache_dir, Path):
+            raise paths.StoreKeyError(
+                f"Invalid pickled cache directory {incoming_cache_dir!r}: the restored containment "
+                f"base must be a pathlib.Path, but got {type(incoming_cache_dir).__name__}. "
+                "__init__ assigns a Path on both of its branches — a configured cache_path, or a "
+                "tempfile.mkdtemp() fallback — so no store this codebase constructs can present "
+                "this shape. That makes it malformed or legacy pickled state; nothing has been "
+                "restored."
+            )
+        for incoming_key in incoming_store:
+            paths.validate_store_key(incoming_key, incoming_cache_dir)
+
         self.__dict__.update(state)
+        # D-32 (Plan 14-18, § WR-03). Detach on the way IN as well as out — the
+        # mirror of the Plan 14-12 fix in `__getstate__`, and the same defect on
+        # the other side of the same protocol pair. `__dict__.update` installs
+        # the caller's mapping OBJECT, so without this rebind the restored store
+        # SHARES `_store` with whoever holds `state`: a write into the retained
+        # state after this call lands in a store that validated every key it was
+        # shown. Measured before the fix: `self._store is state["_store"]` was
+        # `True`, and `state["_store"]["../victim"] = None` afterwards put
+        # `'../victim'` in `keys()`.
+        #
+        # It must stay AHEAD of the reload loop below, which writes into the
+        # mapping and must write into the detached one.
+        #
+        # Do NOT add a validation pass here. The per-key loop above already ran
+        # against this exact mapping, and a second validation site is precisely
+        # the enumeration approach D-19 argues against — the rebind closes the
+        # route STRUCTURALLY, which is the whole point of doing it this way
+        # rather than re-checking. Pinned by
+        # `test_route_setstate_detaches_the_incoming_entry_mapping`.
+        #
+        # The source is `self._store` — which `__dict__.update` has just bound to
+        # the incoming mapping — and NOT `incoming_store`, though the two are the
+        # same object on every well-formed state. They differ on one input: a
+        # state carrying no `_store` key at all, where `incoming_store` is the
+        # `{}` default and rebinding from it would silently EMPTY a store this
+        # method was never asked to change. This line does one thing, detach, and
+        # `dict(self._store)` is not the no-op it looks like: it is the copy that
+        # breaks the alias `__dict__.update` just created.
+        self._store = dict(self._store)
+        # D-15-G1 — rebuild the weak registry EMPTY. `__getstate__` removed it
+        # (a `weakref.ref` is not picklable), so `__dict__.update` above has not
+        # restored it and the attribute would otherwise be absent on every
+        # unpickled or copied store. Assigned unconditionally rather than
+        # defensively, so a hand-built state carrying one cannot install it.
+        self._entry_registry = {}
         if self._enable_caching:
             for key in list(self.keys()):
                 if self._store[key] is not None:
@@ -547,3 +2591,20 @@ class DiskBackedStore[T: LazyDiskCache](MutableMapping[str, T]):
                         self._cache_dir,
                     )
                     continue
+
+        # D-15-G1 — RE-REGISTER, and this is load-bearing rather than
+        # housekeeping. `copy.copy(store)` travels
+        # `__reduce_ex__` -> `__getstate__` -> `__setstate__`, and
+        # `__getstate__` hands over the SAME entry objects. A copy that came
+        # back with an empty registry would have a `purge` that no longer
+        # detaches even on the `tracked` route — the one route that worked
+        # before this change — so the omission would be a silent regression of
+        # existing behaviour rather than a missing new feature. Pinned by
+        # `test_a_copied_store_still_detaches_on_purge`.
+        #
+        # One consolidated pass over the restored mapping, after both the state
+        # restore and the reload loop, so there is a single place where the
+        # question "which entries does this store now hold?" is answered.
+        for restored_key, restored_entry in self._store.items():
+            if restored_entry is not None:
+                self._register_entry(restored_key, restored_entry)

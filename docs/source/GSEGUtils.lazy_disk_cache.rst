@@ -3,7 +3,7 @@ GSEGUtils.lazy_disk_cache
 
 
 .. automodule:: GSEGUtils.lazy_disk_cache
-   :members: LazyDiskCache, DiskBackedNDArray, DiskBackedStore
+   :members: LazyDiskCache, DiskBackedNDArray, DiskBackedStore, StoreKeyError, StoreContainmentError, StorePurgeRefusedError, StorePurgeForeignArtefactError, StorePurgeAliasedArtefactError, StorePurgeIncompleteError, is_valid_store_key, get_npy_path, get_meta_path, get_legacy_pickle_path
    :undoc-members:
    :exclude-members: logger
    :private-members:
