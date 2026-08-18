@@ -138,14 +138,60 @@ runs:
           exit 0
         fi
 
-        # Membership is containment against the space-padded allowlist string, so
-        # the API's return order cannot change the verdict.
+        # Membership is EXACT and entry-by-entry, over a real word list -- NOT
+        # containment against a concatenated string. The padded-containment test
+        # this replaces (`case " $ALLOW " in *" $changed "*`) accepted a SINGLE
+        # changed path whose own NAME contained a space, because
+        # " CHANGELOG.md .release-please-manifest.json " is literally a substring
+        # of " $ALLOW ". Git and the pull-request files API both permit a space in
+        # a path, so one pull request adding one such file emitted 'true' and
+        # greened every required context having executed nothing -- on a branch
+        # whose ruleset requires zero approving reviews. Found by review CR-02 and
+        # reproduced by execution, 2026-08-18.
+        #
+        # The allowlist is split ONCE, with `read -r -a` rather than an unquoted
+        # `for entry in $ALLOW`. Both word-split on IFS, but only the unquoted
+        # form ALSO performs pathname expansion, which would let a future entry
+        # containing a glob metacharacter be rewritten by whatever happens to sit
+        # in the runner's working directory. `read -r -a` cannot glob at all.
+        # The ALLOW assignment above deliberately keeps its exact shape (and this
+        # comment deliberately does not restate it in quotes, so it cannot be
+        # mistaken for the assignment):
+        # assertion A4 in .github/scripts/check_ci_config.py extracts the
+        # allowlist by matching that literal, so turning it into an array literal
+        # would make A4 unable to find it.
+        IFS=' ' read -r -a ALLOW_ENTRIES <<< "$ALLOW"
+
+        is_allowed() {
+          local candidate="$1" entry
+          # ALLOW is a non-empty literal above, and A4 fails the build whenever it
+          # set-differs from release-please's own configuration, so this array is
+          # never empty in a tree that passes `lint`.
+          for entry in "${ALLOW_ENTRIES[@]}"; do
+            [ "$candidate" = "$entry" ] && return 0
+          done
+          return 1
+        }
+
+        # Order independence is unchanged: this is a per-path loop with an early
+        # exit, so permuting the order the API returns files in cannot change the
+        # verdict.
         while IFS= read -r changed; do
           [ -z "$changed" ] && continue
-          case " $ALLOW " in
-            *" $changed "*) ;;
-            *) emit false "changed path is not a release artifact: $changed"; exit 0 ;;
+          # Rejected BEFORE the membership test and by name. No allowlist entry
+          # contains whitespace, so such a path could never be allowed anyway --
+          # but saying so explicitly keeps the reason line honest about what was
+          # actually seen. This is a KNOWN false, not a could-not-determine: it
+          # stays on plain `emit` and raises no warning annotation (D-A b).
+          case "$changed" in
+            *[[:space:]]*)
+              emit false "changed path contains whitespace, which the allowlist cannot represent: $changed"
+              exit 0 ;;
           esac
+          if ! is_allowed "$changed"; then
+            emit false "changed path is not a release artifact: $changed"
+            exit 0
+          fi
         done <<< "$FILES"
 
         emit true "all $COUNT changed path(s) are release artifacts"
