@@ -332,3 +332,5 @@
 
 * Changed permissions structure ([b4bfec9](https://github.com/gseg-ethz/GSEGUtils/commit/b4bfec90e363ca570f82015e2a70bba8209164aa))
 * Updated release-please workflow to new token ([f916a36](https://github.com/gseg-ethz/GSEGUtils/commit/f916a36faa56aae4ee6915f52ee4f5216a65a4b7))
+
+<!-- CI-13 fast-path probe, cycle 1 — transient. This branch is never merged. -->
