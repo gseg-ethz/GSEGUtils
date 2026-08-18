@@ -1,3 +1,4 @@
+import importlib.metadata
 import os
 import sys
 
@@ -18,9 +19,21 @@ project = "GSEGUtils"
 copyright = "2024, Nicholas Meyer"
 author = "Nicholas Meyer"
 
-# Automatic version updates via release-please
-version = "0.6.0"  # x-release-please-version
-release = "0.6.0"  # x-release-please-version
+# The documented version is read from the INSTALLED distribution metadata rather
+# than from a literal that the release tooling rewrites in place
+# (DESIGN-DECISIONS entry 87). The extra-release-file declaration is gone from
+# release-please-config.json, so a generated release pull request now touches no
+# documentation input at all — which is what lets every required status check
+# short-circuit on release-artifact-only content, and it retires the
+# version-stamping drift bug class rather than re-checking it.
+#
+# Display consequence, accepted rather than discovered later: on a non-release
+# build there is no released number to show, so this renders whatever
+# setuptools_scm derived for the working tree. This repository sets
+# version_scheme = "post-release" and local_scheme = "no-local-version", so the
+# derived string carries no local-version suffix.
+version = importlib.metadata.version("GSEGUtils")
+release = version
 
 
 extensions = [

@@ -49,14 +49,29 @@ runs:
         set -uo pipefail
 
         # D-05 allowlist -- MEASURED, not assumed. `gh pr diff 34 --repo
-        # gseg-ethz/GSEGUtils --name-only` on 2026-07-29 returned exactly these
-        # three paths: the changelog, the release-please manifest, and the docs
-        # configuration module that release-please stamps via `extra-files`.
-        # This is the ONLY place the allowlist is written down. Assertion A4 in
-        # .github/scripts/check_ci_config.py pins it to release-please-config.json,
-        # so a fourth `extra-files` entry fails the build with a named reason
-        # instead of silently disabling this fast path.
-        ALLOW='CHANGELOG.md .release-please-manifest.json docs/source/conf.py'
+        # gseg-ethz/GSEGUtils --name-only` on 2026-07-29 returned exactly three
+        # paths: the changelog, the release-please manifest, and the docs
+        # configuration module that release-please stamped through its
+        # extra-release-file declaration.
+        #
+        # The third entry LEFT on 2026-08-18 (DESIGN-DECISIONS entry 87): the
+        # docs configuration module reads its version from the installed
+        # distribution metadata now, the extra-release-file declaration is
+        # deleted, and a generated release pull request therefore touches no
+        # documentation input. It is no longer a release artefact, so it is no
+        # longer on this list.
+        #
+        # This is the ONLY place the allowlist is written down, and it is
+        # RECONCILED rather than hand-maintained: assertion A4 in
+        # .github/scripts/check_ci_config.py DERIVES the expected set from
+        # release-please-config.json -- the changelog path plus every declared
+        # extra release file, plus the manifest path -- and fails the build with
+        # a named reason on any divergence. With no extra release files declared
+        # that derived set has exactly TWO members, which is what this string
+        # must set-equal. Re-adding an extra release file re-expands both sides
+        # together or the build goes red; it never silently disables this fast
+        # path.
+        ALLOW='CHANGELOG.md .release-please-manifest.json'
 
         # Deterministic sink for the changed-path call's standard error (D-A a).
         # A fixed path rather than `mktemp` on purpose: mktemp would be a second
