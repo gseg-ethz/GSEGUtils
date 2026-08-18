@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1](https://github.com/gseg-ethz/GSEGUtils/compare/v0.6.0...v0.6.1) (2026-08-18)
+
+
+### 🤖 Continuous Integration
+
+* **16-09:** short-circuit Lint and Docs on release-artifact-only changes ([69e89a8](https://github.com/gseg-ethz/GSEGUtils/commit/69e89a80eddb65c8d59d276fc6eecfbb271fa814))
+* **16-09:** stop stamping the docs version; the fast-path allowlist shrinks to two ([87bedeb](https://github.com/gseg-ethz/GSEGUtils/commit/87bedebedbd65df95d357d52b2ad01c18be8904f))
+* **16-11:** close a required-check bypass, fix docs version ([6f7e9be](https://github.com/gseg-ethz/GSEGUtils/commit/6f7e9be2b0cff15fde2108e3941c08a2469fb8c2))
+
 ## [0.6.0](https://github.com/gseg-ethz/GSEGUtils/compare/v0.5.3...v0.6.0) (2026-08-17)
 
 
