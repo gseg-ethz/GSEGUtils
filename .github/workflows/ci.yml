@@ -33,8 +33,36 @@ name: CI
 #     (DESIGN-DECISIONS entry 35 / Phase 12 D-05).
 #   - The lint job holds a READ content scope only (CI-16). Assertion A7 fails
 #     the build the moment a write scope is added back.
+#   - ALL THREE required-context jobs now carry the release-artifact fast path
+#     (CI-13 clause (a), DESIGN-DECISIONS entry 87). Each resolves the
+#     `classify-changes` composite immediately after its own checkout and gates
+#     EVERY subsequent step on the result, so the COST paragraph recorded on the
+#     `tests` job below applies verbatim to `lint` and `docs` as well — it is one
+#     property of one mechanism, not three separate ones.
+#   - THE COST THIS WIDENING ACCEPTS, stated here rather than discovered later:
+#     on a release-artifact-only pull request the whole-tree pre-commit hooks and
+#     the four read-only gate scripts no longer run, so generated content that
+#     would have failed them lands on the protected branch and reddens the NEXT
+#     ordinary pull request's whole-tree run instead. That failure is loud,
+#     cheap, and lands before no publish. It is accepted deliberately. The
+#     counterweight that makes it safe: the two assertions that actually stand
+#     between a head-ref edit and the protected branch — A5 (no job-level
+#     condition on a required context) and A6 (no conditional dependency) — are
+#     ALSO evaluated un-skippably by `integrity.yml`, which fires from the BASE
+#     repository's side on every pull request into the protected branch, checks
+#     out the base ref with no `ref:` input, and runs `assert_no_skip.py` against
+#     a hybrid tree. Widening the fast path here does not weaken either of them.
+#     (The trigger keyword is deliberately not spelled out in this file:
+#     assertion A2 greps for it by name and excepts exactly one path, which is
+#     not this one.)
+#   - NO `concurrency:` key belongs in this file, at workflow level or on any
+#     job. CI-13 clause (b) is discharged BY clause (a) above — with nothing
+#     expensive left to re-run there is nothing worth cancelling — and a
+#     cancelled run does not satisfy a required status check anyway
+#     (DESIGN-DECISIONS entries 88 and 49).
 #
-# Recorded 2026-07-29, Phase 13 plan 13-04.
+# Recorded 2026-07-29, Phase 13 plan 13-04. Fast path widened from the test
+# suite alone to all three required contexts on 2026-08-18, Phase 16 plan 16-08.
 
 on:
   pull_request:
@@ -50,6 +78,7 @@ jobs:
 
     permissions:
       contents: read
+      pull-requests: read   # the `classify` step below reads the PR file list (CI-11 D-05/D-07)
 
     steps:
       - name: Checkout
@@ -63,27 +92,44 @@ jobs:
           # as a side effect of the least-privilege narrowing.
           fetch-depth: 0   # setuptools_scm reads tags
 
-      - uses: ./.github/actions/setup-python-deps
+      # CI-13's release-artifact fast path, the same shape `tests` has carried
+      # since Phase 13 and for the same reasons. MUST follow the checkout: a
+      # local composite is resolved from the runner filesystem, so it does not
+      # exist until the repository is on disk. The guard goes on STEPS, never on
+      # the job — a job-level condition would green this required context having
+      # executed nothing (A5).
+      - id: classify
+        uses: ./.github/actions/classify-changes
+
+      # The environment install is gated too, not just the terminal steps: per
+      # Phase 13 D-06 the install is the bulk of the wall clock here.
+      - if: steps.classify.outputs.release-artifacts-only != 'true'
+        uses: ./.github/actions/setup-python-deps
 
       - name: Run pre-commit
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         shell: bash
         run: |
           python -m pip install pre-commit
           pre-commit run --all-files
 
       - name: Check publish gate (PYPI-01)
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         shell: bash
         run: python .github/scripts/check_publish_gate.py
 
       - name: Check CI config (CI-12)
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         shell: bash
         run: python .github/scripts/check_ci_config.py
 
       - name: Run .github/scripts unit tests (CI-12)
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         shell: bash
         run: pytest .github/scripts/ -q
 
       - name: Check for unseeded default_rng() (TEST-08 D-08)
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         shell: bash
         run: |
           # NPY002 covers np.random.{rand,choice,randint,...} but NOT default_rng() without a seed argument.
@@ -115,7 +161,7 @@ jobs:
       # unconditional status-shim job Phase 12 D-10 rejected, and the
       # distinction is real but narrow — this skip is conditional on MEASURED
       # content, it fails safe in five independent ways (see the composite), and
-      # any path outside the three-file allowlist runs everything. The guard is
+      # any path outside the two-entry allowlist runs everything. The guard is
       # on STEPS, never on the job, so the conclusion is a genuine `success`
       # rather than a `skipped` that merely counts as satisfying (A5).
       - id: classify
@@ -162,17 +208,39 @@ jobs:
   docs:
     name: Docs (sphinx -W)
     runs-on: ubuntu-latest
+
+    # This block is a NARROWING, not a grant: the job declared no permissions at
+    # all until 2026-08-18 and therefore inherited the repository default. It now
+    # holds exactly what it needs — a read content scope, and the read scope the
+    # changed-path call below requires.
+    permissions:
+      contents: read
+      pull-requests: read   # the `classify` step below reads the PR file list (CI-11 D-05/D-07)
+
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      # CI-13's release-artifact fast path. MUST follow the checkout, same reason
+      # as in `lint` and `tests` above. This job is the one entry 36 kept off the
+      # fast path until now: it was required on the protected branch precisely
+      # BECAUSE the release tooling stamped a version into a documentation input,
+      # so a release pull request did modify what this check covers. Entry 87
+      # deleted that stamping, so the premise is gone by construction and entry 36
+      # needs no amendment — its rationale simply stops applying to a case that no
+      # longer occurs.
+      - id: classify
+        uses: ./.github/actions/classify-changes
 
       # This job builds its OWN environment on purpose. The Sphinx build below
       # used to be the last-but-one step of `tests`, where `.[dev]` had already
       # been installed by the shared composite — so extracting it is not a
       # two-line cut-and-paste. Checkout + composite + the `doc` extra are all
       # required here.
-      - uses: ./.github/actions/setup-python-deps
+      - if: steps.classify.outputs.release-artifacts-only != 'true'
+        uses: ./.github/actions/setup-python-deps
 
       - name: Build docs (warnings as errors)
+        if: steps.classify.outputs.release-artifacts-only != 'true'
         working-directory: .
         run: |
           pip install .[doc]
