@@ -219,6 +219,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          # `lint` has carried this input for as long as it has run setuptools_scm.
+          # This job needs it for the same reason as of 2026-08-18, when conf.py
+          # stopped reading a release-stamped literal and started reading the
+          # INSTALLED distribution metadata — which `pip install .[doc]` below
+          # derives with setuptools_scm, which reads TAGS. Without it, checkout@v5
+          # defaults to a depth-1 tagless clone, the derivation falls back to
+          # `0.0.post1`, and this required context validates a documentation set
+          # whose version is wrong while reporting success, because `-W` covers
+          # Sphinx warnings and setuptools_scm's shallow complaint is a Python
+          # UserWarning. Review finding CR-01, reproduced end-to-end rather than
+          # inferred. The `fetch-depth` line moved into `docs` here because the
+          # setuptools_scm dependency moved into `docs` and the line did not
+          # follow it.
+          fetch-depth: 0   # setuptools_scm reads tags
 
       # CI-13's release-artifact fast path. MUST follow the checkout, same reason
       # as in `lint` and `tests` above. This job is the one entry 36 kept off the
@@ -244,4 +259,30 @@ jobs:
         working-directory: .
         run: |
           pip install .[doc]
+
+          # Assert the derivation instead of trusting the green (CR-01). The
+          # `fetch-depth: 0` above is the fix; this is the check that would have
+          # CAUGHT it, and it is here because nothing else can: `-W` promotes
+          # SPHINX warnings, and setuptools_scm's "is shallow and may cause
+          # errors" is a Python UserWarning outside that surface entirely, so a
+          # degraded version builds clean and reports success. The distribution
+          # name is read from pyproject.toml rather than hard-coded so this block
+          # stays identical in both repositories.
+          python - <<'PY'
+          import importlib.metadata
+          import pathlib
+          import tomllib
+
+          name = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["name"]
+          version = importlib.metadata.version(name)
+          print(f"docs version: {name} {version}")
+          if version.startswith("0.0."):
+              print(
+                  f"::error::setuptools_scm derived {version!r} for {name}, which is its "
+                  "TAGLESS FALLBACK rather than a real version — the checkout lost its tags. "
+                  "The documentation would render the wrong version and still pass -W."
+              )
+              raise SystemExit(1)
+          PY
+
           sphinx-build -W --keep-going -b html docs/source docs/_build/html
