@@ -335,3 +335,4 @@
 
 <!-- CI-13 fast-path probe, cycle 1 — transient. This branch is never merged. -->
 <!-- CI-13 fast-path probe, cycle 2 — same pull request, new head. -->
+<!-- CI-13 fast-path probe, cycle 3 — negative control at the boundary. -->

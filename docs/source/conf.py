@@ -32,6 +32,7 @@ author = "Nicholas Meyer"
 # setuptools_scm derived for the working tree. This repository sets
 # version_scheme = "post-release" and local_scheme = "no-local-version", so the
 # derived string carries no local-version suffix.
+# CI-13 probe cycle 3 (transient): this module is no longer a release artefact.
 version = importlib.metadata.version("GSEGUtils")
 release = version
 
