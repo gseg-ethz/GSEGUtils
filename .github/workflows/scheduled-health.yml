@@ -110,6 +110,16 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/rulesets/${id}?includes_parents=false" > "$2"
           }
 
+          # The trailing `|| STATUS=$?` is not decoration. Under the inherited
+          # errexit an UNGUARDED `REPORT=$(...)` aborts this step the moment the
+          # substitution fails — which is every failing run, the only runs this
+          # job exists for. The report would then never be written to
+          # ${GITHUB_OUTPUT} and the alarm issue below would read "(no report
+          # captured)" on every alarm it ever raised. Putting the assignment in
+          # an `||` list suppresses errexit for it, and `$?` on the right-hand
+          # side is the substitution's own status, so the comparator's exit code
+          # survives rather than being flattened to 1.
+          STATUS=0
           REPORT=$(
             {
               read_live 'protect-main' "${RUNNER_TEMP}/live-main.json" \
@@ -118,8 +128,7 @@ jobs:
                   "protect-main:${RUNNER_TEMP}/live-main.json:.github/rulesets/main.json" \
                   "protect-develop-gsd:${RUNNER_TEMP}/live-develop.json:.github/rulesets/develop.json"
             } 2>&1
-          )
-          STATUS=$?
+          ) || STATUS=$?
 
           {
             echo 'report<<__EOF__'
