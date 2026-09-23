@@ -85,6 +85,14 @@ WORKFLOW_GLOBS: tuple[str, ...] = ("*.yml", "*.yaml")
 # :func:`check_shared_assertion_coverage`.
 SHARED_ASSERTION_GLOB = "*.yml"
 
+# The counts come from the two sets `assess` already builds, so a vacuous pass
+# (zero required contexts, or an empty producible set) reads as zeros instead
+# of as silence.
+SUCCESS_LINE = (
+    "assert_no_skip: OK — {required} required context(s), all produced by the "
+    "{producible} job name(s) the head declares"
+)
+
 
 def head_workflow_paths(root: pathlib.Path) -> list[pathlib.Path]:
     """Return every head workflow file in the hybrid tree, sorted.
@@ -254,7 +262,7 @@ def payloads_requiring(root: pathlib.Path, context: str) -> list[str]:
     )
 
 
-def check_unproduced_contexts(root: pathlib.Path, producible: set[str]) -> list[str]:
+def check_unproduced_contexts(root: pathlib.Path, producible: set[str], required: set[str]) -> list[str]:
     """Rule 3 -- flag a required context no job in the head's workflow set declares.
 
     Parameters
@@ -263,6 +271,9 @@ def check_unproduced_contexts(root: pathlib.Path, producible: set[str]) -> list[
         The hybrid tree root.
     producible
         The check-run names the head's workflow set can produce.
+    required
+        The required status-check contexts read from the base's committed
+        payloads.
 
     Returns
     -------
@@ -270,7 +281,7 @@ def check_unproduced_contexts(root: pathlib.Path, producible: set[str]) -> list[
         One entry per required context nothing in the head produces.
     """
     violations: list[str] = []
-    for context in sorted(check_ci_config.committed_required_contexts(root)):
+    for context in sorted(required):
         if context in producible:
             continue
         origin = ", ".join(f"`{name}`" for name in payloads_requiring(root, context)) or "<no payload>"
@@ -284,8 +295,8 @@ def check_unproduced_contexts(root: pathlib.Path, producible: set[str]) -> list[
     return violations
 
 
-def run_all(root: pathlib.Path) -> list[str]:
-    """Run all three rules against a hybrid tree and return the accumulated violations.
+def assess(root: pathlib.Path) -> tuple[list[str], int, int]:
+    """Run all three rules against a hybrid tree.
 
     Parameters
     ----------
@@ -311,14 +322,20 @@ def run_all(root: pathlib.Path) -> list[str]:
 
     Returns
     -------
-    list of str
-        Every violation found, in rule order.
+    tuple
+        The accumulated violations in rule order, the number of required
+        contexts read from the base's committed payloads, and the number of
+        job names the head's workflow set can produce. The required-context
+        count is `0` on the unparseable early-return path, unused there
+        because that path's violations are already non-empty.
     """
     producible, read_violations, unparseable = head_job_names(root)
     coverage = check_shared_assertion_coverage(root)
 
     if unparseable:
-        return [*read_violations, *coverage]
+        return [*read_violations, *coverage], 0, len(producible)
+
+    required = check_ci_config.committed_required_contexts(root)
 
     conditionality = [
         # Rules 1 and 2, INVOKED from the self-test. Never reimplemented here --
@@ -328,8 +345,30 @@ def run_all(root: pathlib.Path) -> list[str]:
         *check_ci_config.check_conditional_dependencies(root),
     ]
     if read_violations:
-        return [*conditionality, *read_violations, *coverage]
-    return [*conditionality, *coverage, *check_unproduced_contexts(root, producible)]
+        return [*conditionality, *read_violations, *coverage], len(required), len(producible)
+    return (
+        [*conditionality, *coverage, *check_unproduced_contexts(root, producible, required)],
+        len(required),
+        len(producible),
+    )
+
+
+def run_all(root: pathlib.Path) -> list[str]:
+    """Run all three rules against a hybrid tree and return the accumulated violations.
+
+    Parameters
+    ----------
+    root
+        The hybrid tree root: base-side ``.github/rulesets/``, head-side
+        ``.github/workflows/``.
+
+    Returns
+    -------
+    list of str
+        Every violation found, in rule order. See :func:`assess` for the full
+        three-rule contract and the two suppression rules.
+    """
+    return assess(root)[0]
 
 
 def main(argv: list[str]) -> int:
@@ -357,11 +396,12 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    violations = run_all(root)
+    violations, required_count, producible_count = assess(root)
     if violations:
         for violation in violations:
             print(f"::error::{violation}")
         return 1
+    print(SUCCESS_LINE.format(required=required_count, producible=producible_count))
     return 0
 
 
