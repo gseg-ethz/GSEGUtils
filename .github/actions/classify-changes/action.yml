@@ -44,8 +44,7 @@ runs:
       run: |
         # Deliberately NO errexit here, only nounset + pipefail: an abort would
         # FAIL the job, but the fail-safe direction for a fast path is "run
-        # everything", not "break the build". Same shell options, chosen for the
-        # same reason, as canary.yml's detection step.
+        # everything", not "break the build".
         set -uo pipefail
 
         # D-05 allowlist -- MEASURED, not assumed. `gh pr diff 34 --repo

@@ -21,16 +21,14 @@ name: Scheduled Health
 # this workflow publishes nothing, so granting it would widen the secret
 # surface for no benefit.
 #
-# DELIBERATE DEPARTURE FROM canary.yml, which is otherwise this file's
-# template. The canary gates its issue step on a detection flag, leaves the run
-# GREEN, and does not deduplicate. This workflow FAILS the run as well as
-# opening the issue, and it deduplicates against the repository's own open
-# issues. Both differences follow from the same fact: drift is a PERSISTENT
-# condition — a bypass actor stays added until somebody removes it — checked
-# NIGHTLY rather than weekly. A green run would be a false all-clear on a
-# security floor, and an undeduped alarm would be one new issue every night
-# until someone acted. Phase 13 D-08 / D-10, DESIGN-DECISIONS entry 34.
-# Recorded 2026-07-29, Phase 13 plan 13-05.
+# This workflow FAILS the run as well as opening an issue, and it deduplicates
+# against the repository's own open issues — not one or the other. Both follow
+# from the same fact: drift is a PERSISTENT condition — a bypass actor stays
+# added until somebody removes it — and it is checked NIGHTLY. A run that
+# recorded the finding and stayed green would be a false all-clear on a
+# security floor, and an alarm that did not deduplicate would file a new issue
+# every night until someone acted. Phase 13 D-08 / D-10, DESIGN-DECISIONS
+# entry 34. Recorded 2026-07-29, Phase 13 plan 13-05.
 #
 # This file is byte-identical across both repos by design (D-04): ruleset ids
 # are resolved by NAME at runtime, the repository comes from the runner
@@ -40,9 +38,9 @@ name: Scheduled Health
 on:
   schedule:
     # Nightly 06:00 UTC. Deliberately offset on the WALL CLOCK from the CI
-    # workflow's 05:00 nightly and from the canary's Monday 08:00 (and, in the
-    # twin repo, from the monthly GPU image refresh, also 08:00), so no two
-    # scheduled workflows in this repository ever share a slot.
+    # workflow's 05:00 nightly (and, in the twin repo, from the monthly GPU
+    # image refresh's reserved 08:00-on-the-1st slot), so no two scheduled
+    # workflows in this repository ever share a slot.
     - cron: '0 6 * * *'
   # NOT garnish. Scheduled triggers register ONLY from the default branch, so
   # this file produces no scheduled run at all until it reaches `main` — under

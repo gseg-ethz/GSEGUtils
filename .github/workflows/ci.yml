@@ -69,7 +69,7 @@ on:
   push:
     branches: [develop/gsd]
   schedule:
-    - cron: '0 5 * * *'   # nightly 05:00 UTC — offset from the weekly canary (Mon 08:00) so the two never share a slot
+    - cron: '0 5 * * *'   # nightly 05:00 UTC — offset on the wall clock from scheduled-health's daily 06:00 so the two never share a slot
 
 jobs:
   lint:
