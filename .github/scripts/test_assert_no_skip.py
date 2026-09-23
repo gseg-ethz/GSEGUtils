@@ -26,6 +26,7 @@ numpy-convention docstring by design rather than by accident.
 
 import json
 import pathlib
+import re
 import sys
 
 import pytest
@@ -185,6 +186,10 @@ def test_the_exit_status_is_zero_only_when_there_are_no_violations(
     captured = capsys.readouterr()
     assert status == 0
     assert "::error::" not in captured.out
+    assert (
+        captured.out.strip()
+        == "assert_no_skip: OK — 2 required context(s), all produced by the 2 job name(s) the head declares"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -423,6 +428,36 @@ def test_the_exit_status_is_non_zero_when_any_violation_is_found(
     captured = capsys.readouterr()
     assert status == 1
     assert captured.out.count("::error::") == 1
+    assert "assert_no_skip: OK" not in captured.out
+
+
+def test_the_success_line_reports_non_zero_counts_on_a_healthy_tree(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The success line's two counts are both non-zero (and both 2) on the default tree."""
+    root = build_hybrid_tree(tmp_path, {"ci.yml": CLEAN_CI_YML})
+    status = ans.main([str(root)])
+    captured = capsys.readouterr()
+    assert status == 0
+    match = re.search(r"(\d+) required context\(s\).*?(\d+) job name\(s\)", captured.out)
+    assert match is not None, captured.out
+    required, producible = int(match.group(1)), int(match.group(2))
+    assert required > 0
+    assert producible > 0
+    assert required == 2
+    assert producible == 2
+
+
+def test_the_success_line_reports_zero_required_contexts_on_a_vacuous_pass(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A tree with no required contexts at all still prints a real success line, showing zeros."""
+    root = build_hybrid_tree(tmp_path, {"ci.yml": CLEAN_CI_YML}, contexts=())
+    status = ans.main([str(root)])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert "0 required context(s)" in captured.out
+    assert "2 job name(s)" in captured.out
 
 
 def test_violations_accumulate_rather_than_exiting_on_the_first(tmp_path: pathlib.Path) -> None:
